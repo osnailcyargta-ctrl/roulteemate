@@ -61,6 +61,8 @@ export interface HudSnapshot {
   busy: boolean;
   difficulty: Difficulty;
   hasGame: boolean;
+  /** The physical items on the table right now (shop phase). */
+  shopOffers: ShopOfferView[];
 }
 
 export type HudEvent =
@@ -72,39 +74,40 @@ export type HudEvent =
   | { type: "dmgPop"; side: Side; text: string; tone?: "hit" | "blank" | "reflect" }
   | { type: "screenSplat" }
   | { type: "skillFlash"; id: SkillId }
-  | { type: "reloadStep"; loaded: number; total: number };
+  | { type: "reloadStep"; loaded: number; total: number }
+  | { type: "shopTip"; id: SkillId | "bell" | null; xPct: number; yPct: number };
 
 const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.95 };
 
 /* ---------------- SHOP ---------------- */
 
+/** One physical item lying on the table during a shop break. */
 export interface ShopOffer {
   id: SkillId;
   price: number;
-  disabled: boolean;
-  reason: string | null;
   legendary: boolean; // INSANE-only legends
+  sold: boolean;
 }
 
-/** Trial prices. The two legends are only stocked on INSANE. */
+export interface ShopOfferView extends ShopOffer {
+  disabled: boolean;
+  reason: string | null;
+}
+
+/** Trial prices. Voodoo is NOT for sale — a reflection is too easy to buy.
+ *  The two legends are only stocked on INSANE. */
 const SHOP_PRICES: Partial<Record<SkillId, number>> = {
   peek: 120,
   eject: 150,
   coffee: 130,
   reroll: 160,
   cuffs: 220,
-  voodoo: 380,
   phoenix: 650,
   thirdEye: 550,
 };
 const LEGENDARY: SkillId[] = ["phoenix", "thirdEye"];
 const START_MONEY = 200;
 export const MAX_SKILLS = 4;
-
-/** Shop catalog metadata — lets the UI render offers purely from snapshots. */
-export const SHOP_META: { id: SkillId; price: number; legendary: boolean }[] = (
-  Object.keys(SHOP_PRICES) as SkillId[]
-).map((id) => ({ id, price: SHOP_PRICES[id]!, legendary: LEGENDARY.includes(id) }));
 
 function shuffled<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -124,6 +127,9 @@ export class GameEngine {
   busy = false;
   /** The player's cash for the current match. */
   money = 0;
+  /** The 3 random items currently lying on the table (shop breaks only). */
+  private shopOffers: ShopOffer[] = [];
+  private hoverId: SkillId | "bell" | null = null;
   /** Trial skills that were spent and are now fading away (2 turns). */
   private ghosts: { id: SkillId; turns: number }[] = [];
   private shopResolve: (() => void) | null = null;
@@ -140,7 +146,9 @@ export class GameEngine {
     container.addEventListener("mousemove", (e) => {
       const r = container.getBoundingClientRect();
       this.scene.setLook(((e.clientX - r.left) / r.width - 0.5) * 2, ((e.clientY - r.top) / r.height - 0.5) * 2);
+      this.onShopPointerMove(e);
     });
+    container.addEventListener("click", (e) => this.onShopClick(e));
     this.running = true;
     const loop = (now: number) => {
       if (!this.running) return;
@@ -202,7 +210,26 @@ export class GameEngine {
       busy: this.busy,
       difficulty: st.difficulty,
       hasGame: st.round > 0 || st.phase !== "menu",
+      shopOffers: this.shopOffers.map((o) => this.offerView(o)),
     };
+  }
+
+  /** Live buyability of one offer (slots & cash can change any moment). */
+  private offerView(o: ShopOffer): ShopOfferView {
+    const st = this.logic.state;
+    let disabled = false;
+    let reason: string | null = null;
+    if (o.sold) {
+      reason = "SOLD";
+    } else if (this.activeSkillCount() >= MAX_SKILLS) {
+      disabled = true;
+      reason = `SLOTS FULL (${MAX_SKILLS})`;
+    } else if (this.money < o.price) {
+      disabled = true;
+      reason = "TOO POOR";
+    }
+    void st;
+    return { ...o, disabled, reason };
   }
 
   notify() {
@@ -258,7 +285,7 @@ export class GameEngine {
     this.logic = new RouletteLogic(diff);
     this.ai = new EnemyAI(this.logic, SMART[diff]);
     this.notify();
-    this.toast(`Starting cash: $${START_MONEY} — the SHOP opens between rounds.`, "info");
+    this.toast(`Starting cash: $${START_MONEY} — the table stocks goods between rounds.`, "info");
 
     await sleep(300);
     await this.diceIntro();
@@ -273,11 +300,14 @@ export class GameEngine {
     this.scene.setTimeScale(1);
     this.scene.gunAim(null);
     this.scene.enemySetMood("idle1");
+    this.scene.hideShopItems();
     this.logic = new RouletteLogic(this.logic.state.difficulty);
     this.logic.setPhase("menu");
     this.busy = false;
     this.money = 0;
     this.ghosts = [];
+    this.shopOffers = [];
+    this.setShopHover(null);
     this.shopResolve = null;
     this.tStart = 0;
     this.tEnd = 0;
@@ -908,36 +938,6 @@ export class GameEngine {
 
   /* ---------------- shop ---------------- */
 
-  /** What the shop stocks this visit. Legends only on INSANE. */
-  shopCatalog(): ShopOffer[] {
-    const st = this.logic.state;
-    const activeCount = ALL_SKILL_IDS.filter((id) => {
-      const sk = st.skills[id];
-      return sk.owned && !(sk.trial && sk.charges <= 0);
-    }).length;
-    return ALL_SKILL_IDS.filter((id) => {
-      if (!(id in SHOP_PRICES)) return false;
-      if (LEGENDARY.includes(id) && st.difficulty !== "insane") return false;
-      return true;
-    }).map((id) => {
-      const sk = st.skills[id];
-      const price = SHOP_PRICES[id]!;
-      let disabled = false;
-      let reason: string | null = null;
-      if (sk.owned) {
-        disabled = true;
-        reason = sk.trial && sk.charges <= 0 ? "FADING AWAY" : "ALREADY HELD";
-      } else if (activeCount >= MAX_SKILLS) {
-        disabled = true;
-        reason = `SLOTS FULL (${MAX_SKILLS})`;
-      } else if (this.money < price) {
-        disabled = true;
-        reason = "TOO POOR";
-      }
-      return { id, price, disabled, reason, legendary: LEGENDARY.includes(id) };
-    });
-  }
-
   /** How many skill slots are in active use (ghosts don't count). */
   activeSkillCount() {
     const st = this.logic.state;
@@ -947,15 +947,35 @@ export class GameEngine {
     }).length;
   }
 
-  /** Open the shop between rounds and wait for the player to leave. */
+  /** Roll the 3 random items lying on the table this visit.
+   *  Legends only on INSANE, voodoo is never sold, owned skills restocked out. */
+  private rollOffers(): ShopOffer[] {
+    const st = this.logic.state;
+    const pool = (Object.keys(SHOP_PRICES) as SkillId[]).filter((id) => {
+      if (LEGENDARY.includes(id) && st.difficulty !== "insane") return false;
+      return !st.skills[id].owned;
+    });
+    return shuffled(pool)
+      .slice(0, 3)
+      .map((id) => ({ id, price: SHOP_PRICES[id]!, legendary: LEGENDARY.includes(id), sold: false }));
+  }
+
+  /** Open the shop between rounds and wait for the bell to be rung. */
   private async openShop() {
     const st = this.logic.state;
     this.money += 75; // survival bonus
     this.toast("ROUND SURVIVED: +$75", "good");
+    this.shopOffers = this.rollOffers();
     st.phase = "shop";
     this.busy = true;
     gameAudio.shopOpen();
     this.scene.enemySay([pick("shop")], 2.6);
+    this.scene.showShopItems(this.shopOffers.filter((o) => !o.sold));
+    this.onEvent({
+      type: "banner",
+      title: "SHOP BREAK",
+      sub: "Hover the items on the table — click to buy. Ring the bell to reload.",
+    });
     this.notify();
     await new Promise<void>((res) => {
       this.shopResolve = res;
@@ -973,21 +993,96 @@ export class GameEngine {
 
   buyTrial(id: SkillId) {
     if (this.logic.state.phase !== "shop") return;
-    const offer = this.shopCatalog().find((o) => o.id === id);
-    if (!offer || offer.disabled) return;
+    const offer = this.shopOffers.find((o) => o.id === id);
+    if (!offer || offer.sold) return;
+    const view = this.offerView(offer);
+    if (view.disabled) {
+      gameAudio.dryFire();
+      const poor = view.reason === "TOO POOR";
+      this.toast(
+        poor ? `Not enough cash — $${offer.price} needed.` : "Hands full — 4 skills max!",
+        "bad",
+      );
+      this.scene.enemySay([pick(poor ? "shopPoor" : "shopFull")], 2.4);
+      return;
+    }
     this.money -= offer.price;
+    offer.sold = true;
     this.logic.grantTrial("player", id);
     gameAudio.buy();
+    this.scene.sellShopItem(id);
+    this.setShopHover(null);
     this.onEvent({ type: "skillGet", id });
     this.toast(`TRIAL ${SKILL_META[id].name} bought — one use, then it fades!`, "good");
+    this.scene.enemySay([pick("shopBuy")], 2.2);
     this.notify();
   }
 
   closeShop() {
     if (this.logic.state.phase !== "shop") return;
     gameAudio.click();
+    this.scene.hideShopItems();
+    this.setShopHover(null);
     const r = this.shopResolve;
     this.shopResolve = null;
     r?.();
+  }
+
+  /** Ring the little bell: end the break, reload, fight. */
+  private async ringBell() {
+    if (this.logic.state.phase !== "shop") return;
+    gameAudio.scanDing();
+    this.scene.ringBellAnim();
+    this.scene.enemySay([pick("bellRing")], 2);
+    await sleep(750);
+    this.closeShop();
+  }
+
+  /* ---------------- shop pointer (hover + click on the 3D table) ---------------- */
+
+  private shopNdc(e: MouseEvent): THREE.Vector2 | null {
+    const c = this.container;
+    if (!c) return null;
+    const r = c.getBoundingClientRect();
+    return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  }
+
+  private onShopPointerMove(e: MouseEvent) {
+    if (this.logic.state.phase !== "shop") {
+      if (this.hoverId !== null) this.setShopHover(null);
+      if (this.container) this.container.style.cursor = "default";
+      return;
+    }
+    const ndc = this.shopNdc(e);
+    if (!ndc) return;
+    const hit = this.scene.pickShop(ndc);
+    const id = hit ? (hit.type === "bell" ? "bell" : hit.id) : null;
+    if (id !== this.hoverId) {
+      this.setShopHover(id);
+      if (id) gameAudio.hover();
+    }
+    if (this.container) this.container.style.cursor = id ? "pointer" : "default";
+  }
+
+  private onShopClick(e: MouseEvent) {
+    if (this.logic.state.phase !== "shop") return;
+    const ndc = this.shopNdc(e);
+    if (!ndc) return;
+    const hit = this.scene.pickShop(ndc);
+    if (!hit) return;
+    if (hit.type === "bell") void this.ringBell();
+    else this.buyTrial(hit.id);
+  }
+
+  /** Hover changed: tip the 3D item and anchor the HTML tooltip above it. */
+  setShopHover(id: SkillId | "bell" | null) {
+    this.hoverId = id;
+    this.scene.setShopHover(id);
+    if (id === null) {
+      this.onEvent({ type: "shopTip", id: null, xPct: 0, yPct: 0 });
+      return;
+    }
+    const anchor = this.scene.shopAnchor(id);
+    if (anchor) this.onEvent({ type: "shopTip", id, xPct: anchor.xPct, yPct: anchor.yPct });
   }
 }

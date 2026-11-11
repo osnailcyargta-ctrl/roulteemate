@@ -93,6 +93,24 @@ export const TAUNTS = {
     "Everything's for sale. Even luck.",
     "Cash on the table or get out.",
   ],
+  shopBuy: [
+    "Pleasure doing business.",
+    "Money well spent. Maybe.",
+    "Yours. One use, no refunds.",
+  ],
+  shopPoor: [
+    "No cash, no charms, kid.",
+    "Come back when you're richer.",
+    "That's not enough. Ha!",
+  ],
+  shopFull: [
+    "Four skills is all your hands hold.",
+    "Greedy. You can't carry more.",
+  ],
+  bellRing: [
+    "As you wish. Load 'em up!",
+    "Back to the game, then.",
+  ],
   aiForget: [
     "Wait... how many was it?",
     "Tch. Lost count.",

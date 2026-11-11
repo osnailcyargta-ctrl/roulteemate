@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { GameEngine, MAX_SKILLS, SHOP_META, type HudEvent, type HudSnapshot } from "@/game/engine";
+import { GameEngine, type HudEvent, type HudSnapshot } from "@/game/engine";
 import { SKILL_META, dataURL, texBulletPip, texHeart, texSkillIcon, texSplat, texVoodooMask, type SkillId } from "@/game/doodle";
 import type { ShellType } from "@/game/logic";
 import { gameAudio } from "@/game/audio";
@@ -20,8 +20,8 @@ type Stamp = { id: number; idSkill: SkillId };
 
 const DIFFS: { id: "easy" | "normal" | "insane"; label: string; desc: string }[] = [
   { id: "easy", label: "EASY", desc: "6 vs 6 HP. The Dealer has 1 skill." },
-  { id: "normal", label: "NORMAL", desc: "5 vs 5 HP. The Dealer has 2 skills." },
-  { id: "insane", label: "INSANE", desc: "You 4 HP vs his 5. 3 skills + shop legends." },
+  { id: "normal", label: "NORMAL", desc: "Your 5 HP vs his 6. The Dealer has 2 skills." },
+  { id: "insane", label: "INSANE", desc: "Your 4 HP vs his 7. 3 skills + shop legends." },
 ];
 
 const fmtTime = (ms: number) => {
@@ -48,6 +48,7 @@ export default function GameShell() {
   const [flashRed, setFlashRed] = useState(false);
   const [revealQueue, setRevealQueue] = useState<(ShellType | null)[] | null>(null);
   const [times, setTimes] = useState<{ roundMs: number; totalMs: number }>({ roundMs: 0, totalMs: 0 });
+  const [shopTip, setShopTip] = useState<{ id: SkillId | "bell"; xPct: number; yPct: number } | null>(null);
 
   /* ---------- HUD asset dataURLs (after mount, client-only) ---------- */
   const assets = useMemo(() => {
@@ -123,6 +124,9 @@ export default function GameShell() {
         setReloadPips(e.loaded);
         setTimeout(() => setReloadPips(0), 2400);
         break;
+      case "shopTip":
+        setShopTip(e.id ? { id: e.id, xPct: e.xPct, yPct: e.yPct } : null);
+        break;
     }
   }, []);
 
@@ -195,30 +199,6 @@ export default function GameShell() {
   const phase = snap?.phase ?? "menu";
   const inGame = phase !== "menu";
   const lowHp = inGame && snap ? snap.hpPlayer : 0;
-
-  /* ---------- shop catalog (pure, from snapshot) ---------- */
-  const activeSkillCount = snap
-    ? snap.skills.filter((s) => s.owned && !(s.trial && s.charges <= 0)).length
-    : 0;
-  const catalog = snap
-    ? SHOP_META.filter((m) => snap.difficulty === "insane" || !m.legendary)
-        .map((m) => {
-          const sk = snap.skills.find((s) => s.id === m.id)!;
-          let disabled = false;
-          let reason: string | null = null;
-          if (sk.owned) {
-            disabled = true;
-            reason = sk.trial && sk.charges <= 0 ? "FADING AWAY" : "ALREADY HELD";
-          } else if (activeSkillCount >= MAX_SKILLS) {
-            disabled = true;
-            reason = `SLOTS FULL (${MAX_SKILLS})`;
-          } else if (snap.money < m.price) {
-            disabled = true;
-            reason = "TOO POOR";
-          }
-          return { ...m, disabled, reason };
-        })
-    : [];
 
   /* ---------- render ---------- */
   return (
@@ -295,43 +275,34 @@ export default function GameShell() {
       {/* ================= IN-GAME HUD ================= */}
       {inGame && assets && snap && (
         <>
-          {/* shell counter board — honest for 3 turns, then it fades */}
+          {/* shell counter board — the honest numbers fade turn by turn,
+              their opacity really stepping down until it hits zero */}
+          {snap.round > 0 && (
           <div className="absolute left-1/2 top-3 z-30 -translate-x-1/2">
-            <div
-              className={`doodle-box px-4 py-1.5 flex items-center gap-3 ${
-                !snap.countsPublic ? "doodle-dark board-dark-box" : ""
-              }`}
-            >
-              {snap.countsPublic ? (
-                <>
-                  <div className="flex items-center gap-1">
-                    <img src={assets.pipLive} alt="live" className="h-7 w-7" />
-                    <span className="font-marker text-xl text-[#8f2418]">x{snap.live}</span>
+            <div className="relative">
+              <div
+                className="doodle-box flex items-center gap-3 px-4 py-1.5 transition-opacity duration-[1100ms] ease-in-out"
+                style={{ opacity: snap.countsPublic ? Math.min(1, snap.countdown / 3) : 0 }}
+              >
+                <div className="flex items-center gap-1">
+                  <img src={assets.pipLive} alt="live" className="h-7 w-7" />
+                  <span className="font-marker text-xl text-[#8f2418]">x{snap.live}</span>
+                </div>
+                <div className="h-6 w-0.5 bg-[#221a12]/30" />
+                <div className="flex items-center gap-1">
+                  <img src={assets.pipBlank} alt="blank" className="h-7 w-7" />
+                  <span className="font-marker text-xl text-[#57697c]">x{snap.blank}</span>
+                </div>
+              </div>
+              {!snap.countsPublic && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="doodle-box doodle-dark board-dark-box pop-in-delayed flex items-center gap-2 whitespace-nowrap px-4 py-1.5">
+                    <span className="font-marker text-xl tracking-widest text-[#8b8577]">? ? ?</span>
+                    <span className="rotate-[-2deg] font-hand-sc text-xs text-[#d9a441]">memorize!</span>
                   </div>
-                  <div className="h-6 w-0.5 bg-[#221a12]/30" />
-                  <div className="flex items-center gap-1">
-                    <img src={assets.pipBlank} alt="blank" className="h-7 w-7" />
-                    <span className="font-marker text-xl text-[#57697c]">x{snap.blank}</span>
-                  </div>
-                </>
-              ) : (
-                <div className="pop-in flex items-center gap-2">
-                  <span className="font-marker text-xl tracking-widest text-[#8b8577]">? ? ?</span>
-                  <span className="font-hand-sc text-xs text-[#d9a441] rotate-[-2deg]">memorize!</span>
                 </div>
               )}
             </div>
-            {snap.countsPublic && (
-              <div className="mt-1 flex justify-center">
-                <div
-                  className={`font-hand-sc border-2 border-[#221a12]/40 bg-[#f3ecd7]/85 px-2 py-0.5 text-xs rotate-[1.5deg] ${
-                    snap.countdown <= 1 ? "blink-soft text-[#8f2418]" : "text-[#4a4036]"
-                  }`}
-                >
-                  BOARD FADES IN {snap.countdown}
-                </div>
-              </div>
-            )}
             {snap.known && (
               <div className="mt-1 flex justify-center">
                 <div
@@ -344,15 +315,16 @@ export default function GameShell() {
               </div>
             )}
           </div>
+          )}
 
           {/* top left: round + buttons */}
           <div className="absolute left-2 top-2 z-30 flex flex-col gap-1.5 sm:left-3 sm:top-3 sm:gap-2">
             <div className="doodle-box doodle-dark px-2 py-0.5 font-marker text-xs rotate-[-1.5deg] sm:px-3 sm:py-1 sm:text-sm">
-              ROUND {snap.round}
+              ROUND {Math.max(1, snap.round)}
             </div>
             <div
               className="doodle-box w-fit px-2 py-0.5 font-marker text-xs text-[#8a6d1d] rotate-[1deg] sm:text-sm"
-              title="Cash — land bullets ($100), voodoo reflections ($150), survive rounds ($75)"
+              title="Cash — land bullets ($100), voodoo reflections ($150), survive rounds ($75). Between rounds 3 random items appear on the table."
             >
               $ {snap.money}
             </div>
@@ -467,7 +439,7 @@ export default function GameShell() {
             </div>
           )}
 
-          {/* skill bar (dice skills + shop trials; spent trials fade away) */}
+          {/* skill bar (dice skills + shop trials; spent trials dissolve away) */}
           <div className="absolute bottom-[104px] left-1/2 z-30 flex -translate-x-1/2 items-end gap-1.5 sm:bottom-3 sm:gap-2">
             {snap.skills
               .filter((s) => s.owned)
@@ -479,7 +451,15 @@ export default function GameShell() {
                     className={`doodle-btn relative flex h-16 w-16 flex-col items-center justify-center gap-0.5 sm:h-[74px] sm:w-[74px] ${
                       ghost ? "ghost-skill" : s.usable ? "" : "opacity-60"
                     }`}
-                    style={ghost ? { opacity: 0.22 + s.ghostTurns * 0.26 } : undefined}
+                    style={
+                      ghost
+                        ? {
+                            opacity: 0.1 + s.ghostTurns * 0.24,
+                            filter: `grayscale(${0.55 + (2 - s.ghostTurns) * 0.22}) blur(${(2 - s.ghostTurns) * 0.8}px)`,
+                            transition: "opacity 1.1s ease, filter 1.1s ease",
+                          }
+                        : undefined
+                    }
                     disabled={!s.usable || ghost}
                     onClick={() => void engineRef.current?.playerUseSkill(s.id)}
                     title={SKILL_META[s.id].desc}
@@ -489,11 +469,7 @@ export default function GameShell() {
                     {!ghost && (
                       <span className="absolute -top-2 -left-1.5 font-marker text-[11px] text-[#8f2418]">{idx + 1}</span>
                     )}
-                    {ghost ? (
-                      <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 whitespace-nowrap font-hand-sc text-[9px] text-[#8f2418]">
-                        fades in {s.ghostTurns}
-                      </span>
-                    ) : s.id === "phoenix" ? (
+                    {ghost ? null : s.id === "phoenix" ? (
                       <span className="trial-ribbon font-hand-sc" style={{ background: "#e08b3a" }}>
                         PASSIVE
                       </span>
@@ -632,72 +608,41 @@ export default function GameShell() {
         )}
       </div>
 
-      {/* ================= SHOP (between rounds) ================= */}
-      {phase === "shop" && assets && snap && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]">
-          <div className="doodle-box doodle-scroll max-h-[92vh] w-[min(94vw,660px)] overflow-y-auto px-6 py-5 rotate-[-0.6deg]">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="font-marker text-3xl text-[#8f2418] rotate-[-1deg]">THE SHOP</div>
-                <div className="font-hand text-base leading-tight text-[#4a4036]">
-                  Break between rounds. TRIAL skills work ONCE — then they fade away over 2 turns.
-                </div>
+      {/* ================= SHOP BREAK (physical, on the table) ================= */}
+      {phase === "shop" && shopTip && snap && (
+        <div
+          className={`shop-tip ${shopTip.id !== "bell" && snap.shopOffers.find((o) => o.id === shopTip.id)?.legendary ? "shop-tip-gold" : ""}`}
+          style={{ left: `${Math.min(86, Math.max(14, shopTip.xPct))}%`, top: `${Math.max(18, shopTip.yPct)}%` }}
+        >
+          {shopTip.id === "bell" ? (
+            <>
+              <div className="font-marker text-lg text-[#8a6d1d]">THE BELL</div>
+              <div className="font-hand text-[13px] leading-snug text-[#221a12]">
+                Ring it to end the break — reload the gun and fight the next round.
               </div>
-              <div className="shrink-0 text-right">
-                <div className="doodle-box inline-block px-3 py-1 font-marker text-xl text-[#8a6d1d] rotate-[1.5deg]">
-                  $ {snap.money}
-                </div>
-                <div className="mt-1 font-hand-sc text-sm text-[#4a4036]">
-                  slots {activeSkillCount}/4
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {catalog.map((o) => (
-                <div
-                  key={o.id}
-                  className={`flex items-center gap-3 rounded-[14px_4px_16px_6px] border-2 border-[#221a12] bg-[#efe7d2] p-2.5 ${
-                    o.legendary ? "gold-border" : ""
-                  }`}
-                >
-                  <img src={dataURL(`icon-${o.id}`, texSkillIcon(o.id))} alt={o.id} className="h-12 w-12 shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <div className="font-marker text-base leading-tight" style={{ color: SKILL_META[o.id].color }}>
-                      {SKILL_META[o.id].name}
-                      {o.legendary && (
-                        <span className="ml-2 font-hand-sc text-[10px] text-[#8f2418]">INSANE ONLY</span>
-                      )}
-                    </div>
-                    <div className="font-hand text-[12px] leading-tight text-[#4a4036]" title={SKILL_META[o.id].desc}>
-                      {SKILL_META[o.id].desc}
-                    </div>
+            </>
+          ) : (() => {
+            const o = snap.shopOffers.find((x) => x.id === shopTip.id);
+            if (!o) return null;
+            const m = SKILL_META[o.id];
+            return (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-marker text-lg leading-tight" style={{ color: m.color }}>
+                    {m.name}
                   </div>
-                  <div className="flex shrink-0 flex-col items-center gap-0.5">
-                    <button
-                      className="doodle-btn px-3 py-1.5 font-marker text-sm"
-                      disabled={o.disabled}
-                      onClick={() => engineRef.current?.buyTrial(o.id)}
-                    >
-                      ${o.price}
-                    </button>
-                    {o.disabled && o.reason && (
-                      <span className="font-hand-sc text-[9px] leading-none text-[#8f2418]">{o.reason}</span>
-                    )}
-                  </div>
+                  <div className="font-marker text-xl text-[#8a6d1d]">$ {o.price}</div>
                 </div>
-              ))}
-            </div>
-
-            <div className="mt-4 flex items-center justify-between gap-3">
-              <div className="font-hand text-sm text-[#4a4036]">
-                Earn cash: bullet landed $100 &middot; voodoo reflect $150 &middot; survive a round $75.
-              </div>
-              <button className="doodle-btn doodle-red px-6 py-2 font-marker text-lg" onClick={() => engineRef.current?.closeShop()}>
-                RELOAD &amp; FIGHT
-              </button>
-            </div>
-          </div>
+                <div className="font-hand text-[13px] leading-snug text-[#221a12]">{m.desc}</div>
+                <div className="mt-1 font-hand-sc text-[11px] leading-none">
+                  <span className="text-[#8a6d1d]">TRIAL · 1 USE</span>
+                  {o.legendary && <span className="ml-2 text-[#8f2418]">INSANE ONLY</span>}
+                  {o.sold && <span className="ml-2 text-[#57697c]">SOLD</span>}
+                  {!o.sold && o.reason && <span className="ml-2 text-[#8f2418]">{o.reason}</span>}
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -818,9 +763,9 @@ export default function GameShell() {
                 On the table sits a 6-chamber revolver. Each round it is loaded with a mix of{" "}
                 <b className="text-[#8f2418]">LIVE</b> (red, hurts) and <b className="text-[#57697c]">BLANK</b>{" "}
                 (blue, empty) shells. The counts are honest on the board up top — but only for the first{" "}
-                <b>3 turns</b> of a round. Then the board <b className="text-[#8f2418]">FADES</b> and both of you
-                run on pure memory. The Dealer has a real memory too: he tracks every shell he sees — and on
-                EASY/NORMAL he sometimes loses count.
+                <b>3 turns</b> of a round. Then the board <b className="text-[#8f2418]">fades away turn by turn</b>,
+                its opacity sinking until nothing is left, and both of you run on pure memory. The Dealer has a
+                real memory too: he tracks every shell he sees — and on EASY/NORMAL he sometimes loses count.
               </p>
               <p>
                 On your turn use a skill first if you want (free, doesn&apos;t pass the turn), then choose:{" "}
@@ -829,21 +774,24 @@ export default function GameShell() {
                 he takes the hit and the turn passes. Out of HP = over.
               </p>
               <p>
-                The opening dice grants you <b>2 skills</b>. Between rounds the <b>SHOP</b> opens: cash buys
-                1-use <b className="text-[#8a6d1d]">TRIAL</b> skills and you can hold up to <b>4 skills</b> at
-                once. A spent trial fades away over 2 turns. The Dealer holds <b>1 skill on EASY, 2 on NORMAL,
-                3 on INSANE</b> (check his cards under his name). Don&apos;t underestimate him.
+                The opening dice grants you <b>2 skills</b>. Between rounds the gun runs dry and a{" "}
+                <b>SHOP BREAK</b> begins: <b>3 random items</b> appear right on the table. <b>Hover</b> one to
+                read its price and effect, <b>click</b> to buy it as a 1-use <b className="text-[#8a6d1d]">TRIAL</b>,
+                and hold up to <b>4 skills</b> at once. A spent trial dissolves over 2 turns. When you&apos;re
+                done, <b>ring the golden bell</b> to reload and fight. Voodoo is not for sale — a reflection
+                like that earns its keep, it doesn&apos;t buy it.
               </p>
               <p>
                 <b>Cash:</b> every bullet you land pays <b>$100</b>, a voodoo reflection pays <b>$150</b>,
-                surviving a round pays <b>$75</b>, and you start with <b>$200</b>. On INSANE the shop also
-                stocks two legends: <b className="text-[#e08b3a]">PHOENIX</b> (refuse to die once) and{" "}
+                surviving a round pays <b>$75</b>, and you start with <b>$200</b>. On INSANE the table can also
+                stock two legends: <b className="text-[#e08b3a]">PHOENIX</b> (refuse to die once) and{" "}
                 <b className="text-[#5aa7a0]">THIRD EYE</b> (see the next 3 shells in order).
               </p>
               <p className="text-[#8f2418]">
-                HP: 6 vs 6 on EASY, 5 vs 5 on NORMAL — and on INSANE you get only 4 while the Dealer gets 5.
-                At 2 HP a blood vignette creeps in and your heartbeat returns. Below 3 HP, shooting yourself
-                takes a long, cruel 0.7 seconds to pull — and the bullet leaves the barrel 0.2 seconds late.
+                HP: 6 vs 6 on EASY, your 5 against his 6 on NORMAL — and on INSANE you get only 4 while the
+                Dealer sits fat at 7. At 2 HP a blood vignette creeps in and your heartbeat returns. Below 3 HP,
+                shooting yourself takes a long, cruel 0.7 seconds to pull — and the bullet leaves the barrel
+                0.2 seconds late.
               </p>
             </div>
             <div className="mt-4 font-marker text-2xl">8 SKILLS</div>

@@ -13,7 +13,7 @@
  * The enemy never reads the cylinder; it tracks what it has observed and
  * (on lower difficulties) misremembers from time to time.
  *
- * HP: EASY 6 vs 6 · NORMAL 5 vs 5 · INSANE you 4 vs the DEALER's 5.
+ * HP: EASY 6 vs 6 · NORMAL you 5 vs the DEALER's 6 · INSANE you 4 vs his 7.
  *
  * SKILLS (player starts with exactly 2 from the opening dice and can buy
  * 1-use SHOP TRIALS up to 4 held skills; the enemy owns 1 on EASY, 2 on
@@ -152,8 +152,8 @@ export class RouletteLogic {
       difficulty === "easy"
         ? { player: 6, enemy: 6 }
         : difficulty === "normal"
-          ? { player: 5, enemy: 5 }
-          : { player: 4, enemy: 5 }; // INSANE: the Dealer out-lives you
+          ? { player: 5, enemy: 6 } // the Dealer always sits at 6
+          : { player: 4, enemy: 7 }; // INSANE: the Dealer out-lives you by far
     return {
       phase: "dice",
       round: 0,
@@ -516,7 +516,7 @@ export class RouletteLogic {
     // FOG OF WAR: once the board has faded, the enemy runs on real memory —
     // and on lower difficulties it sometimes loses count.
     if (st.turn === "enemy" && st.countdown <= 0 && st.cylinder.length > 0) {
-      const slip = st.difficulty === "easy" ? 0.25 : st.difficulty === "normal" ? 0.12 : 0;
+      const slip = st.difficulty === "easy" ? 0.25 : st.difficulty === "normal" ? 0.08 : 0;
       if (Math.random() < slip) {
         const dir = Math.random() < 0.5 ? -1 : 1;
         this.aiMem.live = Math.min(Math.max(0, this.aiMem.live + dir), Math.max(0, this.aiMem.total));
@@ -549,77 +549,106 @@ export interface AIDecision {
   target?: Side;
 }
 
-/** The enemy brain. `smart` 0..1 scales with difficulty. */
+/** The enemy brain. `smart` 0..1 scales with difficulty.
+ *  NORMAL (0.8) and INSANE (0.95) genuinely play their skills and reason
+ *  about the odds; EASY (0.55) is sloppy and forgetful. */
 export class EnemyAI {
   constructor(private logic: RouletteLogic, public smart: number) {}
+
+  /** Probability the current shell is live, from the AI's REAL memory only. */
+  private pLiveBelief(): number {
+    const mem = this.logic.aiMem;
+    return mem.total > 0 ? Math.min(1, Math.max(0, mem.live / mem.total)) : 0;
+  }
 
   /** One AI step: use 1 skill OR shoot. */
   decide(): AIDecision {
     const st = this.logic.state;
-    // REAL MEMORY: the AI only knows what it has tracked since the reload —
-    // while the board is public it is exact, after the fade it can be wrong.
-    const total = this.logic.aiMem.total;
-    const live = this.logic.aiMem.live;
-    const pLive = total > 0 ? Math.min(1, Math.max(0, live / total)) : 0;
-    const known = this.logic.aiKnown;
     const sk = st.enemySkills;
     const hp = st.hp.enemy;
     const playerHp = st.hp.player;
+    const known = this.logic.aiKnown;
+    const total = this.logic.aiMem.total;
+    const ownVoodoo = st.voodooTurns.enemy > 0;
     const playerVoodoo = st.voodooTurns.player > 0;
     const rng = Math.random();
+    const smart = this.smart;
+    const eager = smart >= 0.75; // NORMAL & INSANE actually play their cards
+
+    // While its OWN voodoo is up, shooting yourself is pure profit:
+    // a live shell reflects into the player, a blank pays a free shot.
+    if (ownVoodoo && total > 0) return { kind: "shoot", target: "enemy" };
 
     // 1. Coffee when dying
-    if (sk.coffee.owned && sk.coffee.charges > 0 && hp <= 2 && this.logic.canUseSkill("enemy", "coffee")) {
-      if (rng < 0.85) return { kind: "skill", skill: "coffee" };
+    if (sk.coffee.owned && sk.coffee.charges > 0 && hp <= 2 && rng < 0.6 + smart * 0.4 && this.logic.canUseSkill("enemy", "coffee")) {
+      return { kind: "skill", skill: "coffee" };
     }
 
-    // 2. Voodoo when cornered / many live shells
+    // 2. Voodoo — cast it EARLY, before the violence starts: while cursed the
+    //    enemy can self-fish risk-free and every hit on it crawls back.
     if (
       sk.voodoo.owned &&
       sk.voodoo.charges > 0 &&
       st.voodooTurns.enemy === 0 &&
-      (hp <= 2 || (pLive >= 0.5 && rng < 0.5)) &&
+      (hp <= 2 || (total >= 2 && playerHp >= 2 && rng < 0.25 + smart * 0.45)) &&
       this.logic.canUseSkill("enemy", "voodoo")
     ) {
       return { kind: "skill", skill: "voodoo" };
     }
 
-    // 3. Peek when unsure (more eager while the player's voodoo is up)
+    // 3. Peek when unsure — the eager brain inspects almost every chance it gets.
     if (
       known === null &&
       sk.peek.owned &&
       sk.peek.cooldown === 0 &&
-      total > 1 &&
+      total >= 2 &&
       this.logic.canUseSkill("enemy", "peek") &&
-      rng < (playerVoodoo ? 0.75 : 0.4) + this.smart * 0.5 &&
-      (pLive > 0.25 && pLive < 0.85)
+      rng < (eager ? 0.92 : 0.35) &&
+      ((this.pLiveBelief() > 0.15 && this.pLiveBelief() < 0.92) || playerVoodoo)
     ) {
       return { kind: "skill", skill: "peek" };
     }
 
-    const pLiveEff = known !== null ? (known === "live" ? 1 : 0) : pLive;
-
-    // 4. Eject a known live shell. While the player's voodoo is active,
-    //    firing that shell anywhere = pain for the enemy, so eject it ASAP.
+    // 4. A known live shell is only a liability when firing it feeds the
+    //    player's curse: eject it (an empty cylinder forces a fresh reload).
     if (
       known === "live" &&
+      playerVoodoo &&
+      !ownVoodoo &&
       sk.eject.owned &&
       sk.eject.cooldown === 0 &&
-      total > 1 &&
       this.logic.canUseSkill("enemy", "eject") &&
-      rng < (playerVoodoo ? 0.95 : 0.35 + this.smart * 0.5)
+      rng < 0.55 + smart * 0.45
     ) {
       return { kind: "skill", skill: "eject" };
     }
 
-    // 5. Reroll: when the current shell is known to be bad for the plan
+    // 5. Reroll a known BLANK when the magazine is live-heavy — spin for blood.
     if (
+      known === "blank" &&
       sk.reroll.owned &&
       sk.reroll.cooldown === 0 &&
       !st.usedRerollThisTurn &&
-      total > 1 &&
+      total >= 2 &&
+      this.pLiveBelief() >= 0.4 &&
       this.logic.canUseSkill("enemy", "reroll") &&
-      ((known === "blank" && rng < 0.4) || (pLiveEff >= 0.8 && playerVoodoo && rng < 0.5))
+      rng < 0.25 + smart * 0.55
+    ) {
+      return { kind: "skill", skill: "reroll" };
+    }
+
+    // 5b. Same when the shell is live but the player's curse blocks firing it
+    //     and no eject is available.
+    if (
+      known === "live" &&
+      playerVoodoo &&
+      !ownVoodoo &&
+      !sk.eject.owned &&
+      sk.reroll.owned &&
+      sk.reroll.cooldown === 0 &&
+      !st.usedRerollThisTurn &&
+      this.logic.canUseSkill("enemy", "reroll") &&
+      rng < 0.5 + smart * 0.5
     ) {
       return { kind: "skill", skill: "reroll" };
     }
@@ -629,26 +658,32 @@ export class EnemyAI {
       sk.cuffs.owned &&
       sk.cuffs.charges > 0 &&
       this.logic.canUseSkill("enemy", "cuffs") &&
-      ((playerHp <= 2 && hp <= 2 && rng < 0.6) || (hp === 1 && rng < 0.8))
+      ((playerHp <= 2 && rng < 0.5 + smart * 0.4) ||
+        (hp === 1 && rng < 0.85) ||
+        (eager && playerHp <= 3 && hp <= 3 && this.pLiveBelief() >= 0.5 && rng < 0.3))
     ) {
       return { kind: "skill", skill: "cuffs" };
     }
 
     // 7. Shooting decision
-    if (playerVoodoo && pLiveEff > 0) {
-      // shooting the player = reflected pain; fish for a blank instead
-      // (a self-blank still grants the free shot, and a live hurts only itself)
-      if (known === "live" && total <= 1) return { kind: "shoot", target: "player" }; // forced, nothing better
-      return { kind: "shoot", target: "enemy" }; // self-fish
+    const pRaw = known !== null ? (known === "live" ? 1 : 0) : this.pLiveBelief();
+    // the weaker brain misjudges the odds more
+    const p = Math.min(1, Math.max(0, pRaw + (Math.random() - 0.5) * 2 * (1 - smart) * 0.25));
+
+    if (known === "live") {
+      // the player's curse makes any shot at them self-harm — bite the bullet
+      return { kind: "shoot", target: playerVoodoo && !ownVoodoo ? "enemy" : "player" };
     }
-    if (pLiveEff >= 0.6) {
-      return { kind: "shoot", target: "player" };
+    if (known === "blank") {
+      // self-shot blank = one free shot at the player (when shells remain)
+      return total >= 2 ? { kind: "shoot", target: "enemy" } : { kind: "shoot", target: "player" };
     }
-    if (pLiveEff <= 0.34) {
-      return { kind: "shoot", target: "enemy" }; // self-fish (blank -> free shot)
-    }
-    // grey zone: lean by smart
-    if (rng < 0.35 + this.smart * 0.3) return { kind: "shoot", target: "player" };
-    return { kind: "shoot", target: "enemy" };
+
+    // unknown shell: a healthy Dealer gambles on the free-shot fish; a hurt
+    // one plays it straight. hp >= 4 relative to the player's = brave.
+    const brave = hp - playerHp >= 1 || hp >= 4;
+    if (p >= 0.5) return { kind: "shoot", target: "player" };
+    if (p <= (brave ? 0.45 : 0.3) && total >= 2 && hp >= 2) return { kind: "shoot", target: "enemy" };
+    return { kind: "shoot", target: "player" };
   }
 }

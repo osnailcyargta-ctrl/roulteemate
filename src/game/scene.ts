@@ -34,6 +34,9 @@ import {
   texBoombox,
   texPoster,
   texArrowSign,
+  texPriceTag,
+  texSkillIcon,
+  type SkillId,
   type EnemyMood,
 } from "./doodle";
 
@@ -100,6 +103,18 @@ interface Particle {
   grow: number;
   gravity: number;
   fadePow: number;
+}
+
+/** One physical shop item standing on the table. */
+interface ShopItem {
+  group: THREE.Group;
+  glow: THREE.Mesh | null;
+  hit: THREE.Mesh;
+  base: THREE.Vector3;
+  idx: number;
+  bornAt: number;
+  hoverK: number;
+  hoverTarget: number;
 }
 
 function doodleMat(tex: THREE.Texture, opts: { lit?: boolean; alphaTest?: number } = {}) {
@@ -183,6 +198,19 @@ export class RouletteScene {
   private dustTex!: THREE.Texture;
   private muzzleTex!: THREE.Texture;
 
+  /* physical shop */
+  private shopMat!: THREE.Mesh;
+  private shopBell: THREE.Group | null = null;
+  private bellHit!: THREE.Mesh;
+  private shopItems = new Map<SkillId, ShopItem>();
+  private shopHitboxes: THREE.Mesh[] = [];
+  private shopAnims: { id: SkillId; item: ShopItem; t0: number }[] = [];
+  private shopTexCache = new Map<string, THREE.Texture>();
+  private raycaster = new THREE.Raycaster();
+  private bellHover = false;
+  private bellHoverK = 0;
+  private bellRingT = 0;
+
   private trauma = 0;
   private timeScale = 1;
   private timeScaleTarget = 1;
@@ -222,6 +250,7 @@ export class RouletteScene {
     this.buildGun();
     this.buildDice();
     this.buildParticles();
+    this.buildShop();
 
     // post processing
     this.composer = new EffectComposer(this.renderer);
@@ -437,7 +466,7 @@ export class RouletteScene {
       new THREE.PlaneGeometry(0.26, 0.26),
       doodleMat(ctex(texCards()), { lit: true }),
     );
-    cards.position.set(0.12, 0.96, 0.22);
+    cards.position.set(-0.55, 0.95, 0.3);
     cards.rotation.x = -0.42;
     this.scene.add(cards);
 
@@ -534,6 +563,206 @@ export class RouletteScene {
     this.ringTex = ctex(texRing());
     this.dustTex = ctex(texDust());
     this.muzzleTex = ctex(texMuzzle());
+  }
+
+  /* ---------------- physical shop (items live on the table) ---------------- */
+
+  private buildShop() {
+    // dark felt mat marking the shop corner of the table
+    this.shopMat = new THREE.Mesh(
+      new THREE.CircleGeometry(0.66, 44),
+      new THREE.MeshStandardMaterial({ color: 0x1d2b1d, roughness: 0.96 }),
+    );
+    this.shopMat.rotation.x = -Math.PI / 2;
+    this.shopMat.position.set(0.18, 0.9075, 0.06);
+    this.shopMat.receiveShadow = true;
+    this.shopMat.visible = false;
+    this.scene.add(this.shopMat);
+
+    // the little gold bell — ring it to end the break
+    const bell = new THREE.Group();
+    const gold = new THREE.MeshStandardMaterial({
+      color: 0xd9a441,
+      metalness: 0.62,
+      roughness: 0.34,
+      emissive: 0x2a1d05,
+      emissiveIntensity: 0.6,
+    });
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.098, 0.026, 20), gold);
+    base.castShadow = true;
+    bell.add(base);
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.06, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2), gold);
+    dome.position.y = 0.018;
+    dome.castShadow = true;
+    bell.add(dome);
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(0.015, 10, 8), gold);
+    knob.position.y = 0.082;
+    bell.add(knob);
+    bell.position.set(1.04, 0.918, 0.14);
+    bell.visible = false;
+    this.scene.add(bell);
+    this.shopBell = bell;
+
+    // invisible but raycastable bell hit area
+    this.bellHit = new THREE.Mesh(
+      new THREE.BoxGeometry(0.32, 0.3, 0.32),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+    );
+    this.bellHit.position.set(1.04, 0.98, 0.14);
+    this.bellHit.userData.shop = "bell";
+    this.scene.add(this.bellHit);
+  }
+
+  private shopTex(key: string, cv: HTMLCanvasElement): THREE.Texture {
+    let tex = this.shopTexCache.get(key);
+    if (!tex) {
+      tex = ctex(cv);
+      this.shopTexCache.set(key, tex);
+    }
+    return tex;
+  }
+
+  /** Spawn the offer cards standing on the felt mat. */
+  showShopItems(offers: { id: SkillId; price: number; legendary: boolean }[]) {
+    this.hideShopItems();
+    this.shopMat.visible = true;
+    if (this.shopBell) this.shopBell.visible = true;
+    offers.forEach((o, i) => {
+      const group = new THREE.Group();
+      const base = new THREE.Vector3(-0.22 + i * 0.42, 0.908, 0.02);
+
+      const back = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.3, 0.36),
+        new THREE.MeshBasicMaterial({ color: o.legendary ? 0xd9c48f : 0xb5ac93 }),
+      );
+      back.position.y = 0.2;
+      back.castShadow = true;
+      group.add(back);
+
+      const card = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.25, 0.25),
+        new THREE.MeshBasicMaterial({ map: this.shopTex(`icon-${o.id}`, texSkillIcon(o.id)), transparent: true, alphaTest: 0.02 }),
+      );
+      card.position.set(0, 0.2, 0.003);
+      group.add(card);
+
+      let glow: THREE.Mesh | null = null;
+      if (o.legendary) {
+        glow = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.46, 0.52),
+          new THREE.MeshBasicMaterial({
+            color: 0xd9a441,
+            transparent: true,
+            opacity: 0.14,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        );
+        glow.position.set(0, 0.2, -0.004);
+        group.add(glow);
+      }
+
+      // price tag lying flat in front of the card (flat-lit paper, no bloom)
+      const tag = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.19, 0.12),
+        new THREE.MeshBasicMaterial({
+          map: this.shopTex(`tag-${o.id}-${o.price}`, texPriceTag(o.price, o.legendary)),
+          transparent: true,
+          alphaTest: 0.02,
+          color: 0xc9c2b2,
+        }),
+      );
+      tag.rotation.x = -Math.PI / 2 + 0.42;
+      tag.position.set(0, 0.012, 0.15);
+      group.add(tag);
+
+      // invisible hit area
+      const hit = new THREE.Mesh(
+        new THREE.BoxGeometry(0.4, 0.52, 0.34),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+      );
+      hit.position.y = 0.16;
+      hit.userData.shop = o.id;
+      group.add(hit);
+      this.shopHitboxes.push(hit);
+
+      group.position.copy(base);
+      group.rotation.y = (i - 1) * 0.12;
+      group.rotation.x = -0.1;
+      this.scene.add(group);
+      this.shopItems.set(o.id, {
+        group,
+        glow,
+        hit,
+        base,
+        idx: i,
+        bornAt: performance.now() + i * 120,
+        hoverK: 0,
+        hoverTarget: 0,
+      });
+    });
+  }
+
+  /** Remove every shop prop from the table. */
+  hideShopItems() {
+    if (!this.shopItems.size && !this.shopMat.visible && !this.shopBell?.visible) return;
+    for (const [, it] of this.shopItems) {
+      this.scene.remove(it.group);
+      it.group.traverse((o) => {
+        if (o instanceof THREE.Mesh) {
+          o.geometry.dispose();
+          (o.material as THREE.Material).dispose();
+        }
+      });
+    }
+    this.shopItems.clear();
+    this.shopHitboxes = [];
+    this.shopAnims = [];
+    this.shopMat.visible = false;
+    if (this.shopBell) this.shopBell.visible = false;
+    this.bellHover = false;
+  }
+
+  /** Raycast the table props. */
+  pickShop(ndc: THREE.Vector2): { type: "item"; id: SkillId } | { type: "bell" } | null {
+    if (!this.shopBell?.visible) return null;
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const hits = this.raycaster.intersectObjects([...this.shopHitboxes, this.bellHit], false);
+    if (!hits.length) return null;
+    const tag = hits[0].object.userData.shop;
+    if (tag === "bell") return { type: "bell" };
+    return { type: "item", id: tag as SkillId };
+  }
+
+  setShopHover(id: SkillId | "bell" | null) {
+    for (const [sid, it] of this.shopItems) it.hoverTarget = id === sid ? 1 : 0;
+    this.bellHover = id === "bell";
+  }
+
+  /** Screen anchor (percentages) for the HTML tooltip. */
+  shopAnchor(id: SkillId | "bell"): { xPct: number; yPct: number } | null {
+    const obj = id === "bell" ? this.shopBell : this.shopItems.get(id)?.group;
+    if (!obj) return null;
+    const wp = obj.getWorldPosition(new THREE.Vector3());
+    wp.y += id === "bell" ? 0.2 : 0.45;
+    const v = wp.project(this.camera);
+    return { xPct: (v.x * 0.5 + 0.5) * 100, yPct: (-v.y * 0.5 + 0.5) * 100 };
+  }
+
+  /** A bought item leaps off the table in a burst of sparks. */
+  sellShopItem(id: SkillId) {
+    const it = this.shopItems.get(id);
+    if (!it) return;
+    const at = it.group.position.clone().add(new THREE.Vector3(0, 0.28, 0));
+    this.ringBurst(at, 0.5);
+    this.sparkBurst(at, 12);
+    this.shopAnims.push({ id, item: it, t0: performance.now() });
+  }
+
+  ringBellAnim() {
+    this.bellRingT = 1;
+    const at = this.shopBell?.position.clone().add(new THREE.Vector3(0, 0.08, 0));
+    if (at) this.sparkBurst(at, 6);
   }
 
   /* ---------------- helpers ---------------- */
@@ -921,6 +1150,55 @@ export class RouletteScene {
       const sc = 1 + p.grow * p.life;
       p.mesh.scale.set(sc, sc, 1);
       (p.mesh.material as THREE.MeshBasicMaterial).opacity = Math.pow(1 - k, p.fadePow);
+    }
+
+    // physical shop: pop-in, bob, hover lift, bell ring, sold-item fly-off
+    const nowMs = performance.now();
+    if (this.shopItems.size || this.shopAnims.length) {
+      for (const [, it] of this.shopItems) {
+        it.hoverK += (it.hoverTarget - it.hoverK) * Math.min(1, dt0 * 11);
+        const pop = Math.min(1, Math.max(0, (nowMs - it.bornAt) / 380));
+        const e = 1 + 2.7 * Math.pow(pop - 1, 3) + 1.7 * Math.pow(pop - 1, 2); // easeOutBack
+        const s = (pop <= 0 ? 0 : e) * (1 + it.hoverK * 0.15);
+        it.group.scale.setScalar(Math.max(0.001, s));
+        it.group.position.y = it.base.y + Math.sin(t * 2.1 + it.idx * 1.9) * 0.008 + it.hoverK * 0.045;
+        if (it.glow) {
+          (it.glow.material as THREE.MeshBasicMaterial).opacity =
+            0.12 + Math.sin(t * 3.1 + it.idx * 2.2) * 0.05 + it.hoverK * 0.16;
+        }
+      }
+      for (let i = this.shopAnims.length - 1; i >= 0; i--) {
+        const a = this.shopAnims[i];
+        const k = (nowMs - a.t0) / 620;
+        if (k >= 1) {
+          this.scene.remove(a.item.group);
+          a.item.group.traverse((o) => {
+            if (o instanceof THREE.Mesh) {
+              o.geometry.dispose();
+              (o.material as THREE.Material).dispose();
+            }
+          });
+          this.shopHitboxes = this.shopHitboxes.filter((h) => h !== a.item.hit);
+          this.shopItems.delete(a.id);
+          this.shopAnims.splice(i, 1);
+        } else {
+          a.item.group.position.y = a.item.base.y + k * k * 1.25;
+          a.item.group.rotation.z = k * 2.6;
+          a.item.group.rotation.y += dt0 * 6;
+          a.item.group.scale.setScalar(Math.max(0.001, 1 - k));
+        }
+      }
+    }
+    if (this.shopBell) {
+      const b = this.shopBell;
+      this.bellHoverK += ((this.bellHover ? 1 : 0) - this.bellHoverK) * Math.min(1, dt0 * 10);
+      b.position.y = 0.918 + this.bellHoverK * 0.05;
+      if (this.bellRingT > 0) {
+        this.bellRingT = Math.max(0, this.bellRingT - dt0 * 1.15);
+        b.rotation.z = Math.sin(this.bellRingT * Math.PI * 7) * 0.38 * this.bellRingT;
+      } else if (b.visible) {
+        b.rotation.z = Math.sin(t * 1.2) * 0.02;
+      }
     }
 
     this.onFrame?.(dt, t);

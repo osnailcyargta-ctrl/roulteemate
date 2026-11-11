@@ -2129,6 +2129,43 @@ export function texShellBox() {
   );
 }
 
+/** Little paper price tag for the physical shop items on the table. */
+export function texPriceTag(price: number, gold = false) {
+  return makeCanvas(
+    `pricetag-${price}-${gold ? 1 : 0}`,
+    256,
+    160,
+    (ctx, w, h, rng) => {
+      ctx.save();
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate(-0.06);
+      // tag body
+      ctx.fillStyle = gold ? "#f6df9e" : PAPER;
+      wobblePath(ctx, [[-108, -58], [104, -62], [116, 56], [-98, 62]], rng, 3, true);
+      ctx.fill();
+      sketchStroke(ctx, [[-108, -58], [104, -62], [116, 56], [-98, 62]], rng, {
+        width: 7,
+        jitter: 3,
+        close: true,
+        color: gold ? "#8a6d1d" : INK,
+      });
+      // punched hole + string
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(-84, -36, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-80, -44);
+      ctx.quadraticCurveTo(-40, -86, 8, -74);
+      ctx.stroke();
+      handText(ctx, `$${price}`, 14, 10, 62, gold ? "#8f2418" : INK, -0.02);
+      ctx.restore();
+    },
+    77,
+  );
+}
+
 export function texBoombox() {
   return makeCanvas(
     "boombox",

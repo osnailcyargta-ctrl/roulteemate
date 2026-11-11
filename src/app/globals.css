@@ -453,3 +453,42 @@ canvas {
     transform: rotateY(0);
   }
 }
+
+/* delayed pop-in (the "? ? ?" memory box appears after the numbers hit 0) */
+.pop-in-delayed {
+  animation: pop-in 0.4s ease 0.95s backwards;
+}
+
+/* hover tooltip for the physical shop items on the table */
+.shop-tip {
+  position: absolute;
+  z-index: 55;
+  transform: translate(-50%, calc(-100% - 16px));
+  width: max-content;
+  max-width: 250px;
+  pointer-events: none;
+  background: #f3ecd7;
+  border: 3px solid #221a12;
+  border-radius: 14px 4px 16px 6px;
+  box-shadow: 4px 5px 0 rgba(0, 0, 0, 0.55);
+  padding: 9px 13px;
+  animation: pop-in 0.18s ease;
+}
+.shop-tip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -11px;
+  width: 15px;
+  height: 15px;
+  background: #f3ecd7;
+  border-right: 3px solid #221a12;
+  border-bottom: 3px solid #221a12;
+  transform: translateX(-50%) rotate(45deg);
+}
+.shop-tip-gold {
+  border-color: #8a6d1d;
+  box-shadow:
+    0 0 18px rgba(217, 164, 65, 0.5),
+    4px 5px 0 rgba(0, 0, 0, 0.55);
+}

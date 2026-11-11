@@ -24,8 +24,8 @@ function maxHpOf(diff: Difficulty) {
   const n = maxHpOf("normal");
   const i = maxHpOf("insane");
   assert(e.p === 6 && e.e === 6, `EASY should be 6/6, got ${e.p}/${e.e}`);
-  assert(n.p === 5 && n.e === 5, `NORMAL should be 5/5, got ${n.p}/${n.e}`);
-  assert(i.p === 4 && i.e === 5, `INSANE should be 4/5, got ${i.p}/${i.e}`);
+  assert(n.p === 5 && n.e === 6, `NORMAL should be 5/6, got ${n.p}/${n.e}`);
+  assert(i.p === 4 && i.e === 7, `INSANE should be 4/7, got ${i.p}/${i.e}`);
   console.log("HP tables: easy", e, "normal", n, "insane", i);
 }
 
@@ -179,6 +179,76 @@ function maxHpOf(diff: Difficulty) {
   const oc2 = L.useSkill("player", "coffee");
   assert(oc2.ok && L.state.skills.coffee.charges === 1, "permanent coffee still decrements");
   console.log("trial charge burn OK");
+}
+
+// 6) AI strength: the smarter brains should beat a random player more often,
+//    and they should ACTUALLY use their skills along the way.
+{
+  function playGame(diff: Difficulty, aiPlaysWell: boolean) {
+    const L = new RouletteLogic(diff);
+    L.state.round = 1;
+    L.loadCylinder();
+    L.setPhase("playerTurn");
+    // both sides get a couple of random skills so skills actually matter
+    for (const id of ["peek", "coffee", "voodoo", "eject", "reroll", "cuffs"] as SkillId[]) {
+      if (Math.random() < 0.5) L.grantSkill("enemy", id);
+      if (Math.random() < 0.5) L.grantSkill("player", id);
+    }
+    const ai = new EnemyAI(L, diff === "insane" ? 0.95 : diff === "normal" ? 0.8 : 0.55);
+    let aiSkillUses = 0;
+    let guard = 0;
+    while (L.state.hp.player > 0 && L.state.hp.enemy > 0 && guard++ < 500) {
+      if (L.isEmpty) L.loadCylinder();
+      L.startTurnTick();
+      const side = L.state.turn;
+      if (side === "enemy") {
+        // mirror the engine loop: up to 3 skills, then shoot
+        let used = 0;
+        for (;;) {
+          if (L.isEmpty || used >= 3) break;
+          const d = ai.decide();
+          if (d.kind === "skill" && d.skill && L.canUseSkill("enemy", d.skill)) {
+            if (L.useSkill("enemy", d.skill).ok) {
+              used++;
+              aiSkillUses++;
+              continue;
+            }
+          }
+          if (d.kind === "shoot" && d.target) {
+            const out = L.shoot("enemy", d.target);
+            if (out.voodooReroll) L.shoot("enemy", "player", true);
+            else if (out.bonusShot && !L.isEmpty) L.shoot("enemy", "player");
+            break;
+          }
+        }
+      } else {
+        // random player: sometimes skill, coin-flip the target
+        const target = Math.random() < 0.5 ? "player" : "enemy";
+        const out = L.shoot("player", target as Side);
+        if (out.voodooReroll) L.shoot("player", "enemy", true);
+        else if (out.bonusShot && !L.isEmpty) L.shoot("player", "enemy");
+      }
+      L.endTurnAndPass();
+    }
+    return { enemyWon: L.state.hp.player <= 0, aiSkillUses };
+  }
+
+  for (const diff of ["easy", "normal", "insane"] as Difficulty[]) {
+    let wins = 0;
+    let skillUses = 0;
+    const N = 300;
+    for (let g = 0; g < N; g++) {
+      const r = playGame(diff, true);
+      if (r.enemyWon) wins++;
+      skillUses += r.aiSkillUses;
+    }
+    const rate = (wins / N) * 100;
+    const perGame = skillUses / N;
+    console.log(`AI strength ${diff}: dealer wins ${rate.toFixed(0)}% vs random player, skills/game ${perGame.toFixed(1)}`);
+    assert(perGame > 0.4, `${diff} AI should actually use its skills (got ${perGame.toFixed(2)}/game)`);
+    if (diff === "insane") assert(rate > 55, `insane dealer should crush a random player (got ${rate.toFixed(0)}%)`);
+    if (diff === "normal") assert(rate > 45, `normal dealer should beat a random player (got ${rate.toFixed(0)}%)`);
+  }
 }
 
 if (failures === 0) {
