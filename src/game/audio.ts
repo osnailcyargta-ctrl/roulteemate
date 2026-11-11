@@ -222,6 +222,70 @@ export class GameAudio {
     this.tone("sine", 1040, 0.25, 0.1, 0.3);
   }
 
+  /* ---------------- shop / charms ---------------- */
+
+  /** Cash register "cha-ching": metallic bell + coin clinks. */
+  buy() {
+    if (!this.ctx) return;
+    this.tone("triangle", 1980, 0.28, 0.22);
+    this.tone("triangle", 2640, 0.34, 0.16, 0.07);
+    for (let i = 0; i < 5; i++) {
+      this.tone("sine", 2300 + Math.random() * 1800, 0.05, 0.1, 0.12 + i * 0.045);
+    }
+    this.tone("square", 140, 0.09, 0.12, 0.16); // drawer thump
+  }
+
+  /** The shop door swings open: creak + small bell. */
+  shopOpen() {
+    if (!this.ctx) return;
+    const t0 = this.now();
+    const osc = this.ctx.createOscillator();
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(180, t0);
+    osc.frequency.linearRampToValueAtTime(320, t0 + 0.5);
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 900;
+    const g = this.ctx.createGain();
+    this.env(g, t0, 0.07, 0.12, 0.45);
+    osc.connect(lp).connect(g).connect(this.master!);
+    osc.start(t0);
+    osc.stop(t0 + 0.6);
+    this.tone("sine", 1320, 0.3, 0.16, 0.42);
+    this.tone("sine", 1760, 0.4, 0.1, 0.5);
+  }
+
+  /** A used trial charm dissolves: soft airy whoosh fading downward. */
+  ghostFade() {
+    if (!this.ctx) return;
+    const t0 = this.now();
+    this.tone("sine", 720, 0.5, 0.12, 0, 190);
+    const src = this.noise(0.6);
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.setValueAtTime(2400, t0);
+    bp.frequency.exponentialRampToValueAtTime(400, t0 + 0.55);
+    bp.Q.value = 2;
+    const g = this.ctx.createGain();
+    this.env(g, t0, 0.08, 0.06, 0.5);
+    src.connect(bp).connect(g).connect(this.master!);
+  }
+
+  /** PHOENIX: rising golden triad + shimmer — the sound of refusing to die. */
+  phoenix() {
+    if (!this.ctx) return;
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((f, i) => this.tone("triangle", f, 0.5, 0.22, i * 0.11));
+    this.tone("sine", 2093, 0.7, 0.08, 0.44);
+    const src = this.noise(0.9);
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 5200;
+    const g = this.ctx.createGain();
+    this.env(g, this.now() + 0.3, 0.06, 0.2, 0.65);
+    src.connect(hp).connect(g).connect(this.master!);
+  }
+
   cuffs() {
     if (!this.ctx) return;
     for (let i = 0; i < 5; i++) {

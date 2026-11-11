@@ -11,8 +11,11 @@ export type SkillId =
   | "peek"
   | "eject"
   | "coffee"
-  | "cuffs";
+  | "cuffs"
+  | "phoenix"
+  | "thirdEye";
 
+/** Skills the opening DICE can grant (the 2 shop legends are NOT in here). */
 export const SKILL_IDS: SkillId[] = [
   "reroll",
   "voodoo",
@@ -21,6 +24,9 @@ export const SKILL_IDS: SkillId[] = [
   "coffee",
   "cuffs",
 ];
+
+/** Every skill in the game (dice pool + shop-only legends). */
+export const ALL_SKILL_IDS: SkillId[] = [...SKILL_IDS, "phoenix", "thirdEye"];
 
 export const SKILL_META: Record<
   SkillId,
@@ -61,6 +67,18 @@ export const SKILL_META: Record<
     tag: "Freeze the enemy",
     desc: "The enemy skips their next turn. Usable 1x per game.",
     color: "#9b8ec4",
+  },
+  phoenix: {
+    name: "PHOENIX",
+    tag: "Refuse to die",
+    desc: "SHOP TRIAL — INSANE ONLY. Passive, 1 use: the blow that would kill you instead burns the charm and leaves you standing at 1 HP in a burst of golden fire.",
+    color: "#e08b3a",
+  },
+  thirdEye: {
+    name: "THIRD EYE",
+    tag: "See the order",
+    desc: "SHOP TRIAL — INSANE ONLY. 1 use: reveal the NEXT 3 SHELLS in exact order. The knowledge stays true as the shells leave the chamber — until a reroll muddies it.",
+    color: "#5aa7a0",
   },
 };
 
@@ -972,6 +990,84 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       sketchCircle(ctx, cx - s * 0.2, cy - s * 0.14, s * 0.03, rng, { width: W * 0.5, fill: INK });
       break;
     }
+    case "phoenix": {
+      // a burning heart: two lobes + point, flames licking off the top
+      ctx.fillStyle = RED;
+      wobblePath(
+        ctx,
+        [
+          [cx - s * 0.26, cy + s * 0.02],
+          [cx - s * 0.26, cy - s * 0.12],
+          [cx, cy - s * 0.02],
+          [cx + s * 0.26, cy - s * 0.12],
+          [cx + s * 0.26, cy + s * 0.02],
+          [cx, cy + s * 0.3],
+        ],
+        rng,
+        2,
+        true,
+      );
+      ctx.fill();
+      sketchStroke(
+        ctx,
+        [
+          [cx - s * 0.26, cy + s * 0.02],
+          [cx - s * 0.26, cy - s * 0.12],
+          [cx, cy - s * 0.02],
+          [cx + s * 0.26, cy - s * 0.12],
+          [cx + s * 0.26, cy + s * 0.02],
+          [cx, cy + s * 0.3],
+          [cx - s * 0.26, cy + s * 0.02],
+        ],
+        rng,
+        { width: W, jitter: 2 },
+      );
+      // flames
+      const flames: [number, number][][] = [
+        [
+          [cx - s * 0.16, cy - s * 0.1],
+          [cx - s * 0.22, cy - s * 0.24],
+          [cx - s * 0.1, cy - s * 0.3],
+        ],
+        [
+          [cx, cy - s * 0.06],
+          [cx - s * 0.02, cy - s * 0.26],
+          [cx + s * 0.06, cy - s * 0.38],
+        ],
+        [
+          [cx + s * 0.16, cy - s * 0.1],
+          [cx + s * 0.24, cy - s * 0.22],
+          [cx + s * 0.14, cy - s * 0.28],
+        ],
+      ];
+      for (const f of flames) {
+        sketchStroke(ctx, f, rng, { width: W * 0.85, jitter: 1.5, color: "#d9a441" });
+      }
+      sketchCircle(ctx, cx - s * 0.28, cy - s * 0.34, s * 0.02, rng, { width: W * 0.4, fill: "#d9a441" });
+      sketchCircle(ctx, cx + s * 0.3, cy - s * 0.4, s * 0.015, rng, { width: W * 0.4, fill: "#d9a441" });
+      break;
+    }
+    case "thirdEye": {
+      // an open eye with a slit pupil and three rays of sight
+      sketchEllipse(ctx, cx, cy + s * 0.04, s * 0.34, s * 0.2, rng, { width: W, fill: PAPER });
+      sketchCircle(ctx, cx, cy + s * 0.04, s * 0.13, rng, { width: W * 0.9, fill: "#1d3a4a" });
+      sketchEllipse(ctx, cx, cy + s * 0.04, s * 0.045, s * 0.11, rng, { width: W * 0.6, fill: INK });
+      sketchCircle(ctx, cx + s * 0.045, cy - s * 0.01, s * 0.03, rng, { width: W * 0.4, fill: PAPER });
+      for (const a of [-2.2, -1.57, -0.94]) {
+        sketchLine(
+          ctx,
+          cx + Math.cos(a) * s * 0.3,
+          cy + s * 0.04 + Math.sin(a) * s * 0.18,
+          cx + Math.cos(a) * s * 0.44,
+          cy + s * 0.04 + Math.sin(a) * s * 0.3,
+          rng,
+          { width: W * 0.7, jitter: 1, color: "#5aa7a0" },
+        );
+      }
+      // "3" badge
+      handText(ctx, "3", cx + s * 0.32, cy + s * 0.34, s * 0.16, "#5aa7a0", -0.1);
+      break;
+    }
   }
 }
 
@@ -984,7 +1080,7 @@ export function texSkillIcon(id: SkillId) {
     (ctx, w, h, rng) => {
       drawIcon(ctx, id, w / 2, h / 2, w, rng);
     },
-    51 + SKILL_IDS.indexOf(id),
+    51 + ALL_SKILL_IDS.indexOf(id),
   );
 }
 

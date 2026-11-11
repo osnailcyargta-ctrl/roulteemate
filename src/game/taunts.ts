@@ -88,6 +88,26 @@ export const TAUNTS = {
     "Nudge fate a little.",
     "Spin it again, gods.",
   ],
+  shop: [
+    "Business break. You buying, kid?",
+    "Everything's for sale. Even luck.",
+    "Cash on the table or get out.",
+  ],
+  aiForget: [
+    "Wait... how many was it?",
+    "Tch. Lost count.",
+    "The board went dark, didn't it...",
+    "Three left? Or four? Tch.",
+  ],
+  phoenix: [
+    "WHAT?! HOW ARE YOU ALIVE?!",
+    "That fire... that's not natural!",
+    "You should be ASHES, kid!",
+  ],
+  thirdEye: [
+    "Those eyes... stop LOOKING at the gun!",
+    "Sorcery again. I hate sorcery.",
+  ],
 } as const;
 
 export type TauntKey = keyof typeof TAUNTS;

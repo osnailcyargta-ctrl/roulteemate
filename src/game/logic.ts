@@ -8,8 +8,16 @@
  * - Shoot ENEMY + LIVE  -> enemy takes the damage, turn passes.
  * - Shoot ENEMY + BLANK -> turn passes.
  *
- * SKILLS (player owns exactly 2, granted by the opening dice; the enemy owns
- * 1 on EASY, 2 on NORMAL and 3 on INSANE):
+ * FOG OF WAR: the honest LIVE/BLANK board only stays up for 3 turns per
+ * reload, then it fades — from then on BOTH sides run on real memory.
+ * The enemy never reads the cylinder; it tracks what it has observed and
+ * (on lower difficulties) misremembers from time to time.
+ *
+ * HP: EASY 6 vs 6 · NORMAL 5 vs 5 · INSANE you 4 vs the DEALER's 5.
+ *
+ * SKILLS (player starts with exactly 2 from the opening dice and can buy
+ * 1-use SHOP TRIALS up to 4 held skills; the enemy owns 1 on EASY, 2 on
+ * NORMAL and 3 on INSANE):
  * - REROLL   : rerandomize the current shell once, then you MUST shoot. CD 2 turns.
  * - VOODOO   : 1x per game, active for 2 turns. While cursed, ANY live hit the
  *              owner would take is REFLECTED to the opponent — even a live
@@ -32,12 +40,14 @@ export interface SkillState {
   charges: number; // for charge-based skills; -1 = cooldown-based
   cooldown: number; // turns left before usable again
   maxCharges: number;
+  trial?: boolean; // shop trial: one single use, then the slot fades away
 }
 
 export type Phase =
   | "menu"
   | "dice"
   | "reloading"
+  | "shop"
   | "playerTurn"
   | "enemyTurn"
   | "gameover"
@@ -47,7 +57,7 @@ export interface GameState {
   phase: Phase;
   round: number;
   difficulty: Difficulty;
-  maxHp: number;
+  maxHp: Record<Side, number>;
   hp: Record<Side, number>;
   cylinder: ShellType[]; // index 0 = next shell
   turn: Side;
@@ -58,6 +68,7 @@ export interface GameState {
   playerSkipTurns: number;
   mustShoot: boolean; // true after reroll
   usedRerollThisTurn: boolean;
+  countdown: number; // turns left before the LIVE/BLANK board fades out
 }
 
 export interface ShotOutcome {
@@ -68,6 +79,7 @@ export interface ShotOutcome {
   reflected: boolean; // damage reflected by voodoo
   bonusShot: boolean; // self-shot blank -> shooter auto-fires once at the opponent
   voodooReroll: boolean; // self-shot blank while cursed -> fresh shell + forced shot
+  phoenixSaved: boolean; // the phoenix charm burned instead of the player
   death: Side | null;
   forced: boolean; // this shot was forced (from the voodoo curse)
 }
@@ -80,6 +92,7 @@ export interface SkillOutcome {
   rerolled?: boolean;
   cuffsApplied?: boolean;
   ejected?: ShellType | null;
+  queue?: (ShellType | null)[]; // third eye: the next shells in order
 }
 
 const CHAMBER_SIZE = 6;
@@ -96,6 +109,8 @@ function emptySkills(): Record<SkillId, SkillState> {
     eject: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
     coffee: { owned: false, charges: 0, cooldown: 0, maxCharges: 2 },
     cuffs: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
+    phoenix: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
+    thirdEye: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
   };
 }
 
@@ -106,6 +121,8 @@ export const SKILL_CD: Record<SkillId, number> = {
   eject: 3,
   coffee: 0,
   cuffs: 0,
+  phoenix: 0,
+  thirdEye: 0,
 };
 
 /** How many skills the ENEMY gets per difficulty. */
@@ -117,21 +134,32 @@ export class RouletteLogic {
   state: GameState;
   /** AI-only knowledge of the current shell (from its own peek). */
   aiKnown: ShellType | null = null;
-  /** Player knowledge of the current shell (from peek). */
+  /** Player knowledge of the current shell (peek / third eye slot 0). */
   playerKnown: ShellType | null = null;
+  /** Ordered knowledge of the NEXT shells (third eye). null = unknown slot. */
+  playerKnownQueue: (ShellType | null)[] = [];
+  /** The enemy's REAL memory of the remaining shells — it never cheats. */
+  aiMem: { live: number; total: number } = { live: 0, total: 0 };
+  /** True when the enemy misremembered at the start of its turn. */
+  lastSlip = false;
 
   constructor(difficulty: Difficulty = "normal") {
     this.state = this.freshState(difficulty);
   }
 
   freshState(difficulty: Difficulty): GameState {
-    const maxHp = difficulty === "easy" ? 5 : 4;
+    const maxHp: Record<Side, number> =
+      difficulty === "easy"
+        ? { player: 6, enemy: 6 }
+        : difficulty === "normal"
+          ? { player: 5, enemy: 5 }
+          : { player: 4, enemy: 5 }; // INSANE: the Dealer out-lives you
     return {
       phase: "dice",
       round: 0,
       difficulty,
       maxHp,
-      hp: { player: maxHp, enemy: maxHp },
+      hp: { player: maxHp.player, enemy: maxHp.enemy },
       cylinder: [],
       turn: "player",
       skills: emptySkills(),
@@ -141,6 +169,7 @@ export class RouletteLogic {
       playerSkipTurns: 0,
       mustShoot: false,
       usedRerollThisTurn: false,
+      countdown: 0,
     };
   }
 
@@ -164,6 +193,9 @@ export class RouletteLogic {
     this.state.cylinder = shells;
     this.playerKnown = null;
     this.aiKnown = null;
+    this.playerKnownQueue = [];
+    this.state.countdown = 4; // the honest board survives the first 3 turns
+    this.aiMem = { live: liveCount, total: shells.length };
   }
 
   get totalRemaining() {
@@ -196,6 +228,65 @@ export class RouletteLogic {
     }
   }
 
+  /** SHOP purchase: a TRIAL skill — one single use, then its slot fades. */
+  grantTrial(side: Side, id: SkillId) {
+    const sk = side === "player" ? this.state.skills[id] : this.state.enemySkills[id];
+    sk.owned = true;
+    sk.trial = true;
+    sk.maxCharges = 1;
+    sk.charges = 1;
+    sk.cooldown = 0;
+  }
+
+  /* ---------------- fog of war (real memory) ---------------- */
+
+  get countsPublic() {
+    return this.state.countdown > 0 && this.state.cylinder.length > 0;
+  }
+
+  private clampMem(v: number) {
+    return Math.min(Math.max(0, v), Math.max(0, this.aiMem.total));
+  }
+
+  /** A shell left the cylinder in full view (fired or ejected). */
+  observeShell(kind: ShellType) {
+    if (this.countsPublic) {
+      this.resyncMem();
+      return;
+    }
+    this.aiMem.total = Math.max(0, this.aiMem.total - 1);
+    this.aiMem.live =
+      kind === "live"
+        ? Math.max(0, this.aiMem.live - 1)
+        : Math.min(this.aiMem.live, this.aiMem.total); // a blank proves past beliefs too generous
+  }
+
+  /** While the board is public both sides track it perfectly. */
+  resyncMem() {
+    this.aiMem = { live: this.liveRemaining, total: this.totalRemaining };
+  }
+
+  /** An unknown fresh shell entered the chamber (voodoo curse reroll). */
+  noteFreshShell() {
+    if (this.countsPublic) {
+      this.resyncMem();
+      return;
+    }
+    this.aiMem.total += 1;
+    this.aiMem.live = this.clampMem(this.aiMem.live + 0.5);
+  }
+
+  /** The chamber was rerolled: the old shell leaves, a fresh 50/50 enters. */
+  noteReroll(oldKnown: ShellType | null) {
+    if (this.countsPublic) {
+      this.resyncMem();
+      return;
+    }
+    const oldP =
+      oldKnown === "live" ? 1 : oldKnown === "blank" ? 0 : this.aiMem.total > 0 ? this.aiMem.live / this.aiMem.total : 0.5;
+    this.aiMem.live = this.clampMem(this.aiMem.live - oldP + 0.5);
+  }
+
   /* ---------------- skills ---------------- */
 
   canUseSkill(side: Side, id: SkillId): boolean {
@@ -204,10 +295,11 @@ export class RouletteLogic {
     if (!sk.owned) return false;
     if (sk.cooldown > 0) return false;
     if (sk.charges === 0) return false;
+    if (id === "phoenix") return false; // passive charm — it triggers itself
     if (side === "player" && st.mustShoot && id !== "coffee") return false;
     if (st.phase !== "playerTurn" && st.phase !== "enemyTurn") return false;
     if (side !== st.turn) return false;
-    if (id === "coffee" && st.hp[side] >= st.maxHp) return false;
+    if (id === "coffee" && st.hp[side] >= st.maxHp[side]) return false;
     if (id === "cuffs" && (side === "player" ? st.enemySkipTurns : st.playerSkipTurns) > 0)
       return false;
     if (id === "voodoo" && st.voodooTurns[side] > 0) return false;
@@ -220,45 +312,70 @@ export class RouletteLogic {
     if (!this.canUseSkill(side, id)) return { ok: false, reason: "not usable" };
     const st = this.state;
     const sk = side === "player" ? st.skills[id] : st.enemySkills[id];
+    // TRIAL skills burn their single charge on any successful use
+    if (sk.trial && sk.charges > 0) sk.charges -= 1;
     switch (id) {
       case "reroll": {
         // pure reroll: random result, may repeat itself
+        this.noteReroll(this.aiKnown);
         const next: ShellType = Math.random() < 0.5 ? "live" : "blank";
         st.cylinder[0] = next;
         sk.cooldown = SKILL_CD.reroll;
         st.mustShoot = true;
         st.usedRerollThisTurn = true;
-        this.playerKnown = null;
+        this.playerKnownQueue = this.playerKnownQueue.length
+          ? [null, ...this.playerKnownQueue.slice(1)]
+          : [];
+        this.playerKnown = this.playerKnownQueue[0] ?? null;
         this.aiKnown = null;
         return { ok: true, rerolled: true };
       }
       case "peek": {
         const cur = st.cylinder[0] ?? null;
         sk.cooldown = SKILL_CD.peek;
-        if (side === "player") this.playerKnown = cur;
-        else this.aiKnown = cur;
+        if (side === "player") {
+          if (this.playerKnownQueue.length) this.playerKnownQueue[0] = cur;
+          else this.playerKnownQueue = [cur];
+          this.playerKnown = cur;
+        } else {
+          this.aiKnown = cur;
+        }
         return { ok: true, revealed: cur };
+      }
+      case "thirdEye": {
+        // reveal the NEXT 3 shells in order; knowledge persists as they fire
+        const q: (ShellType | null)[] = [];
+        for (let i = 0; i < 3 && i < st.cylinder.length; i++) q.push(st.cylinder[i]);
+        this.playerKnownQueue = q;
+        this.playerKnown = q[0] ?? null;
+        return { ok: true, revealed: q[0] ?? null, queue: q };
+      }
+      case "phoenix": {
+        // passive charm — it can never be cast manually (canUseSkill blocks it)
+        return { ok: false, reason: "passive" };
       }
       case "eject": {
         const cur = st.cylinder.shift() ?? null;
         sk.cooldown = SKILL_CD.eject;
-        this.playerKnown = null;
+        this.observeShell(cur ?? "blank"); // the ejected shell is shown to both
+        this.playerKnownQueue = this.playerKnownQueue.slice(1);
+        this.playerKnown = this.playerKnownQueue[0] ?? null;
         this.aiKnown = null;
         return { ok: true, ejected: cur };
       }
       case "coffee": {
-        st.hp[side] = Math.min(st.maxHp, st.hp[side] + 1);
-        sk.charges -= 1;
+        st.hp[side] = Math.min(st.maxHp[side], st.hp[side] + 1);
+        if (!sk.trial) sk.charges -= 1;
         return { ok: true, healed: true };
       }
       case "cuffs": {
-        sk.charges -= 1;
+        if (!sk.trial) sk.charges -= 1;
         if (side === "player") st.enemySkipTurns += 1;
         else st.playerSkipTurns += 1;
         return { ok: true, cuffsApplied: true };
       }
       case "voodoo": {
-        sk.charges -= 1;
+        if (!sk.trial) sk.charges -= 1;
         st.voodooTurns[side] = 2;
         return { ok: true };
       }
@@ -276,7 +393,9 @@ export class RouletteLogic {
   shoot(shooter: Side, target: Side, forced = false): ShotOutcome {
     const st = this.state;
     const shell = st.cylinder.shift()!;
-    this.playerKnown = null;
+    this.observeShell(shell); // the shell leaving the gun is public knowledge
+    this.playerKnownQueue = this.playerKnownQueue.slice(1);
+    this.playerKnown = this.playerKnownQueue[0] ?? null;
     this.aiKnown = null;
 
     const out: ShotOutcome = {
@@ -287,6 +406,7 @@ export class RouletteLogic {
       reflected: false,
       bonusShot: false,
       voodooReroll: false,
+      phoenixSaved: false,
       death: null,
       forced,
     };
@@ -313,6 +433,9 @@ export class RouletteLogic {
           // more — aimed at the opponent. The fresh shell is pushed on top.
           const fresh: ShellType = Math.random() < 0.5 ? "live" : "blank";
           st.cylinder.unshift(fresh);
+          this.noteFreshShell();
+          this.playerKnownQueue = [null, ...this.playerKnownQueue];
+          this.playerKnown = null;
           out.voodooReroll = true;
           return out;
         }
@@ -334,9 +457,22 @@ export class RouletteLogic {
     }
 
     if (out.damageTo) {
-      st.hp[out.damageTo] = Math.max(0, st.hp[out.damageTo] - 1);
-      if (st.hp[out.damageTo] <= 0) {
-        out.death = out.damageTo;
+      // PHOENIX charm: the blow that would kill the player burns the charm
+      // instead and leaves them standing at 1 HP.
+      if (
+        out.damageTo === "player" &&
+        st.hp.player - 1 <= 0 &&
+        st.skills.phoenix.owned &&
+        st.skills.phoenix.charges > 0
+      ) {
+        st.skills.phoenix.charges -= 1;
+        st.hp.player = 1;
+        out.phoenixSaved = true;
+      } else {
+        st.hp[out.damageTo] = Math.max(0, st.hp[out.damageTo] - 1);
+        if (st.hp[out.damageTo] <= 0) {
+          out.death = out.damageTo;
+        }
       }
     }
 
@@ -367,12 +503,25 @@ export class RouletteLogic {
     return next;
   }
 
-  /** Called when a new turn starts: tick the owner's skill cooldowns down. */
+  /** Called when a new turn starts: tick the owner's skill cooldowns down,
+   *  tick the fog-of-war countdown, and maybe make the enemy misremember. */
   startTurnTick() {
     const st = this.state;
     const sks = st.turn === "player" ? st.skills : st.enemySkills;
     for (const id of Object.keys(sks) as SkillId[]) {
       if (sks[id].cooldown > 0) sks[id].cooldown -= 1;
+    }
+    if (st.countdown > 0) st.countdown -= 1;
+    this.lastSlip = false;
+    // FOG OF WAR: once the board has faded, the enemy runs on real memory —
+    // and on lower difficulties it sometimes loses count.
+    if (st.turn === "enemy" && st.countdown <= 0 && st.cylinder.length > 0) {
+      const slip = st.difficulty === "easy" ? 0.25 : st.difficulty === "normal" ? 0.12 : 0;
+      if (Math.random() < slip) {
+        const dir = Math.random() < 0.5 ? -1 : 1;
+        this.aiMem.live = Math.min(Math.max(0, this.aiMem.live + dir), Math.max(0, this.aiMem.total));
+        this.lastSlip = true;
+      }
     }
   }
 
@@ -388,6 +537,8 @@ export const SKILL_POOL: SkillId[] = [
   "eject",
   "coffee",
   "cuffs",
+  "phoenix",
+  "thirdEye",
 ];
 
 /* ---------------- AI ---------------- */
@@ -405,9 +556,11 @@ export class EnemyAI {
   /** One AI step: use 1 skill OR shoot. */
   decide(): AIDecision {
     const st = this.logic.state;
-    const total = this.logic.totalRemaining;
-    const live = this.logic.liveRemaining;
-    const pLive = total > 0 ? live / total : 0;
+    // REAL MEMORY: the AI only knows what it has tracked since the reload —
+    // while the board is public it is exact, after the fade it can be wrong.
+    const total = this.logic.aiMem.total;
+    const live = this.logic.aiMem.live;
+    const pLive = total > 0 ? Math.min(1, Math.max(0, live / total)) : 0;
     const known = this.logic.aiKnown;
     const sk = st.enemySkills;
     const hp = st.hp.enemy;

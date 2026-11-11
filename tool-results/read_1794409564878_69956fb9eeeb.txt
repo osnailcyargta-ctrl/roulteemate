@@ -1,0 +1,2002 @@
+     1→/**
+     2→ * doodle.ts — 2D doodle (hand-drawn) texture factory.
+     3→ * Every visual asset is drawn procedurally on canvas:
+     4→ * guns, shells, dice, skill icons, the enemy, particles, walls, etc.
+     5→ * Deterministic: every texture uses a fixed seed so nothing flickers.
+     6→ */
+     7→
+     8→export type SkillId =
+     9→  | "reroll"
+    10→  | "voodoo"
+    11→  | "peek"
+    12→  | "eject"
+    13→  | "coffee"
+    14→  | "cuffs";
+    15→
+    16→export const SKILL_IDS: SkillId[] = [
+    17→  "reroll",
+    18→  "voodoo",
+    19→  "peek",
+    20→  "eject",
+    21→  "coffee",
+    22→  "cuffs",
+    23→];
+    24→
+    25→export const SKILL_META: Record<
+    26→  SkillId,
+    27→  { name: string; tag: string; desc: string; color: string }
+    28→> = {
+    29→  reroll: {
+    30→    name: "REROLL",
+    31→    tag: "Reweave fate",
+    32→    desc: "Rerandomize the chamber ONCE, then you MUST shoot this turn. 2-turn cooldown.",
+    33→    color: "#d9a441",
+    34→  },
+    35→  voodoo: {
+    36→    name: "VOODOO",
+    37→    tag: "2-turn curse",
+    38→    desc: "1x per game, lasts 2 turns: ANY live hit you would take is REFLECTED to the enemy — even a bullet from your own gun. Curse: shooting yourself with a BLANK rerolls the shell and forces one shot at the enemy.",
+    39→    color: "#5e9c5b",
+    40→  },
+    41→  peek: {
+    42→    name: "PEEK",
+    43→    tag: "Inspect the chamber",
+    44→    desc: "Look at the current shell (LIVE or BLANK). 3-turn cooldown.",
+    45→    color: "#7fb4c9",
+    46→  },
+    47→  eject: {
+    48→    name: "EJECT",
+    49→    tag: "Toss a shell",
+    50→    desc: "Eject the chambered shell without firing. Free action, 3-turn cooldown.",
+    51→    color: "#b08968",
+    52→  },
+    53→  coffee: {
+    54→    name: "COFFEE",
+    55→    tag: "+1 HP",
+    56→    desc: "Sip some hot coffee, restore 1 HP (up to max). Usable 2x per game.",
+    57→    color: "#c98a4b",
+    58→  },
+    59→  cuffs: {
+    60→    name: "CUFFS",
+    61→    tag: "Freeze the enemy",
+    62→    desc: "The enemy skips their next turn. Usable 1x per game.",
+    63→    color: "#9b8ec4",
+    64→  },
+    65→};
+    66→
+    67→/* ============================ core helpers ============================ */
+    68→
+    69→export type RNG = () => number;
+    70→
+    71→export function mulberry32(seed: number): RNG {
+    72→  let a = seed >>> 0;
+    73→  return () => {
+    74→    a |= 0;
+    75→    a = (a + 0x6d2b79f5) | 0;
+    76→    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    77→    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    78→    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    79→  };
+    80→}
+    81→
+    82→const INK = "#221a12";
+    83→const PAPER = "#f6f1e3";
+    84→const RED = "#c73e2e";
+    85→const RED_DARK = "#8f2418";
+    86→const BLANK_BLUE = "#7d8fa3";
+    87→const BRASS = "#c9a227";
+    88→
+    89→const cache = new Map<string, HTMLCanvasElement>();
+    90→const dataCache = new Map<string, string>();
+    91→
+    92→export function makeCanvas(
+    93→  key: string,
+    94→  w: number,
+    95→  h: number,
+    96→  draw: (ctx: CanvasRenderingContext2D, w: number, h: number, rng: RNG) => void,
+    97→  seed = 1,
+    98→): HTMLCanvasElement {
+    99→  const hit = cache.get(key);
+   100→  if (hit) return hit;
+   101→  const cv = document.createElement("canvas");
+   102→  cv.width = w;
+   103→  cv.height = h;
+   104→  const ctx = cv.getContext("2d")!;
+   105→  draw(ctx, w, h, mulberry32(seed));
+   106→  cache.set(key, cv);
+   107→  return cv;
+   108→}
+   109→
+   110→export function dataURL(key: string, cv: HTMLCanvasElement): string {
+   111→  const hit = dataCache.get(key);
+   112→  if (hit) return hit;
+   113→  const url = cv.toDataURL("image/png");
+   114→  dataCache.set(key, url);
+   115→  return url;
+   116→}
+   117→
+   118→function wobblePath(
+   119→  ctx: CanvasRenderingContext2D,
+   120→  pts: [number, number][],
+   121→  rng: RNG,
+   122→  jitter = 3,
+   123→  close = false,
+   124→) {
+   125→  // subdivide
+   126→  const dense: [number, number][] = [];
+   127→  for (let i = 0; i < pts.length - 1; i++) {
+   128→    const [x1, y1] = pts[i];
+   129→    const [x2, y2] = pts[i + 1];
+   130→    const d = Math.hypot(x2 - x1, y2 - y1);
+   131→    const n = Math.max(2, Math.round(d / 16));
+   132→    for (let k = 0; k < n; k++) {
+   133→      const t = k / n;
+   134→      dense.push([x1 + (x2 - x1) * t, y1 + (y2 - y1) * t]);
+   135→    }
+   136→  }
+   137→  dense.push(pts[pts.length - 1]);
+   138→  // jitter
+   139→  const j = dense.map(([x, y]) => [
+   140→    x + (rng() - 0.5) * jitter * 2,
+   141→    y + (rng() - 0.5) * jitter * 2,
+   142→  ]) as [number, number][];
+   143→  ctx.beginPath();
+   144→  ctx.moveTo(j[0][0], j[0][1]);
+   145→  for (let i = 1; i < j.length - 1; i++) {
+   146→    const mx = (j[i][0] + j[i + 1][0]) / 2;
+   147→    const my = (j[i][1] + j[i + 1][1]) / 2;
+   148→    ctx.quadraticCurveTo(j[i][0], j[i][1], mx, my);
+   149→  }
+   150→  const last = j[j.length - 1];
+   151→  ctx.lineTo(last[0], last[1]);
+   152→  if (close) ctx.closePath();
+   153→}
+   154→
+   155→interface StrokeOpts {
+   156→  width?: number;
+   157→  jitter?: number;
+   158→  close?: boolean;
+   159→  color?: string;
+   160→  passes?: number;
+   161→}
+   162→
+   163→function sketchStroke(
+   164→  ctx: CanvasRenderingContext2D,
+   165→  pts: [number, number][],
+   166→  rng: RNG,
+   167→  opts: StrokeOpts = {},
+   168→) {
+   169→  const { width = 6, jitter = 3, close = false, color = INK, passes = 2 } = opts;
+   170→  ctx.strokeStyle = color;
+   171→  ctx.lineCap = "round";
+   172→  ctx.lineJoin = "round";
+   173→  for (let p = 0; p < passes; p++) {
+   174→    ctx.globalAlpha = p === 0 ? 1 : 0.35;
+   175→    ctx.lineWidth = p === 0 ? width : width * 0.7;
+   176→    wobblePath(ctx, pts, rng, jitter, close);
+   177→    ctx.stroke();
+   178→  }
+   179→  ctx.globalAlpha = 1;
+   180→}
+   181→
+   182→function sketchLine(
+   183→  ctx: CanvasRenderingContext2D,
+   184→  x1: number,
+   185→  y1: number,
+   186→  x2: number,
+   187→  y2: number,
+   188→  rng: RNG,
+   189→  opts?: { width?: number; jitter?: number; color?: string },
+   190→) {
+   191→  sketchStroke(ctx, [[x1, y1], [x2, y2]], rng, opts);
+   192→}
+   193→
+   194→function sketchCircle(
+   195→  ctx: CanvasRenderingContext2D,
+   196→  cx: number,
+   197→  cy: number,
+   198→  r: number,
+   199→  rng: RNG,
+   200→  opts: { width?: number; jitter?: number; color?: string; fill?: string; passes?: number } = {},
+   201→) {
+   202→  if (opts.fill && r > 0.5) {
+   203→    ctx.fillStyle = opts.fill;
+   204→    ctx.beginPath();
+   205→    ctx.ellipse(cx, cy, r, r * (0.97 + rng() * 0.05), rng() * 0.2, 0, Math.PI * 2);
+   206→    ctx.fill();
+   207→  }
+   208→  if (r < 0.5) return;
+   209→  const pts: [number, number][] = [];
+   210→  const n = Math.max(10, Math.round(r / 3));
+   211→  for (let i = 0; i <= n; i++) {
+   212→    const a = (i / n) * Math.PI * 2;
+   213→    pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
+   214→  }
+   215→  sketchStroke(ctx, pts, rng, { ...opts, close: true });
+   216→}
+   217→
+   218→function sketchEllipse(
+   219→  ctx: CanvasRenderingContext2D,
+   220→  cx: number,
+   221→  cy: number,
+   222→  rx: number,
+   223→  ry: number,
+   224→  rng: RNG,
+   225→  opts: { width?: number; jitter?: number; fill?: string; rot?: number } = {},
+   226→) {
+   227→  if (opts.fill) {
+   228→    ctx.fillStyle = opts.fill;
+   229→    ctx.beginPath();
+   230→    ctx.ellipse(cx, cy, rx, ry, opts.rot ?? 0, 0, Math.PI * 2);
+   231→    ctx.fill();
+   232→  }
+   233→  const pts: [number, number][] = [];
+   234→  const n = Math.max(10, Math.round((rx + ry) / 4));
+   235→  for (let i = 0; i <= n; i++) {
+   236→    const a = (i / n) * Math.PI * 2;
+   237→    const x = cx + Math.cos(a) * rx;
+   238→    const y = cy + Math.sin(a) * ry;
+   239→    const c = Math.cos(opts.rot ?? 0);
+   240→    const s = Math.sin(opts.rot ?? 0);
+   241→    pts.push([cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c]);
+   242→  }
+   243→  sketchStroke(ctx, pts, rng, { ...opts, close: true });
+   244→}
+   245→
+   246→function hatch(
+   247→  ctx: CanvasRenderingContext2D,
+   248→  x: number,
+   249→  y: number,
+   250→  w: number,
+   251→  h: number,
+   252→  rng: RNG,
+   253→  color = "rgba(34,26,18,0.5)",
+   254→  gap = 9,
+   255→) {
+   256→  ctx.save();
+   257→  ctx.beginPath();
+   258→  ctx.rect(x, y, w, h);
+   259→  ctx.clip();
+   260→  ctx.strokeStyle = color;
+   261→  ctx.lineWidth = 3;
+   262→  for (let i = -h; i < w; i += gap) {
+   263→    ctx.beginPath();
+   264→    ctx.moveTo(x + i + (rng() - 0.5) * 3, y + h + (rng() - 0.5) * 3);
+   265→    ctx.lineTo(x + i + h + (rng() - 0.5) * 3, y + (rng() - 0.5) * 3);
+   266→    ctx.stroke();
+   267→  }
+   268→  ctx.restore();
+   269→}
+   270→
+   271→function handText(
+   272→  ctx: CanvasRenderingContext2D,
+   273→  text: string,
+   274→  x: number,
+   275→  y: number,
+   276→  size: number,
+   277→  color = INK,
+   278→  rot = 0,
+   279→  font = '"Permanent Marker", cursive',
+   280→) {
+   281→  ctx.save();
+   282→  ctx.translate(x, y);
+   283→  ctx.rotate(rot);
+   284→  ctx.font = `${size}px ${font}`;
+   285→  ctx.textAlign = "center";
+   286→  ctx.textBaseline = "middle";
+   287→  ctx.fillStyle = color;
+   288→  ctx.fillText(text, 0, 0);
+   289→  ctx.restore();
+   290→}
+   291→
+   292→/* ============================ GUNS ============================ */
+   293→
+   294→/** Revolver from behind — first person aiming at the enemy (big centered muzzle). */
+   295→export function texGunAimEnemy() {
+   296→  return makeCanvas(
+   297→    "gun-aim-enemy",
+   298→    1024,
+   299→    768,
+   300→    (ctx, w, h, rng) => {
+   301→      const cx = w / 2;
+   302→      // silinder (cylinder) bulat di belakang muzzle
+   303→      sketchCircle(ctx, cx, 430, 190, rng, { width: 9, fill: "#3a3129" });
+   304→      sketchCircle(ctx, cx, 430, 150, rng, { width: 8, fill: "#4a4036" });
+   305→      // chamber holes
+   306→      for (let i = 0; i < 5; i++) {
+   307→        const a = (i / 5) * Math.PI * 2 - Math.PI / 2 + 0.3;
+   308→        sketchCircle(ctx, cx + Math.cos(a) * 84, 430 + Math.sin(a) * 84, 34, rng, {
+   309→          width: 5,
+   310→          fill: "#241d16",
+   311→        });
+   312→      }
+   313→      // rangka barrel dari cylinder ke muzzle
+   314→      sketchStroke(
+   315→        ctx,
+   316→        [
+   317→          [cx - muzzleR() - 26, 402],
+   318→          [cx - 92, 380],
+   319→        ],
+   320→        rng,
+   321→        { width: 10, color: "#3a3129" },
+   322→      );
+   323→      sketchStroke(
+   324→        ctx,
+   325→        [
+   326→          [cx + muzzleR() + 26, 402],
+   327→          [cx + 92, 380],
+   328→        ],
+   329→        rng,
+   330→        { width: 10, color: "#3a3129" },
+   331→      );
+   332→      // muzzle ring besar
+   333→      const mr = 118;
+   334→      sketchCircle(ctx, cx, 396, mr, rng, { width: 13, fill: "#18130e" });
+   335→      sketchCircle(ctx, cx, 396, mr * 0.62, rng, { width: 9, color: "#0d0a07" });
+   336→      ctx.fillStyle = "#0a0805";
+   337→      ctx.beginPath();
+   338→      ctx.ellipse(cx, 396, mr * 0.58, mr * 0.55, 0, 0, Math.PI * 2);
+   339→      ctx.fill();
+   340→      // spiral rifling
+   341→      ctx.strokeStyle = "rgba(246,241,227,0.12)";
+   342→      ctx.lineWidth = 6;
+   343→      for (let i = 0; i < 3; i++) {
+   344→        ctx.beginPath();
+   345→        ctx.ellipse(cx, 396, mr * 0.3 + i * 24, mr * 0.28 + i * 22, 0.4, 0, Math.PI * 2);
+   346→        ctx.stroke();
+   347→      }
+   348→      // front sight
+   349→      sketchStroke(
+   350→        ctx,
+   351→        [
+   352→          [cx, 396 - mr - 4],
+   353→          [cx, 396 - mr - 52],
+   354→        ],
+   355→        rng,
+   356→        { width: 10, color: "#3a3129" },
+   357→      );
+   358→      sketchStroke(
+   359→        ctx,
+   360→        [
+   361→          [cx - 16, 396 - mr - 52],
+   362→          [cx + 16, 396 - mr - 52],
+   363→        ],
+   364→        rng,
+   365→        { width: 9, color: "#3a3129" },
+   366→      );
+   367→      // hammer di atas
+   368→      sketchStroke(
+   369→        ctx,
+   370→        [
+   371→          [cx + 40, 258],
+   372→          [cx + 78, 196],
+   373→          [cx + 122, 216],
+   374→        ],
+   375→        rng,
+   376→        { width: 11, color: "#3a3129" },
+   377→      );
+   378→      // tangan doodle menggenggam dari bawah
+   379→      ctx.fillStyle = PAPER;
+   380→      wobblePath(
+   381→        ctx,
+   382→        [
+   383→          [cx + 150, 768],
+   384→          [cx + 180, 620],
+   385→          [cx + 120, 560],
+   386→          [cx + 60, 540],
+   387→          [cx + 20, 600],
+   388→          [cx - 10, 768],
+   389→        ],
+   390→        rng,
+   391→        4,
+   392→        true,
+   393→      );
+   394→      ctx.fill();
+   395→      sketchStroke(
+   396→        ctx,
+   397→        [
+   398→          [cx + 150, 768],
+   399→          [cx + 180, 620],
+   400→          [cx + 120, 560],
+   401→          [cx + 60, 540],
+   402→          [cx + 20, 600],
+   403→          [cx - 10, 768],
+   404→        ],
+   405→        rng,
+   406→        { width: 8, jitter: 4, close: true },
+   407→      );
+   408→      for (let i = 0; i < 3; i++) {
+   409→        sketchStroke(
+   410→          ctx,
+   411→          [
+   412→            [cx + 30 + i * 46, 560 + i * 6],
+   413→            [cx + 52 + i * 46, 620 + i * 4],
+   414→            [cx + 34 + i * 46, 668],
+   415→          ],
+   416→          rng,
+   417→          { width: 6, jitter: 2 },
+   418→        );
+   419→      }
+   420→      // trigger guard
+   421→      sketchStroke(
+   422→        ctx,
+   423→        [
+   424→          [cx - 96, 520],
+   425→          [cx - 130, 570],
+   426→          [cx - 80, 606],
+   427→        ],
+   428→        rng,
+   429→        { width: 8, color: "#3a3129" },
+   430→      );
+   431→      // hatch shading
+   432→      ctx.save();
+   433→      ctx.beginPath();
+   434→      ctx.ellipse(cx, 430, 190, 190, 0, Math.PI * 0.7, Math.PI * 1.55);
+   435→      ctx.clip();
+   436→      hatch(ctx, cx - 200, 240, 120, 380, rng, "rgba(0,0,0,0.35)", 10);
+   437→      ctx.restore();
+   438→
+   439→      function muzzleR() {
+   440→        return 118;
+   441→      }
+   442→    },
+   443→    7,
+   444→  );
+   445→}
+   446→
+   447→/** Revolver samping mengarah ke kepala sendiri. */
+   448→export function texGunAimSelf() {
+   449→  return makeCanvas(
+   450→    "gun-aim-self",
+   451→    900,
+   452→    768,
+   453→    (ctx, w, h, rng) => {
+   454→      const cx = 430;
+   455→      const cy = 380;
+   456→      // barrel ke kanan
+   457→      ctx.fillStyle = "#3a3129";
+   458→      wobblePath(
+   459→        ctx,
+   460→        [
+   461→          [cx - 30, cy - 36],
+   462→          [cx + 332, cy - 32],
+   463→          [cx + 332, cy + 32],
+   464→          [cx - 30, cy + 36],
+   465→        ],
+   466→        rng,
+   467→        3,
+   468→        true,
+   469→      );
+   470→      ctx.fill();
+   471→      sketchStroke(
+   472→        ctx,
+   473→        [
+   474→          [cx - 30, cy - 36],
+   475→          [cx + 332, cy - 32],
+   476→          [cx + 332, cy + 32],
+   477→          [cx - 30, cy + 36],
+   478→        ],
+   479→        rng,
+   480→        { width: 8, jitter: 3, close: true },
+   481→      );
+   482→      // front sight
+   483→      sketchStroke(
+   484→        ctx,
+   485→        [
+   486→          [cx + 316, cy - 34],
+   487→          [cx + 320, cy - 74],
+   488→        ],
+   489→        rng,
+   490→        { width: 8 },
+   491→      );
+   492→      // cylinder
+   493→      sketchCircle(ctx, cx, cy, 104, rng, { width: 9, fill: "#4a4036" });
+   494→      sketchCircle(ctx, cx - 34, cy - 22, 30, rng, { width: 5, fill: "#241d16" });
+   495→      sketchCircle(ctx, cx + 40, cy + 8, 30, rng, { width: 5, fill: "#241d16" });
+   496→      // frame atas
+   497→      sketchStroke(
+   498→        ctx,
+   499→        [
+   500→          [cx - 150, cy - 88],
+   501→          [cx - 30, cy - 96],
+   502→        ],
+   503→        rng,
+   504→        { width: 9 },
+   505→      );
+   506→      // hammer
+   507→      sketchStroke(
+   508→        ctx,
+   509→        [
+   510→          [cx - 120, cy - 92],
+   511→          [cx - 148, cy - 168],
+   512→          [cx - 96, cy - 180],
+   513→        ],
+   514→        rng,
+   515→        { width: 10 },
+   516→      );
+   517→      // grip + tangan
+   518→      ctx.fillStyle = PAPER;
+   519→      wobblePath(
+   520→        ctx,
+   521→        [
+   522→          [cx - 120, cy + 40],
+   523→          [cx - 210, cy + 120],
+   524→          [cx - 250, cy + 260],
+   525→          [cx - 160, cy + 300],
+   526→          [cx - 70, cy + 210],
+   527→          [cx - 66, cy + 60],
+   528→        ],
+   529→        rng,
+   530→        4,
+   531→        true,
+   532→      );
+   533→      ctx.fill();
+   534→      sketchStroke(
+   535→        ctx,
+   536→        [
+   537→          [cx - 120, cy + 40],
+   538→          [cx - 210, cy + 120],
+   539→          [cx - 250, cy + 260],
+   540→          [cx - 160, cy + 300],
+   541→          [cx - 70, cy + 210],
+   542→          [cx - 66, cy + 60],
+   543→        ],
+   544→        rng,
+   545→        { width: 8, jitter: 4, close: true },
+   546→      );
+   547→      for (let i = 0; i < 3; i++) {
+   548→        sketchStroke(
+   549→          ctx,
+   550→          [
+   551→            [cx - 200 + i * 10, cy + 150 + i * 44],
+   552→            [cx - 130 + i * 8, cy + 160 + i * 44],
+   553→          ],
+   554→          rng,
+   555→          { width: 6, jitter: 2 },
+   556→        );
+   557→      }
+   558→      // trigger guard
+   559→      sketchEllipse(ctx, cx - 60, cy + 66, 52, 40, rng, { width: 8 });
+   560→      hatch(ctx, cx - 260, cy + 130, 110, 170, rng, "rgba(0,0,0,0.25)", 10);
+   561→      handText(ctx, "?!", cx + 150, cy - 120, 44, RED, -0.2);
+   562→    },
+   563→    11,
+   564→  );
+   565→}
+   566→
+   567→/** Revolver samping untuk props di meja. */
+   568→export function texGunTable() {
+   569→  return makeCanvas(
+   570→    "gun-table",
+   571→    768,
+   572→    512,
+   573→    (ctx, w, h, rng) => {
+   574→      const cx = w / 2;
+   575→      const cy = h / 2 + 20;
+   576→      ctx.save();
+   577→      ctx.translate(cx, cy);
+   578→      ctx.rotate(-0.08);
+   579→      ctx.fillStyle = "#3a3129";
+   580→      wobblePath(ctx, [[60, -28], [302, -24], [302, 24], [60, 28]], rng, 3, true);
+   581→      ctx.fill();
+   582→      sketchStroke(ctx, [[60, -28], [302, -24], [302, 24], [60, 28]], rng, {
+   583→        width: 7,
+   584→        jitter: 3,
+   585→        close: true,
+   586→      });
+   587→      sketchStroke(ctx, [[286, -26], [290, -62]], rng, { width: 7 });
+   588→      sketchCircle(ctx, 0, 0, 78, rng, { width: 8, fill: "#4a4036" });
+   589→      sketchCircle(ctx, -26, -14, 22, rng, { width: 4, fill: "#241d16" });
+   590→      sketchCircle(ctx, 30, 6, 22, rng, { width: 4, fill: "#241d16" });
+   591→      sketchStroke(ctx, [[-110, -66], [-20, -72]], rng, { width: 8 });
+   592→      sketchStroke(ctx, [[-90, -70], [-118, -128], [-70, -140]], rng, { width: 8 });
+   593→      ctx.fillStyle = "#6b4a2f";
+   594→      wobblePath(ctx, [[-90, 30], [-160, 90], [-186, 190], [-110, 214], [-50, 150], [-46, 40]], rng, 4, true);
+   595→      ctx.fill();
+   596→      sketchStroke(ctx, [[-90, 30], [-160, 90], [-186, 190], [-110, 214], [-50, 150], [-46, 40]], rng, {
+   597→        width: 8,
+   598→        jitter: 4,
+   599→        close: true,
+   600→      });
+   601→      hatch(ctx, -180, 100, 120, 110, rng, "rgba(0,0,0,0.3)", 9);
+   602→      sketchEllipse(ctx, -30, 52, 40, 30, rng, { width: 7 });
+   603→      ctx.restore();
+   604→      ctx.fillStyle = "rgba(0,0,0,0.35)";
+   605→      ctx.beginPath();
+   606→      ctx.ellipse(cx, cy + 190, 210, 26, 0, 0, Math.PI * 2);
+   607→      ctx.fill();
+   608→    },
+   609→    21,
+   610→  );
+   611→}
+   612→
+   613→/** Revolver dengan cylinder terbuka (reload). */
+   614→export function texGunOpen() {
+   615→  return makeCanvas(
+   616→    "gun-open",
+   617→    768,
+   618→    512,
+   619→    (ctx, w, h, rng) => {
+   620→      const cx = w / 2;
+   621→      const cy = h / 2 + 10;
+   622→      ctx.save();
+   623→      ctx.translate(cx, cy);
+   624→      ctx.rotate(0.06);
+   625→      ctx.fillStyle = "#3a3129";
+   626→      wobblePath(ctx, [[60, -28], [302, -24], [302, 24], [60, 28]], rng, 3, true);
+   627→      ctx.fill();
+   628→      sketchStroke(ctx, [[60, -28], [302, -24], [302, 24], [60, 28]], rng, {
+   629→        width: 7,
+   630→        jitter: 3,
+   631→        close: true,
+   632→      });
+   633→      sketchStroke(ctx, [[286, -26], [290, -62]], rng, { width: 7 });
+   634→      sketchEllipse(ctx, -150, 0, 88, 74, rng, { width: 8, fill: "#4a4036", rot: -0.35 });
+   635→      sketchCircle(ctx, -190, -34, 26, rng, { width: 5, fill: "#241d16" });
+   636→      sketchCircle(ctx, -168, 22, 26, rng, { width: 5, fill: "#241d16" });
+   637→      sketchCircle(ctx, -110, -2, 26, rng, { width: 5, fill: "#241d16" });
+   638→      ctx.fillStyle = "#6b4a2f";
+   639→      wobblePath(ctx, [[-60, 40], [-130, 100], [-156, 200], [-80, 224], [-20, 160], [-16, 50]], rng, 4, true);
+   640→      ctx.fill();
+   641→      sketchStroke(ctx, [[-60, 40], [-130, 100], [-156, 200], [-80, 224], [-20, 160], [-16, 50]], rng, {
+   642→        width: 8,
+   643→        jitter: 4,
+   644→        close: true,
+   645→      });
+   646→      ctx.restore();
+   647→    },
+   648→    31,
+   649→  );
+   650→}
+   651→
+   652→/* ============================ SHELLS ============================ */
+   653→
+   654→/** Shell doodle dengan muka: live merah marah, blank biru ngantuk. */
+   655→export function texShell(kind: "live" | "blank") {
+   656→  return makeCanvas(
+   657→    `shell-${kind}`,
+   658→    256,
+   659→    256,
+   660→    (ctx, w, h, rng) => {
+   661→      const cx = w / 2;
+   662→      const body = kind === "live" ? RED : BLANK_BLUE;
+   663→      const dark = kind === "live" ? RED_DARK : "#57697c";
+   664→      ctx.fillStyle = body;
+   665→      wobblePath(
+   666→        ctx,
+   667→        [
+   668→          [cx - 62, 60],
+   669→          [cx + 62, 60],
+   670→          [cx + 68, 150],
+   671→          [cx + 50, 196],
+   672→          [cx - 50, 196],
+   673→          [cx - 68, 150],
+   674→        ],
+   675→        rng,
+   676→        3,
+   677→        true,
+   678→      );
+   679→      ctx.fill();
+   680→      sketchStroke(
+   681→        ctx,
+   682→        [
+   683→          [cx - 62, 60],
+   684→          [cx + 62, 60],
+   685→          [cx + 68, 150],
+   686→          [cx + 50, 196],
+   687→          [cx - 50, 196],
+   688→          [cx - 68, 150],
+   689→        ],
+   690→        rng,
+   691→        { width: 7, jitter: 3, close: true },
+   692→      );
+   693→      ctx.fillStyle = BRASS;
+   694→      wobblePath(
+   695→        ctx,
+   696→        [
+   697→          [cx - 52, 196],
+   698→          [cx + 52, 196],
+   699→          [cx + 46, 234],
+   700→          [cx - 46, 234],
+   701→        ],
+   702→        rng,
+   703→        2,
+   704→        true,
+   705→      );
+   706→      ctx.fill();
+   707→      sketchStroke(
+   708→        ctx,
+   709→        [
+   710→          [cx - 52, 196],
+   711→          [cx + 52, 196],
+   712→          [cx + 46, 234],
+   713→          [cx - 46, 234],
+   714→        ],
+   715→        rng,
+   716→        { width: 6, jitter: 2, close: true },
+   717→      );
+   718→      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+   719→      ctx.lineWidth = 8;
+   720→      ctx.beginPath();
+   721→      ctx.moveTo(cx - 38, 76);
+   722→      ctx.quadraticCurveTo(cx - 52, 120, cx - 42, 176);
+   723→      ctx.stroke();
+   724→      const eyeY = 108;
+   725→      if (kind === "live") {
+   726→        sketchStroke(ctx, [[cx - 40, eyeY - 26], [cx - 12, eyeY - 10]], rng, { width: 7, jitter: 2, color: INK });
+   727→        sketchStroke(ctx, [[cx + 40, eyeY - 26], [cx + 12, eyeY - 10]], rng, { width: 7, jitter: 2, color: INK });
+   728→        sketchCircle(ctx, cx - 26, eyeY + 4, 7, rng, { width: 5, fill: INK });
+   729→        sketchCircle(ctx, cx + 26, eyeY + 4, 7, rng, { width: 5, fill: INK });
+   730→        sketchStroke(
+   731→          ctx,
+   732→          [
+   733→            [cx - 28, 150],
+   734→            [cx - 12, 142],
+   735→            [cx + 4, 150],
+   736→            [cx + 20, 142],
+   737→            [cx + 34, 150],
+   738→          ],
+   739→          rng,
+   740→          { width: 6, jitter: 2 },
+   741→        );
+   742→      } else {
+   743→        sketchStroke(ctx, [[cx - 42, eyeY], [cx - 10, eyeY]], rng, { width: 7, jitter: 2 });
+   744→        sketchStroke(ctx, [[cx + 42, eyeY], [cx + 10, eyeY]], rng, { width: 7, jitter: 2 });
+   745→        sketchCircle(ctx, cx - 26, eyeY + 10, 6, rng, { width: 5, fill: INK });
+   746→        sketchCircle(ctx, cx + 26, eyeY + 10, 6, rng, { width: 5, fill: INK });
+   747→        sketchCircle(ctx, cx, 150, 12, rng, { width: 6 });
+   748→        handText(ctx, "z", cx + 74, 66, 34, dark, 0.3);
+   749→        handText(ctx, "z", cx + 96, 44, 24, dark, 0.4);
+   750→      }
+   751→      handText(ctx, kind === "live" ? "LIVE" : "BLANK", cx, 44, 34, dark, -0.05);
+   752→    },
+   753→    kind === "live" ? 41 : 43,
+   754→  );
+   755→}
+   756→
+   757→/* ============================ DICE & SKILL ICONS ============================ */
+   758→
+   759→function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: number, s: number, rng: RNG) {
+   760→  const W = s * 0.13;
+   761→  switch (id) {
+   762→    case "reroll": {
+   763→      const r = s * 0.3;
+   764→      const pts: [number, number][] = [];
+   765→      for (let i = 0; i <= 20; i++) {
+   766→        const a = -0.4 + (i / 20) * Math.PI * 1.75;
+   767→        pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
+   768→      }
+   769→      sketchStroke(ctx, pts, rng, { width: W * 1.1, jitter: s * 0.01 });
+   770→      const ea = -0.4 + Math.PI * 1.75;
+   771→      const ex = cx + Math.cos(ea) * r;
+   772→      const ey = cy + Math.sin(ea) * r;
+   773→      sketchStroke(
+   774→        ctx,
+   775→        [
+   776→          [ex - s * 0.14, ey - s * 0.1],
+   777→          [ex + s * 0.05, ey],
+   778→          [ex - s * 0.1, ey + s * 0.12],
+   779→        ],
+   780→        rng,
+   781→        { width: W * 0.8, jitter: s * 0.008 },
+   782→      );
+   783→      break;
+   784→    }
+   785→    case "voodoo": {
+   786→      sketchCircle(ctx, cx, cy - s * 0.08, s * 0.26, rng, { width: W, fill: PAPER });
+   787→      ctx.fillStyle = PAPER;
+   788→      wobblePath(
+   789→        ctx,
+   790→        [
+   791→          [cx - s * 0.12, cy + s * 0.14],
+   792→          [cx + s * 0.12, cy + s * 0.14],
+   793→          [cx + s * 0.09, cy + s * 0.3],
+   794→          [cx - s * 0.09, cy + s * 0.3],
+   795→        ],
+   796→        rng,
+   797→        2,
+   798→        true,
+   799→      );
+   800→      ctx.fill();
+   801→      sketchStroke(
+   802→        ctx,
+   803→        [
+   804→          [cx - s * 0.12, cy + s * 0.14],
+   805→          [cx + s * 0.12, cy + s * 0.14],
+   806→          [cx + s * 0.09, cy + s * 0.3],
+   807→          [cx - s * 0.09, cy + s * 0.3],
+   808→        ],
+   809→        rng,
+   810→        { width: W * 0.9, jitter: 2, close: true },
+   811→      );
+   812→      sketchCircle(ctx, cx - s * 0.11, cy - s * 0.06, s * 0.07, rng, { width: W * 0.8, fill: INK });
+   813→      sketchCircle(ctx, cx + s * 0.11, cy - s * 0.06, s * 0.07, rng, { width: W * 0.8, fill: INK });
+   814→      for (let i = -1; i <= 1; i++) {
+   815→        sketchLine(ctx, cx + i * s * 0.07, cy + s * 0.16, cx + i * s * 0.07, cy + s * 0.24, rng, {
+   816→          width: W * 0.6,
+   817→          jitter: 1,
+   818→        });
+   819→      }
+   820→      sketchStroke(
+   821→        ctx,
+   822→        [
+   823→          [cx - s * 0.34, cy - s * 0.34],
+   824→          [cx + s * 0.34, cy + s * 0.34],
+   825→        ],
+   826→        rng,
+   827→        { width: W * 0.9, color: "#5e9c5b" },
+   828→      );
+   829→      sketchStroke(
+   830→        ctx,
+   831→        [
+   832→          [cx + s * 0.34, cy - s * 0.34],
+   833→          [cx - s * 0.34, cy + s * 0.34],
+   834→        ],
+   835→        rng,
+   836→        { width: W * 0.9, color: "#5e9c5b" },
+   837→      );
+   838→      break;
+   839→    }
+   840→    case "peek": {
+   841→      sketchEllipse(ctx, cx, cy, s * 0.34, s * 0.2, rng, { width: W, fill: PAPER });
+   842→      sketchCircle(ctx, cx, cy, s * 0.12, rng, { width: W * 0.9, fill: "#1d3a4a" });
+   843→      sketchCircle(ctx, cx + s * 0.04, cy - s * 0.04, s * 0.035, rng, { width: W * 0.5, fill: PAPER });
+   844→      for (const a of [-2.4, -1.9, -1.2, -0.6, -0.2]) {
+   845→        sketchLine(
+   846→          ctx,
+   847→          cx + Math.cos(a) * s * 0.32,
+   848→          cy + Math.sin(a) * s * 0.2,
+   849→          cx + Math.cos(a) * s * 0.42,
+   850→          cy + Math.sin(a) * s * 0.28,
+   851→          rng,
+   852→          { width: W * 0.7, jitter: 1 },
+   853→        );
+   854→      }
+   855→      break;
+   856→    }
+   857→    case "eject": {
+   858→      ctx.fillStyle = RED;
+   859→      wobblePath(
+   860→        ctx,
+   861→        [
+   862→          [cx - s * 0.3, cy - s * 0.16],
+   863→          [cx - s * 0.02, cy - s * 0.16],
+   864→          [cx - s * 0.02, cy + s * 0.2],
+   865→          [cx - s * 0.3, cy + s * 0.2],
+   866→        ],
+   867→        rng,
+   868→        2,
+   869→        true,
+   870→      );
+   871→      ctx.fill();
+   872→      sketchStroke(
+   873→        ctx,
+   874→        [
+   875→          [cx - s * 0.3, cy - s * 0.16],
+   876→          [cx - s * 0.02, cy - s * 0.16],
+   877→          [cx - s * 0.02, cy + s * 0.2],
+   878→          [cx - s * 0.3, cy + s * 0.2],
+   879→        ],
+   880→        rng,
+   881→        { width: W * 0.9, jitter: 2, close: true },
+   882→      );
+   883→      ctx.fillStyle = BRASS;
+   884→      ctx.fillRect(cx - s * 0.3, cy + s * 0.2, s * 0.28, s * 0.07);
+   885→      sketchStroke(
+   886→        ctx,
+   887→        [
+   888→          [cx + s * 0.06, cy],
+   889→          [cx + s * 0.34, cy],
+   890→        ],
+   891→        rng,
+   892→        { width: W * 1.1 },
+   893→      );
+   894→      sketchStroke(
+   895→        ctx,
+   896→        [
+   897→          [cx + s * 0.22, cy - s * 0.12],
+   898→          [cx + s * 0.34, cy],
+   899→          [cx + s * 0.22, cy + s * 0.12],
+   900→        ],
+   901→        rng,
+   902→        { width: W, jitter: 1.5 },
+   903→      );
+   904→      break;
+   905→    }
+   906→    case "coffee": {
+   907→      ctx.fillStyle = PAPER;
+   908→      wobblePath(
+   909→        ctx,
+   910→        [
+   911→          [cx - s * 0.24, cy - s * 0.05],
+   912→          [cx + s * 0.24, cy - s * 0.05],
+   913→          [cx + s * 0.18, cy + s * 0.26],
+   914→          [cx - s * 0.18, cy + s * 0.26],
+   915→        ],
+   916→        rng,
+   917→        2,
+   918→        true,
+   919→      );
+   920→      ctx.fill();
+   921→      sketchStroke(
+   922→        ctx,
+   923→        [
+   924→          [cx - s * 0.24, cy - s * 0.05],
+   925→          [cx + s * 0.24, cy - s * 0.05],
+   926→          [cx + s * 0.18, cy + s * 0.26],
+   927→          [cx - s * 0.18, cy + s * 0.26],
+   928→        ],
+   929→        rng,
+   930→        { width: W, jitter: 2, close: true },
+   931→      );
+   932→      sketchEllipse(ctx, cx + s * 0.3, cy + s * 0.07, s * 0.09, s * 0.11, rng, { width: W * 0.9 });
+   933→      sketchEllipse(ctx, cx, cy - s * 0.04, s * 0.2, s * 0.05, rng, { width: W * 0.7, fill: "#6b4a2f" });
+   934→      sketchStroke(
+   935→        ctx,
+   936→        [
+   937→          [cx - s * 0.1, cy - s * 0.12],
+   938→          [cx - s * 0.14, cy - s * 0.24],
+   939→          [cx - s * 0.06, cy - s * 0.34],
+   940→        ],
+   941→        rng,
+   942→        { width: W * 0.7, jitter: 2 },
+   943→      );
+   944→      sketchStroke(
+   945→        ctx,
+   946→        [
+   947→          [cx + s * 0.08, cy - s * 0.12],
+   948→          [cx + s * 0.04, cy - s * 0.26],
+   949→          [cx + s * 0.14, cy - s * 0.36],
+   950→        ],
+   951→        rng,
+   952→        { width: W * 0.7, jitter: 2 },
+   953→      );
+   954→      break;
+   955→    }
+   956→    case "cuffs": {
+   957→      sketchCircle(ctx, cx - s * 0.2, cy + s * 0.05, s * 0.15, rng, { width: W, fill: PAPER });
+   958→      sketchCircle(ctx, cx + s * 0.2, cy + s * 0.05, s * 0.15, rng, { width: W, fill: PAPER });
+   959→      sketchCircle(ctx, cx - s * 0.2, cy + s * 0.05, s * 0.07, rng, { width: W * 0.7 });
+   960→      sketchCircle(ctx, cx + s * 0.2, cy + s * 0.05, s * 0.07, rng, { width: W * 0.7 });
+   961→      sketchStroke(
+   962→        ctx,
+   963→        [
+   964→          [cx - s * 0.07, cy - s * 0.02],
+   965→          [cx - s * 0.02, cy - s * 0.12],
+   966→          [cx + s * 0.02, cy - s * 0.12],
+   967→          [cx + s * 0.07, cy - s * 0.02],
+   968→        ],
+   969→        rng,
+   970→        { width: W * 0.8, jitter: 2 },
+   971→      );
+   972→      sketchCircle(ctx, cx - s * 0.2, cy - s * 0.14, s * 0.03, rng, { width: W * 0.5, fill: INK });
+   973→      break;
+   974→    }
+   975→  }
+   976→}
+   977→
+   978→/** Ikon skill polos (transparan) untuk HUD. */
+   979→export function texSkillIcon(id: SkillId) {
+   980→  return makeCanvas(
+   981→    `icon-${id}`,
+   982→    256,
+   983→    256,
+   984→    (ctx, w, h, rng) => {
+   985→      drawIcon(ctx, id, w / 2, h / 2, w, rng);
+   986→    },
+   987→    51 + SKILL_IDS.indexOf(id),
+   988→  );
+   989→}
+   990→
+   991→/** Satu sisi dadu: ikon skill + nama. */
+   992→export function texDieFace(id: SkillId) {
+   993→  return makeCanvas(
+   994→    `die-${id}`,
+   995→    512,
+   996→    512,
+   997→    (ctx, w, h, rng) => {
+   998→      const meta = SKILL_META[id];
+   999→      ctx.fillStyle = PAPER;
+  1000→      wobblePath(
+  1001→        ctx,
+  1002→        [
+  1003→          [56, 48],
+  1004→          [456, 40],
+  1005→          [468, 462],
+  1006→          [44, 470],
+  1007→        ],
+  1008→        rng,
+  1009→        5,
+  1010→        true,
+  1011→      );
+  1012→      ctx.fill();
+  1013→      sketchStroke(
+  1014→        ctx,
+  1015→        [
+  1016→          [56, 48],
+  1017→          [456, 40],
+  1018→          [468, 462],
+  1019→          [44, 470],
+  1020→        ],
+  1021→        rng,
+  1022→        { width: 12, jitter: 5, close: true },
+  1023→      );
+  1024→      const pips: [number, number][] = [
+  1025→        [96, 88],
+  1026→        [416, 84],
+  1027→        [92, 428],
+  1028→        [420, 432],
+  1029→      ];
+  1030→      for (const [px, py] of pips) {
+  1031→        sketchCircle(ctx, px, py, 9, rng, { width: 5, fill: INK });
+  1032→      }
+  1033→      drawIcon(ctx, id, w / 2, h / 2 - 30, 340, rng);
+  1034→      handText(ctx, meta.name, w / 2, 432, 56, INK, -0.02);
+  1035→    },
+  1036→    61 + SKILL_IDS.indexOf(id),
+  1037→  );
+  1038→}
+  1039→
+  1040→/* ============================ ENEMY ============================ */
+  1041→
+  1042→export type EnemyMood =
+  1043→  | "idle1"
+  1044→  | "idle2"
+  1045→  | "talk"
+  1046→  | "grin"
+  1047→  | "hit"
+  1048→  | "dead"
+  1049→  | "laugh"
+  1050→  | "aim"
+  1051→  | "scared";
+  1052→
+  1053→/** THE DEALER — doodle enemy (bust). */
+  1054→export function texEnemy(mood: EnemyMood) {
+  1055→  return makeCanvas(
+  1056→    `enemy-${mood}`,
+  1057→    640,
+  1058→    640,
+  1059→    (ctx, w, h, rng) => {
+  1060→      const cx = w / 2;
+  1061→      const tilt =
+  1062→        mood === "hit" ? -0.1 : mood === "dead" ? 0.2 : mood === "laugh" ? -0.06 : 0;
+  1063→      ctx.save();
+  1064→      ctx.translate(cx, 330);
+  1065→      ctx.rotate(tilt);
+  1066→      ctx.translate(-cx, -330);
+  1067→
+  1068→      // badan / jaket
+  1069→      ctx.fillStyle = "#4b5a4e";
+  1070→      wobblePath(
+  1071→        ctx,
+  1072→        [
+  1073→          [92, 640],
+  1074→          [130, 470],
+  1075→          [210, 420],
+  1076→          [cx, 396],
+  1077→          [434, 424],
+  1078→          [512, 478],
+  1079→          [548, 640],
+  1080→        ],
+  1081→        rng,
+  1082→        5,
+  1083→        true,
+  1084→      );
+  1085→      ctx.fill();
+  1086→      sketchStroke(
+  1087→        ctx,
+  1088→        [
+  1089→          [92, 640],
+  1090→          [130, 470],
+  1091→          [210, 420],
+  1092→          [cx, 396],
+  1093→          [434, 424],
+  1094→          [512, 478],
+  1095→          [548, 640],
+  1096→        ],
+  1097→        rng,
+  1098→        { width: 8, jitter: 4, close: true },
+  1099→      );
+  1100→      ctx.fillStyle = "#8a7a5e";
+  1101→      wobblePath(
+  1102→        ctx,
+  1103→        [
+  1104→          [cx - 74, 424],
+  1105→          [cx + 74, 424],
+  1106→          [cx + 40, 640],
+  1107→          [cx - 40, 640],
+  1108→        ],
+  1109→        rng,
+  1110→        3,
+  1111→        true,
+  1112→      );
+  1113→      ctx.fill();
+  1114→      sketchStroke(
+  1115→        ctx,
+  1116→        [
+  1117→          [cx - 74, 424],
+  1118→          [cx + 74, 424],
+  1119→          [cx + 40, 640],
+  1120→          [cx - 40, 640],
+  1121→        ],
+  1122→        rng,
+  1123→        { width: 6, jitter: 3, close: true },
+  1124→      );
+  1125→      ctx.fillStyle = PAPER;
+  1126→      wobblePath(
+  1127→        ctx,
+  1128→        [
+  1129→          [cx - 60, 360],
+  1130→          [cx + 60, 360],
+  1131→          [cx + 54, 440],
+  1132→          [cx - 54, 440],
+  1133→        ],
+  1134→        rng,
+  1135→        3,
+  1136→        true,
+  1137→      );
+  1138→      ctx.fill();
+  1139→
+  1140→      // kepala
+  1141→      const hy = 232;
+  1142→      sketchCircle(ctx, cx, hy, 148, rng, { width: 9, fill: PAPER });
+  1143→      sketchCircle(ctx, cx - 148, hy + 16, 26, rng, { width: 7, fill: PAPER });
+  1144→      sketchCircle(ctx, cx + 148, hy + 16, 26, rng, { width: 7, fill: PAPER });
+  1145→      // bandana merah
+  1146→      ctx.fillStyle = RED;
+  1147→      wobblePath(
+  1148→        ctx,
+  1149→        [
+  1150→          [cx - 146, hy - 52],
+  1151→          [cx - 60, hy - 96],
+  1152→          [cx + 60, hy - 100],
+  1153→          [cx + 146, hy - 48],
+  1154→          [cx + 132, hy - 20],
+  1155→          [cx - 132, hy - 24],
+  1156→        ],
+  1157→        rng,
+  1158→        4,
+  1159→        true,
+  1160→      );
+  1161→      ctx.fill();
+  1162→      sketchStroke(
+  1163→        ctx,
+  1164→        [
+  1165→          [cx - 146, hy - 52],
+  1166→          [cx - 60, hy - 96],
+  1167→          [cx + 60, hy - 100],
+  1168→          [cx + 146, hy - 48],
+  1169→          [cx + 132, hy - 20],
+  1170→          [cx - 132, hy - 24],
+  1171→        ],
+  1172→        rng,
+  1173→        { width: 7, jitter: 3, close: true, color: RED_DARK },
+  1174→      );
+  1175→      sketchCircle(ctx, cx + 158, hy - 30, 16, rng, { width: 6, fill: RED });
+  1176→      sketchStroke(
+  1177→        ctx,
+  1178→        [
+  1179→          [cx + 168, hy - 38],
+  1180→          [cx + 210, hy - 60],
+  1181→          [cx + 226, hy - 20],
+  1182→        ],
+  1183→        rng,
+  1184→        { width: 8, color: RED, jitter: 4 },
+  1185→      );
+  1186→      for (const [x1, y1, x2, y2] of [
+  1187→        [cx - 90, hy - 140, cx - 104, hy - 186],
+  1188→        [cx - 40, hy - 150, cx - 44, hy - 200],
+  1189→        [cx + 30, hy - 152, cx + 40, hy - 198],
+  1190→        [cx + 96, hy - 134, cx + 116, hy - 178],
+  1191→      ] as [number, number, number, number][]) {
+  1192→        sketchLine(ctx, x1, y1, x2, y2, rng, { width: 6, jitter: 3 });
+  1193→      }
+  1194→
+  1195→      // ---- wajah per mood ----
+  1196→      const eyeY = hy - 8;
+  1197→      const exL = cx - 62;
+  1198→      const exR = cx + 62;
+  1199→      ctx.lineCap = "round";
+  1200→      if (mood === "dead") {
+  1201→        for (const ex of [exL, exR]) {
+  1202→          sketchStroke(ctx, [[ex - 24, eyeY - 24], [ex + 24, eyeY + 24]], rng, { width: 8, jitter: 2 });
+  1203→          sketchStroke(ctx, [[ex + 24, eyeY - 24], [ex - 24, eyeY + 24]], rng, { width: 8, jitter: 2 });
+  1204→        }
+  1205→        ctx.fillStyle = "#d98a8a";
+  1206→        wobblePath(ctx, [[cx - 20, hy + 66], [cx + 20, hy + 66], [cx + 14, hy + 108], [cx - 14, hy + 108]], rng, 2, true);
+  1207→        ctx.fill();
+  1208→        sketchStroke(ctx, [[cx - 20, hy + 66], [cx + 20, hy + 66], [cx + 14, hy + 108], [cx - 14, hy + 108]], rng, { width: 5, jitter: 2, close: true });
+  1209→        sketchLine(ctx, cx - 46, hy + 64, cx + 46, hy + 66, rng, { width: 7, jitter: 2 });
+  1210→      } else if (mood === "hit") {
+  1211→        for (const sgn of [-1, 1]) {
+  1212→          const ex = cx + sgn * 62;
+  1213→          sketchStroke(ctx, [[ex - 22 * sgn, eyeY - 22], [ex + 10 * sgn, eyeY]], rng, { width: 8, jitter: 2 });
+  1214→          sketchStroke(ctx, [[ex - 22 * sgn, eyeY + 22], [ex + 10 * sgn, eyeY]], rng, { width: 8, jitter: 2 });
+  1215→        }
+  1216→        sketchEllipse(ctx, cx, hy + 74, 34, 26, rng, { width: 7, fill: "#3a2620" });
+  1217→        sketchCircle(ctx, cx - 110, hy + 40, 18, rng, { width: 5, color: "rgba(199,62,46,0.7)" });
+  1218→        sketchCircle(ctx, cx + 118, hy + 20, 14, rng, { width: 5, color: "rgba(199,62,46,0.7)" });
+  1219→      } else if (mood === "laugh") {
+  1220→        for (const sgn of [-1, 1]) {
+  1221→          const ex = cx + sgn * 62;
+  1222→          sketchStroke(
+  1223→            ctx,
+  1224→            [
+  1225→              [ex - 26, eyeY + 8],
+  1226→              [ex, eyeY - 20],
+  1227→              [ex + 26, eyeY + 8],
+  1228→            ],
+  1229→            rng,
+  1230→            { width: 8, jitter: 2 },
+  1231→          );
+  1232→        }
+  1233→        ctx.fillStyle = "#3a2620";
+  1234→        wobblePath(
+  1235→          ctx,
+  1236→          [
+  1237→            [cx - 62, hy + 40],
+  1238→            [cx + 62, hy + 40],
+  1239→            [cx + 40, hy + 108],
+  1240→            [cx - 40, hy + 108],
+  1241→          ],
+  1242→          rng,
+  1243→          3,
+  1244→          true,
+  1245→        );
+  1246→        ctx.fill();
+  1247→        sketchStroke(
+  1248→          ctx,
+  1249→          [
+  1250→            [cx - 62, hy + 40],
+  1251→            [cx + 62, hy + 40],
+  1252→            [cx + 40, hy + 108],
+  1253→            [cx - 40, hy + 108],
+  1254→          ],
+  1255→          rng,
+  1256→          { width: 7, jitter: 3, close: true },
+  1257→        );
+  1258→        ctx.fillStyle = PAPER;
+  1259→        ctx.fillRect(cx - 50, hy + 40, 100, 18);
+  1260→        sketchLine(ctx, cx - 50, hy + 58, cx + 50, hy + 58, rng, { width: 5, jitter: 1.5 });
+  1261→      } else if (mood === "talk") {
+  1262→        sketchEllipse(ctx, exL, eyeY, 26, 30, rng, { width: 7, fill: "#ffffff" });
+  1263→        sketchEllipse(ctx, exR, eyeY, 26, 30, rng, { width: 7, fill: "#ffffff" });
+  1264→        sketchCircle(ctx, exL + 4, eyeY + 4, 9, rng, { width: 4, fill: INK });
+  1265→        sketchCircle(ctx, exR + 4, eyeY + 4, 9, rng, { width: 4, fill: INK });
+  1266→        sketchEllipse(ctx, cx, hy + 72, 26, 34, rng, { width: 7, fill: "#3a2620" });
+  1267→      } else if (mood === "scared") {
+  1268→        sketchCircle(ctx, exL, eyeY, 32, rng, { width: 7, fill: "#ffffff" });
+  1269→        sketchCircle(ctx, exR, eyeY, 32, rng, { width: 7, fill: "#ffffff" });
+  1270→        sketchCircle(ctx, exL, eyeY, 7, rng, { width: 4, fill: INK });
+  1271→        sketchCircle(ctx, exR, eyeY, 7, rng, { width: 4, fill: INK });
+  1272→        sketchStroke(
+  1273→          ctx,
+  1274→          [
+  1275→            [cx - 44, hy + 76],
+  1276→            [cx - 22, hy + 64],
+  1277→            [cx, hy + 78],
+  1278→            [cx + 22, hy + 64],
+  1279→            [cx + 44, hy + 76],
+  1280→          ],
+  1281→          rng,
+  1282→          { width: 7, jitter: 2 },
+  1283→        );
+  1284→        sketchStroke(ctx, [[cx - 170, hy - 40], [cx - 186, hy - 6]], rng, { width: 7, color: "#7fb4c9", jitter: 2 });
+  1285→        sketchStroke(ctx, [[cx + 176, hy - 20], [cx + 192, hy + 14]], rng, { width: 7, color: "#7fb4c9", jitter: 2 });
+  1286→      } else if (mood === "grin") {
+  1287→        sketchEllipse(ctx, exL, eyeY, 26, 28, rng, { width: 7, fill: "#ffffff" });
+  1288→        sketchEllipse(ctx, exR, eyeY, 26, 28, rng, { width: 7, fill: "#ffffff" });
+  1289→        sketchCircle(ctx, exL - 2, eyeY + 2, 9, rng, { width: 4, fill: INK });
+  1290→        sketchCircle(ctx, exR - 2, eyeY + 2, 9, rng, { width: 4, fill: INK });
+  1291→        sketchStroke(
+  1292→          ctx,
+  1293→          [
+  1294→            [cx - 74, hy + 44],
+  1295→            [cx, hy + 62],
+  1296→            [cx + 74, hy + 40],
+  1297→          ],
+  1298→          rng,
+  1299→          { width: 8, jitter: 3 },
+  1300→        );
+  1301→        sketchLine(ctx, cx - 62, hy + 58, cx + 60, hy + 56, rng, { width: 6, jitter: 2 });
+  1302→        for (let i = -2; i <= 2; i++) {
+  1303→          sketchLine(ctx, cx + i * 24, hy + 48, cx + i * 24, hy + 60, rng, { width: 4, jitter: 1 });
+  1304→        }
+  1305→      } else {
+  1306→        sketchEllipse(ctx, exL, eyeY, 26, 30, rng, { width: 7, fill: "#ffffff" });
+  1307→        sketchEllipse(ctx, exR, eyeY, 26, 30, rng, { width: 7, fill: "#ffffff" });
+  1308→        const px = mood === "idle2" ? 6 : -3;
+  1309→        const py = mood === "idle2" ? -2 : 3;
+  1310→        sketchCircle(ctx, exL + px, eyeY + py, 9, rng, { width: 4, fill: INK });
+  1311→        sketchCircle(ctx, exR + px, eyeY + py, 9, rng, { width: 4, fill: INK });
+  1312→        sketchStroke(ctx, [[exL - 28, eyeY - 40], [exL + 22, eyeY - 34]], rng, { width: 8, jitter: 2 });
+  1313→        sketchStroke(ctx, [[exR - 22, eyeY - 34], [exR + 28, eyeY - 40]], rng, { width: 8, jitter: 2 });
+  1314→        if (mood === "idle2") {
+  1315→          sketchStroke(ctx, [[cx - 40, hy + 66], [cx, hy + 76], [cx + 40, hy + 64]], rng, { width: 7, jitter: 2 });
+  1316→        } else {
+  1317→          sketchStroke(ctx, [[cx - 36, hy + 70], [cx + 36, hy + 70]], rng, { width: 7, jitter: 2 });
+  1318→        }
+  1319→      }
+  1320→      sketchStroke(ctx, [[cx, hy + 18], [cx - 8, hy + 34], [cx + 6, hy + 38]], rng, { width: 6, jitter: 2 });
+  1321→
+  1322→      hatch(ctx, 92, 470, 90, 160, rng, "rgba(0,0,0,0.35)", 11);
+  1323→      hatch(ctx, 460, 480, 84, 150, rng, "rgba(0,0,0,0.35)", 11);
+  1324→
+  1325→      // lengan aim dengan revolver
+  1326→      if (mood === "aim") {
+  1327→        ctx.fillStyle = "#4b5a4e";
+  1328→        wobblePath(
+  1329→          ctx,
+  1330→          [
+  1331→            [470, 500],
+  1332→            [560, 400],
+  1333→            [596, 300],
+  1334→            [540, 268],
+  1335→            [470, 330],
+  1336→            [430, 430],
+  1337→          ],
+  1338→          rng,
+  1339→          4,
+  1340→          true,
+  1341→        );
+  1342→        ctx.fill();
+  1343→        sketchStroke(
+  1344→          ctx,
+  1345→          [
+  1346→            [470, 500],
+  1347→            [560, 400],
+  1348→            [596, 300],
+  1349→            [540, 268],
+  1350→            [470, 330],
+  1351→            [430, 430],
+  1352→          ],
+  1353→          rng,
+  1354→          { width: 8, jitter: 4, close: true },
+  1355→        );
+  1356→        sketchCircle(ctx, 540, 280, 44, rng, { width: 7, fill: PAPER });
+  1357→        sketchCircle(ctx, 540, 208, 54, rng, { width: 7, fill: "#3a3129" });
+  1358→        sketchCircle(ctx, 540, 208, 26, rng, { width: 6, fill: "#0d0a07" });
+  1359→        sketchStroke(ctx, [[508, 232], [500, 258]], rng, { width: 6 });
+  1360→        sketchStroke(ctx, [[572, 232], [580, 258]], rng, { width: 6 });
+  1361→      }
+  1362→      ctx.restore();
+  1363→    },
+  1364→    71 + mood.length,
+  1365→  );
+  1366→}
+  1367→
+  1368→/* ============================ SPEECH ============================ */
+  1369→
+  1370→/** Balon kata doodle dengan teks. */
+  1371→export function texSpeech(lines: string[]) {
+  1372→  const clean = lines.slice(0, 4);
+  1373→  const key = `speech-${clean.join("|")}`;
+  1374→  return makeCanvas(
+  1375→    key,
+  1376→    768,
+  1377→    380,
+  1378→    (ctx, w, h, rng) => {
+  1379→      ctx.font = '44px "Patrick Hand", cursive';
+  1380→      const maxW = Math.max(...clean.map((l) => ctx.measureText(l).width), 120);
+  1381→      const bw = Math.min(maxW + 90, w - 20);
+  1382→      const bh = 62 + clean.length * 56;
+  1383→      const bx = (w - bw) / 2;
+  1384→      const by = 12;
+  1385→      ctx.fillStyle = PAPER;
+  1386→      wobblePath(
+  1387→        ctx,
+  1388→        [
+  1389→          [bx + 30, by],
+  1390→          [bx + bw - 30, by - 4],
+  1391→          [bx + bw, by + 34],
+  1392→          [bx + bw - 6, by + bh - 30],
+  1393→          [bx + bw - 60, by + bh],
+  1394→          [bx + 40, by + bh - 4],
+  1395→          [bx, by + bh - 36],
+  1396→          [bx + 6, by + 30],
+  1397→        ],
+  1398→        rng,
+  1399→        4,
+  1400→        true,
+  1401→      );
+  1402→      ctx.fill();
+  1403→      sketchStroke(
+  1404→        ctx,
+  1405→        [
+  1406→          [bx + 30, by],
+  1407→          [bx + bw - 30, by - 4],
+  1408→          [bx + bw, by + 34],
+  1409→          [bx + bw - 6, by + bh - 30],
+  1410→          [bx + bw - 60, by + bh],
+  1411→          [bx + 40, by + bh - 4],
+  1412→          [bx, by + bh - 36],
+  1413→          [bx + 6, by + 30],
+  1414→        ],
+  1415→        rng,
+  1416→        { width: 7, jitter: 3, close: true },
+  1417→      );
+  1418→      ctx.fillStyle = PAPER;
+  1419→      wobblePath(
+  1420→        ctx,
+  1421→        [
+  1422→          [bx + 90, by + bh - 6],
+  1423→          [bx + 40, by + bh + 66],
+  1424→          [bx + 150, by + bh - 10],
+  1425→        ],
+  1426→        rng,
+  1427→        3,
+  1428→        true,
+  1429→      );
+  1430→      ctx.fill();
+  1431→      sketchStroke(
+  1432→        ctx,
+  1433→        [
+  1434→          [bx + 90, by + bh - 6],
+  1435→          [bx + 40, by + bh + 66],
+  1436→          [bx + 150, by + bh - 10],
+  1437→        ],
+  1438→        rng,
+  1439→        { width: 6, jitter: 3, close: true },
+  1440→      );
+  1441→      ctx.font = '44px "Patrick Hand", cursive';
+  1442→      ctx.fillStyle = INK;
+  1443→      ctx.textAlign = "center";
+  1444→      ctx.textBaseline = "middle";
+  1445→      clean.forEach((l, i) => {
+  1446→        ctx.fillText(l, w / 2, by + 58 + i * 56);
+  1447→      });
+  1448→    },
+  1449→    90 + clean.length,
+  1450→  );
+  1451→}
+  1452→
+  1453→/* ============================ VFX SPRITES ============================ */
+  1454→
+  1455→export function texMuzzle() {
+  1456→  return makeCanvas(
+  1457→    "muzzle",
+  1458→    512,
+  1459→    512,
+  1460→    (ctx, w, h, rng) => {
+  1461→      const cx = w / 2;
+  1462→      const cy = h / 2;
+  1463→      const spikes = 12;
+  1464→      ctx.beginPath();
+  1465→      for (let i = 0; i < spikes * 2; i++) {
+  1466→        const a = (i / (spikes * 2)) * Math.PI * 2;
+  1467→        const r = i % 2 === 0 ? 150 + rng() * 80 : 60 + rng() * 30;
+  1468→        const x = cx + Math.cos(a) * r;
+  1469→        const y = cy + Math.sin(a) * r;
+  1470→        if (i === 0) ctx.moveTo(x, y);
+  1471→        else ctx.lineTo(x, y);
+  1472→      }
+  1473→      ctx.closePath();
+  1474→      const g = ctx.createRadialGradient(cx, cy, 10, cx, cy, 220);
+  1475→      g.addColorStop(0, "#fffbe8");
+  1476→      g.addColorStop(0.45, "#ffd75e");
+  1477→      g.addColorStop(0.8, "#ff9a3d");
+  1478→      g.addColorStop(1, "rgba(255,120,40,0)");
+  1479→      ctx.fillStyle = g;
+  1480→      ctx.fill();
+  1481→      ctx.strokeStyle = "rgba(255,255,255,0.8)";
+  1482→      ctx.lineWidth = 5;
+  1483→      ctx.stroke();
+  1484→      ctx.beginPath();
+  1485→      ctx.arc(cx, cy, 52, 0, Math.PI * 2);
+  1486→      ctx.fillStyle = "#ffffff";
+  1487→      ctx.fill();
+  1488→    },
+  1489→    101,
+  1490→  );
+  1491→}
+  1492→
+  1493→export function texSmoke() {
+  1494→  return makeCanvas(
+  1495→    "smoke",
+  1496→    256,
+  1497→    256,
+  1498→    (ctx, w, h, rng) => {
+  1499→      const cx = w / 2;
+  1500→      const cy = h / 2;
+  1501→      for (let i = 0; i < 7; i++) {
+  1502→        const a = rng() * Math.PI * 2;
+  1503→        const d = rng() * 46;
+  1504→        const r = 40 + rng() * 44;
+  1505→        const g = ctx.createRadialGradient(
+  1506→          cx + Math.cos(a) * d,
+  1507→          cy + Math.sin(a) * d,
+  1508→          4,
+  1509→          cx + Math.cos(a) * d,
+  1510→          cy + Math.sin(a) * d,
+  1511→          r,
+  1512→        );
+  1513→        g.addColorStop(0, "rgba(230,224,210,0.5)");
+  1514→        g.addColorStop(1, "rgba(230,224,210,0)");
+  1515→        ctx.fillStyle = g;
+  1516→        ctx.beginPath();
+  1517→        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, 0, Math.PI * 2);
+  1518→        ctx.fill();
+  1519→      }
+  1520→    },
+  1521→    103,
+  1522→  );
+  1523→}
+  1524→
+  1525→export function texSplat(seed = 111) {
+  1526→  return makeCanvas(
+  1527→    `splat-${seed}`,
+  1528→    512,
+  1529→    512,
+  1530→    (ctx, w, h, rng) => {
+  1531→      const cx = w / 2;
+  1532→      const cy = w / 2;
+  1533→      for (let i = 0; i < 9; i++) {
+  1534→        const a = rng() * Math.PI * 2;
+  1535→        const d = rng() * 120;
+  1536→        const r = 30 + rng() * 60;
+  1537→        ctx.fillStyle = i % 3 === 0 ? RED_DARK : RED;
+  1538→        ctx.beginPath();
+  1539→        ctx.ellipse(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, r * (0.7 + rng() * 0.4), rng() * 3, 0, Math.PI * 2);
+  1540→        ctx.fill();
+  1541→      }
+  1542→      for (let i = 0; i < 16; i++) {
+  1543→        const a = rng() * Math.PI * 2;
+  1544→        const d = 130 + rng() * 110;
+  1545→        const r = 6 + rng() * 16;
+  1546→        ctx.fillStyle = rng() > 0.5 ? RED : RED_DARK;
+  1547→        ctx.beginPath();
+  1548→        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, 0, Math.PI * 2);
+  1549→        ctx.fill();
+  1550→      }
+  1551→      ctx.fillStyle = "rgba(255,255,255,0.16)";
+  1552→      for (let i = 0; i < 5; i++) {
+  1553→        const a = rng() * Math.PI * 2;
+  1554→        const d = rng() * 90;
+  1555→        ctx.beginPath();
+  1556→        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, 8 + rng() * 14, 0, Math.PI * 2);
+  1557→        ctx.fill();
+  1558→      }
+  1559→    },
+  1560→    seed,
+  1561→  );
+  1562→}
+  1563→
+  1564→export function texSpark() {
+  1565→  return makeCanvas(
+  1566→    "spark",
+  1567→    128,
+  1568→    128,
+  1569→    (ctx, w, h, rng) => {
+  1570→      const cx = w / 2;
+  1571→      const cy = h / 2;
+  1572→      ctx.strokeStyle = "#ffd75e";
+  1573→      ctx.lineWidth = 9;
+  1574→      ctx.lineCap = "round";
+  1575→      const r1 = 46;
+  1576→      for (const a of [0, Math.PI / 2, Math.PI / 4, -Math.PI / 4]) {
+  1577→        ctx.beginPath();
+  1578→        ctx.moveTo(cx - Math.cos(a) * r1, cy - Math.sin(a) * r1);
+  1579→        ctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+  1580→        ctx.stroke();
+  1581→      }
+  1582→      ctx.fillStyle = "#fffbe8";
+  1583→      ctx.beginPath();
+  1584→      ctx.arc(cx, cy, 12, 0, Math.PI * 2);
+  1585→      ctx.fill();
+  1586→    },
+  1587→    105,
+  1588→  );
+  1589→}
+  1590→
+  1591→export function texRing() {
+  1592→  return makeCanvas(
+  1593→    "ring",
+  1594→    256,
+  1595→    256,
+  1596→    (ctx, w, h, rng) => {
+  1597→      sketchCircle(ctx, w / 2, h / 2, 96, rng, { width: 10, color: "#f6f1e3", jitter: 5 });
+  1598→      sketchCircle(ctx, w / 2, h / 2, 66, rng, { width: 6, color: "rgba(246,241,227,0.6)", jitter: 4 });
+  1599→    },
+  1600→    107,
+  1601→  );
+  1602→}
+  1603→
+  1604→export function texDust() {
+  1605→  return makeCanvas(
+  1606→    "dust",
+  1607→    256,
+  1608→    256,
+  1609→    (ctx, w, h, rng) => {
+  1610→      const cx = w / 2;
+  1611→      const cy = h / 2;
+  1612→      for (let i = 0; i < 10; i++) {
+  1613→        const a = rng() * Math.PI * 2;
+  1614→        const d = rng() * 70;
+  1615→        const r = 18 + rng() * 30;
+  1616→        const g = ctx.createRadialGradient(
+  1617→          cx + Math.cos(a) * d,
+  1618→          cy + Math.sin(a) * d,
+  1619→          2,
+  1620→          cx + Math.cos(a) * d,
+  1621→          cy + Math.sin(a) * d,
+  1622→          r,
+  1623→        );
+  1624→        g.addColorStop(0, "rgba(214,200,170,0.5)");
+  1625→        g.addColorStop(1, "rgba(214,200,170,0)");
+  1626→        ctx.fillStyle = g;
+  1627→        ctx.beginPath();
+  1628→        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, 0, Math.PI * 2);
+  1629→        ctx.fill();
+  1630→      }
+  1631→    },
+  1632→    109,
+  1633→  );
+  1634→}
+  1635→
+  1636→export function texVoodooMask() {
+  1637→  return makeCanvas(
+  1638→    "voodoo-mask",
+  1639→    256,
+  1640→    256,
+  1641→    (ctx, w, h, rng) => {
+  1642→      const cx = w / 2;
+  1643→      ctx.fillStyle = "#c9b48a";
+  1644→      sketchEllipse(ctx, cx, 120, 78, 92, rng, { width: 7, fill: "#c9b48a" });
+  1645→      sketchStroke(ctx, [[cx - 30, 44], [cx - 12, 60], [cx - 26, 74]], rng, { width: 4, jitter: 1.5 });
+  1646→      sketchStroke(ctx, [[cx - 44, 100], [cx - 16, 128]], rng, { width: 6 });
+  1647→      sketchStroke(ctx, [[cx - 16, 100], [cx - 44, 128]], rng, { width: 6 });
+  1648→      sketchStroke(ctx, [[cx + 16, 100], [cx + 44, 128]], rng, { width: 6 });
+  1649→      sketchStroke(ctx, [[cx + 44, 100], [cx + 16, 128]], rng, { width: 6 });
+  1650→      sketchLine(ctx, cx - 26, 158, cx + 26, 158, rng, { width: 5 });
+  1651→      for (let i = -2; i <= 2; i++) {
+  1652→        sketchLine(ctx, cx + i * 12, 150, cx + i * 12, 166, rng, { width: 3, jitter: 1 });
+  1653→      }
+  1654→      sketchStroke(ctx, [[cx + 60, 60], [cx + 108, 16]], rng, { width: 6, color: "#8a5a13" });
+  1655→      ctx.strokeStyle = "rgba(94,156,91,0.65)";
+  1656→      ctx.lineWidth = 6;
+  1657→      ctx.beginPath();
+  1658→      ctx.arc(cx, 120, 108, 0.6, 2.6);
+  1659→      ctx.stroke();
+  1660→      ctx.beginPath();
+  1661→      ctx.arc(cx, 120, 122, 3.6, 5.6);
+  1662→      ctx.stroke();
+  1663→    },
+  1664→    113,
+  1665→  );
+  1666→}
+  1667→
+  1668→/* ============================ HUD bits ============================ */
+  1669→
+  1670→export function texHeart(kind: "full" | "empty") {
+  1671→  return makeCanvas(
+  1672→    `heart-${kind}`,
+  1673→    128,
+  1674→    128,
+  1675→    (ctx, w, h, rng) => {
+  1676→      const cx = w / 2;
+  1677→      const cy = h / 2 + 6;
+  1678→      if (kind === "full") {
+  1679→        ctx.fillStyle = RED;
+  1680→        ctx.beginPath();
+  1681→        ctx.moveTo(cx, cy + 44);
+  1682→        ctx.bezierCurveTo(cx - 74, cy - 12, cx - 44, cy - 56, cx, cy - 20);
+  1683→        ctx.bezierCurveTo(cx + 44, cy - 56, cx + 74, cy - 12, cx, cy + 44);
+  1684→        ctx.fill();
+  1685→      }
+  1686→      ctx.strokeStyle = kind === "full" ? "#5c120a" : "rgba(246,241,227,0.75)";
+  1687→      ctx.lineWidth = 7;
+  1688→      ctx.beginPath();
+  1689→      ctx.moveTo(cx, cy + 44);
+  1690→      ctx.bezierCurveTo(cx - 74, cy - 12, cx - 44, cy - 56, cx, cy - 20);
+  1691→      ctx.bezierCurveTo(cx + 44, cy - 56, cx + 74, cy - 12, cx, cy + 44);
+  1692→      ctx.stroke();
+  1693→      if (kind === "full") {
+  1694→        ctx.fillStyle = "rgba(255,255,255,0.35)";
+  1695→        ctx.beginPath();
+  1696→        ctx.ellipse(cx - 22, cy - 18, 12, 8, -0.6, 0, Math.PI * 2);
+  1697→        ctx.fill();
+  1698→      }
+  1699→    },
+  1700→    121,
+  1701→  );
+  1702→}
+  1703→
+  1704→export function texBulletPip(kind: "live" | "blank") {
+  1705→  return makeCanvas(
+  1706→    `pip-${kind}`,
+  1707→    96,
+  1708→    96,
+  1709→    (ctx, w, h, rng) => {
+  1710→      const cx = w / 2;
+  1711→      const body = kind === "live" ? RED : BLANK_BLUE;
+  1712→      const dark = kind === "live" ? RED_DARK : "#57697c";
+  1713→      ctx.fillStyle = body;
+  1714→      wobblePath(ctx, [[cx - 24, 18], [cx + 24, 18], [cx + 27, 58], [cx + 20, 76], [cx - 20, 76], [cx - 27, 58]], rng, 2, true);
+  1715→      ctx.fill();
+  1716→      sketchStroke(ctx, [[cx - 24, 18], [cx + 24, 18], [cx + 27, 58], [cx + 20, 76], [cx - 20, 76], [cx - 27, 58]], rng, {
+  1717→        width: 5,
+  1718→        jitter: 1.5,
+  1719→        close: true,
+  1720→        color: dark,
+  1721→      });
+  1722→      ctx.fillStyle = BRASS;
+  1723→      ctx.fillRect(cx - 21, 76, 42, 12);
+  1724→      if (kind === "live") {
+  1725→        sketchCircle(ctx, cx, 44, 7, rng, { width: 4, fill: INK });
+  1726→      } else {
+  1727→        sketchCircle(ctx, cx, 46, 8, rng, { width: 4 });
+  1728→      }
+  1729→    },
+  1730→    123,
+  1731→  );
+  1732→}
+  1733→
+  1734→/* ============================ ENVIRONMENT ============================ */
+  1735→
+  1736→export function texWall(seed: number, label?: string) {
+  1737→  return makeCanvas(
+  1738→    `wall-${seed}`,
+  1739→    1024,
+  1740→    1024,
+  1741→    (ctx, w, h, rng) => {
+  1742→      const g = ctx.createLinearGradient(0, 0, 0, h);
+  1743→      g.addColorStop(0, "#2c261e");
+  1744→      g.addColorStop(1, "#231d16");
+  1745→      ctx.fillStyle = g;
+  1746→      ctx.fillRect(0, 0, w, h);
+  1747→      for (let i = 0; i < 46; i++) {
+  1748→        const x = rng() * w;
+  1749→        const y = rng() * h;
+  1750→        const r = 20 + rng() * 90;
+  1751→        ctx.fillStyle = `rgba(${rng() > 0.5 ? "20,16,12" : "60,50,38"},${0.05 + rng() * 0.08})`;
+  1752→        ctx.beginPath();
+  1753→        ctx.ellipse(x, y, r, r * (0.5 + rng() * 0.6), rng() * 3, 0, Math.PI * 2);
+  1754→        ctx.fill();
+  1755→      }
+  1756→      ctx.strokeStyle = "rgba(12,9,6,0.55)";
+  1757→      ctx.lineWidth = 3;
+  1758→      for (let i = 0; i < 6; i++) {
+  1759→        let x = rng() * w;
+  1760→        let y = rng() * h;
+  1761→        ctx.beginPath();
+  1762→        ctx.moveTo(x, y);
+  1763→        for (let s = 0; s < 8; s++) {
+  1764→          x += (rng() - 0.5) * 90;
+  1765→          y += rng() * 70;
+  1766→          ctx.lineTo(x, y);
+  1767→        }
+  1768→        ctx.stroke();
+  1769→      }
+  1770→      const chalk = "rgba(214,204,180,0.30)";
+  1771→      ctx.strokeStyle = chalk;
+  1772→      ctx.lineWidth = 6;
+  1773→      ctx.lineCap = "round";
+  1774→      const tallyX = 130 + rng() * 200;
+  1775→      const tallyY = 150 + rng() * 140;
+  1776→      for (let i = 0; i < 8; i++) {
+  1777→        const col = Math.floor(i / 5);
+  1778→        const row = i % 5;
+  1779→        const x = tallyX + col * 110 + row * 20;
+  1780→        ctx.beginPath();
+  1781→        ctx.moveTo(x, tallyY);
+  1782→        ctx.lineTo(x + (rng() - 0.5) * 8, tallyY + 56);
+  1783→        ctx.stroke();
+  1784→      }
+  1785→      ctx.beginPath();
+  1786→      ctx.moveTo(tallyX - 18, tallyY + 10);
+  1787→      ctx.lineTo(tallyX + 66, tallyY + 48);
+  1788→      ctx.stroke();
+  1789→      const eyeX = 700 + rng() * 180;
+  1790→      const eyeY = 620 + rng() * 200;
+  1791→      ctx.strokeStyle = chalk;
+  1792→      ctx.lineWidth = 5;
+  1793→      ctx.beginPath();
+  1794→      ctx.ellipse(eyeX, eyeY, 64, 34, 0, 0, Math.PI * 2);
+  1795→      ctx.stroke();
+  1796→      ctx.beginPath();
+  1797→      ctx.arc(eyeX, eyeY, 16, 0, Math.PI * 2);
+  1798→      ctx.stroke();
+  1799→      ctx.beginPath();
+  1800→      let first = true;
+  1801→      for (let a = 0; a < Math.PI * 4; a += 0.2) {
+  1802→        const r = 6 + a * 7;
+  1803→        const x = 220 + rng() * 20 + 280 + Math.cos(a) * r;
+  1804→        const y = 760 + Math.sin(a) * r;
+  1805→        if (first) {
+  1806→          ctx.moveTo(x, y);
+  1807→          first = false;
+  1808→        } else {
+  1809→          ctx.lineTo(x, y);
+  1810→        }
+  1811→      }
+  1812→      ctx.stroke();
+  1813→      if (label) {
+  1814→        handText(ctx, label, 320 + rng() * 360, 380 + rng() * 120, 74, chalk, (rng() - 0.5) * 0.2, '"Patrick Hand", cursive');
+  1815→      }
+  1816→      sketchCircle(ctx, 830, 240, 56, rng, { width: 5, color: chalk, jitter: 8 });
+  1817→      sketchCircle(ctx, 830, 240, 20, rng, { width: 4, color: chalk, jitter: 4 });
+  1818→    },
+  1819→    seed,
+  1820→  );
+  1821→}
+  1822→
+  1823→export function texFloor() {
+  1824→  return makeCanvas(
+  1825→    "floor",
+  1826→    1024,
+  1827→    1024,
+  1828→    (ctx, w, h, rng) => {
+  1829→      ctx.fillStyle = "#3a2d20";
+  1830→      ctx.fillRect(0, 0, w, h);
+  1831→      const plankH = 128;
+  1832→      for (let row = 0; row < h / plankH; row++) {
+  1833→        const shade = 0.9 + rng() * 0.25;
+  1834→        ctx.fillStyle = `rgb(${Math.round(58 * shade)},${Math.round(45 * shade)},${Math.round(31 * shade)})`;
+  1835→        ctx.fillRect(0, row * plankH, w, plankH - 3);
+  1836→        ctx.strokeStyle = "rgba(20,14,9,0.4)";
+  1837→        ctx.lineWidth = 2;
+  1838→        for (let i = 0; i < 7; i++) {
+  1839→          const y = row * plankH + 12 + rng() * (plankH - 24);
+  1840→          ctx.beginPath();
+  1841→          ctx.moveTo(0, y);
+  1842→          for (let x = 0; x <= w; x += 64) {
+  1843→            ctx.lineTo(x, y + Math.sin(x * 0.02 + row) * 5 + (rng() - 0.5) * 3);
+  1844→          }
+  1845→          ctx.stroke();
+  1846→        }
+  1847→        const seam = rng() * w;
+  1848→        ctx.strokeStyle = "rgba(12,8,5,0.8)";
+  1849→        ctx.lineWidth = 4;
+  1850→        ctx.beginPath();
+  1851→        ctx.moveTo(seam, row * plankH);
+  1852→        ctx.lineTo(seam, row * plankH + plankH - 3);
+  1853→        ctx.stroke();
+  1854→      }
+  1855→      for (let i = 0; i < 20; i++) {
+  1856→        ctx.fillStyle = `rgba(10,7,4,${0.06 + rng() * 0.1})`;
+  1857→        ctx.beginPath();
+  1858→        ctx.ellipse(rng() * w, rng() * h, 30 + rng() * 80, 20 + rng() * 50, rng() * 3, 0, Math.PI * 2);
+  1859→        ctx.fill();
+  1860→      }
+  1861→    },
+  1862→    131,
+  1863→  );
+  1864→}
+  1865→
+  1866→export function texCeiling() {
+  1867→  return makeCanvas(
+  1868→    "ceiling",
+  1869→    512,
+  1870→    512,
+  1871→    (ctx, w, h, rng) => {
+  1872→      ctx.fillStyle = "#191510";
+  1873→      ctx.fillRect(0, 0, w, h);
+  1874→      for (let i = 0; i < 9; i++) {
+  1875→        ctx.fillStyle = `rgba(40,33,24,${0.2 + rng() * 0.2})`;
+  1876→        ctx.beginPath();
+  1877→        ctx.ellipse(rng() * w, rng() * h, 40 + rng() * 90, 24 + rng() * 60, rng() * 3, 0, Math.PI * 2);
+  1878→        ctx.fill();
+  1879→      }
+  1880→    },
+  1881→    133,
+  1882→  );
+  1883→}
+  1884→
+  1885→export function texTableTop() {
+  1886→  return makeCanvas(
+  1887→    "tabletop",
+  1888→    1024,
+  1889→    1024,
+  1890→    (ctx, w, h, rng) => {
+  1891→      ctx.fillStyle = "#5a4128";
+  1892→      ctx.fillRect(0, 0, w, h);
+  1893→      ctx.strokeStyle = "rgba(30,20,12,0.5)";
+  1894→      ctx.lineWidth = 3;
+  1895→      for (let i = 0; i < 26; i++) {
+  1896→        const y = rng() * h;
+  1897→        ctx.beginPath();
+  1898→        ctx.moveTo(0, y);
+  1899→        for (let x = 0; x <= w; x += 80) {
+  1900→          ctx.lineTo(x, y + Math.sin(x * 0.015 + i) * 7 + (rng() - 0.5) * 4);
+  1901→        }
+  1902→        ctx.stroke();
+  1903→      }
+  1904→      ctx.strokeStyle = "rgba(20,13,8,0.65)";
+  1905→      ctx.lineWidth = 4;
+  1906→      for (let i = 0; i < 14; i++) {
+  1907→        const x = rng() * w;
+  1908→        const y = rng() * h;
+  1909→        ctx.beginPath();
+  1910→        ctx.moveTo(x, y);
+  1911→        ctx.lineTo(x + (rng() - 0.5) * 160, y + (rng() - 0.5) * 60);
+  1912→        ctx.stroke();
+  1913→      }
+  1914→      sketchCircle(ctx, 200 + rng() * 600, 200 + rng() * 600, 70, rng, {
+  1915→        width: 9,
+  1916→        color: "rgba(20,13,8,0.4)",
+  1917→        jitter: 6,
+  1918→      });
+  1919→      handText(ctx, "alive?", 560, 760, 52, "rgba(20,13,8,0.5)", -0.15, '"Patrick Hand", cursive');
+  1920→      sketchCircle(ctx, 300, 300, 34, rng, { width: 5, color: "rgba(20,13,8,0.45)", jitter: 7 });
+  1921→    },
+  1922→    137,
+  1923→  );
+  1924→}
+  1925→
+  1926→/* ============================ PROPS ============================ */
+  1927→
+  1928→export function texBottle() {
+  1929→  return makeCanvas(
+  1930→    "bottle",
+  1931→    256,
+  1932→    512,
+  1933→    (ctx, w, h, rng) => {
+  1934→      const cx = w / 2;
+  1935→      ctx.fillStyle = "#3f5a3c";
+  1936→      wobblePath(
+  1937→        ctx,
+  1938→        [
+  1939→          [cx - 62, 480],
+  1940→          [cx - 66, 300],
+  1941→          [cx - 34, 250],
+  1942→          [cx - 34, 130],
+  1943→          [cx + 34, 130],
+  1944→          [cx + 34, 250],
+  1945→          [cx + 66, 300],
+  1946→          [cx + 62, 480],
+  1947→        ],
+  1948→        rng,
+  1949→        4,
+  1950→        true,
+  1951→      );
+  1952→      ctx.fill();
+  1953→      sketchStroke(
+  1954→        ctx,
+  1955→        [
+  1956→          [cx - 62, 480],
+  1957→          [cx - 66, 300],
+  1958→          [cx - 34, 250],
+  1959→          [cx - 34, 130],
+  1960→          [cx + 34, 130],
+  1961→          [cx + 34, 250],
+  1962→          [cx + 66, 300],
+  1963→          [cx + 62, 480],
+  1964→        ],
+  1965→        rng,
+  1966→        { width: 7, jitter: 3, close: true },
+  1967→      );
+  1968→      ctx.fillStyle = "#8a5a13";
+  1969→      ctx.fillRect(cx - 40, 96, 80, 38);
+  1970→      sketchStroke(ctx, [[cx - 40, 96], [cx + 40, 96], [cx + 40, 134], [cx - 40, 134]], rng, { width: 6, jitter: 2, close: true });
+  1971→      ctx.fillStyle = PAPER;
+  1972→      ctx.fillRect(cx - 52, 330, 104, 84);
+  1973→      sketchStroke(ctx, [[cx - 52, 330], [cx + 52, 330], [cx + 52, 414], [cx - 52, 414]], rng, { width: 5, jitter: 2, close: true });
+  1974→      handText(ctx, "DARE?", cx, 372, 30, INK, -0.06, '"Patrick Hand", cursive');
+  1975→      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  1976→      ctx.lineWidth = 8;
+  1977→      ctx.beginPath();
+  1978→      ctx.moveTo(cx - 40, 300);
+  1979→      ctx.quadraticCurveTo(cx - 48, 380, cx - 40, 452);
+  1980→      ctx.stroke();
+  1981→    },
+  1982→    141,
+  1983→  );
+  1984→}
+  1985→
+  1986→export function texCards() {
+  1987→  return makeCanvas(
+  1988→    "cards",
+  1989→    256,
+  1990→    256,
+  1991→    (ctx, w, h, rng) => {
+  1992→      const draw = (x: number, y: number, rot: number, face: boolean) => {
+  1993→        ctx.save();
+  1994→        ctx.translate(x, y);
+  1995→        ctx.rotate(rot);
+  1996→        ctx.fillStyle = face ? PAPER : "#8f2418";
+  1997→        wobblePath(ctx, [[-52, -74], [52, -70], [56, 70], [-48, 74]], rng, 3, true);
+  1998→        ctx.fill();
+  1999→        sketchStroke(ctx, [[-52, -74], [52, -70], [56, 70], [-48, 74]], rng, { width: 6, jitter: 2, close: true });
+  2000→        if (face) {
+
+[showing lines 1-2000 of 2164; use offset=2001 with limit to continue reading]

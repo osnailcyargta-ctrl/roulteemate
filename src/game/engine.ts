@@ -19,7 +19,7 @@ import {
   type SkillOutcome,
   type ShellType,
 } from "./logic";
-import { SKILL_IDS, texDieFace, texSkillIcon, dataURL, type SkillId } from "./doodle";
+import { SKILL_IDS, SKILL_META, ALL_SKILL_IDS, texDieFace, texSkillIcon, dataURL, type SkillId } from "./doodle";
 import { gameAudio } from "./audio";
 import { pick } from "./taunts";
 
@@ -33,16 +33,22 @@ export interface HudSkillSlot {
   cooldown: number;
   usable: boolean;
   icon: string;
+  trial: boolean; // shop trial (1 use)
+  ghostTurns: number; // > 0 = used, currently fading away
 }
 
 export interface HudSnapshot {
-  phase: "menu" | "dice" | "reloading" | "playerTurn" | "enemyTurn" | "gameover" | "victory";
+  phase: "menu" | "dice" | "reloading" | "shop" | "playerTurn" | "enemyTurn" | "gameover" | "victory";
   round: number;
   hpPlayer: number;
   hpEnemy: number;
-  maxHp: number;
+  maxHpPlayer: number;
+  maxHpEnemy: number;
+  money: number;
   live: number;
   blank: number;
+  countdown: number; // turns left before the live/blank board fades
+  countsPublic: boolean;
   turn: Side | null;
   skills: HudSkillSlot[];
   enemySkills: { id: SkillId; icon: string }[];
@@ -62,12 +68,43 @@ export type HudEvent =
   | { type: "banner"; title: string; sub?: string }
   | { type: "skillGet"; id: SkillId }
   | { type: "shellReveal"; shell: ShellType | null }
+  | { type: "shellRevealQueue"; shells: (ShellType | null)[] }
   | { type: "dmgPop"; side: Side; text: string; tone?: "hit" | "blank" | "reflect" }
   | { type: "screenSplat" }
   | { type: "skillFlash"; id: SkillId }
   | { type: "reloadStep"; loaded: number; total: number };
 
 const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.95 };
+
+/* ---------------- SHOP ---------------- */
+
+export interface ShopOffer {
+  id: SkillId;
+  price: number;
+  disabled: boolean;
+  reason: string | null;
+  legendary: boolean; // INSANE-only legends
+}
+
+/** Trial prices. The two legends are only stocked on INSANE. */
+const SHOP_PRICES: Partial<Record<SkillId, number>> = {
+  peek: 120,
+  eject: 150,
+  coffee: 130,
+  reroll: 160,
+  cuffs: 220,
+  voodoo: 380,
+  phoenix: 650,
+  thirdEye: 550,
+};
+const LEGENDARY: SkillId[] = ["phoenix", "thirdEye"];
+const START_MONEY = 200;
+export const MAX_SKILLS = 4;
+
+/** Shop catalog metadata — lets the UI render offers purely from snapshots. */
+export const SHOP_META: { id: SkillId; price: number; legendary: boolean }[] = (
+  Object.keys(SHOP_PRICES) as SkillId[]
+).map((id) => ({ id, price: SHOP_PRICES[id]!, legendary: LEGENDARY.includes(id) }));
 
 function shuffled<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -85,6 +122,14 @@ export class GameEngine {
   onHud: (s: HudSnapshot) => void = () => {};
   onEvent: (e: HudEvent) => void = () => {};
   busy = false;
+  /** The player's cash for the current match. */
+  money = 0;
+  /** Trial skills that were spent and are now fading away (2 turns). */
+  private ghosts: { id: SkillId; turns: number }[] = [];
+  private shopResolve: (() => void) | null = null;
+  private tStart = 0;
+  private tRoundStart = 0;
+  private tEnd = 0;
   private running = false;
   private container: HTMLElement | null = null;
   private lowHpTaunted = false;
@@ -123,11 +168,15 @@ export class GameEngine {
       round: st.round,
       hpPlayer: st.hp.player,
       hpEnemy: st.hp.enemy,
-      maxHp: st.maxHp,
+      maxHpPlayer: st.maxHp.player,
+      maxHpEnemy: st.maxHp.enemy,
+      money: this.money,
       live: this.logic.liveRemaining,
       blank: this.logic.blankRemaining,
+      countdown: st.countdown,
+      countsPublic: this.logic.countsPublic,
       turn: st.phase === "playerTurn" ? "player" : st.phase === "enemyTurn" ? "enemy" : null,
-      skills: SKILL_IDS.map((id) => {
+      skills: ALL_SKILL_IDS.map((id) => {
         const sk = st.skills[id];
         return {
           id,
@@ -136,6 +185,8 @@ export class GameEngine {
           cooldown: sk.cooldown,
           usable: this.logic.canUseSkill("player", id) && !this.busy,
           icon: dataURL(`icon-${id}`, texSkillIcon(id)),
+          trial: !!sk.trial,
+          ghostTurns: this.ghosts.find((g) => g.id === id)?.turns ?? 0,
         };
       }),
       enemySkills: SKILL_IDS.filter((id) => st.enemySkills[id].owned).map((id) => ({
@@ -185,13 +236,29 @@ export class GameEngine {
 
   /* ---------------- main flow ---------------- */
 
+  /** Playtime in the current round and in the whole match (ms). */
+  getTimes() {
+    const now = this.tEnd || (this.tStart > 0 ? performance.now() : 0);
+    return {
+      roundMs: Math.max(0, now - this.tRoundStart),
+      totalMs: Math.max(0, now - this.tStart),
+    };
+  }
+
   async startGame(diff: Difficulty) {
     gameAudio.ensure();
     gameAudio.startAmbient();
     this.lowHpTaunted = false;
+    this.money = START_MONEY;
+    this.ghosts = [];
+    this.shopResolve = null;
+    this.tStart = performance.now();
+    this.tRoundStart = this.tStart;
+    this.tEnd = 0;
     this.logic = new RouletteLogic(diff);
     this.ai = new EnemyAI(this.logic, SMART[diff]);
     this.notify();
+    this.toast(`Starting cash: $${START_MONEY} — the SHOP opens between rounds.`, "info");
 
     await sleep(300);
     await this.diceIntro();
@@ -209,6 +276,11 @@ export class GameEngine {
     this.logic = new RouletteLogic(this.logic.state.difficulty);
     this.logic.setPhase("menu");
     this.busy = false;
+    this.money = 0;
+    this.ghosts = [];
+    this.shopResolve = null;
+    this.tStart = 0;
+    this.tEnd = 0;
     this.notify();
   }
 
@@ -306,6 +378,7 @@ export class GameEngine {
   private async reloadSequence() {
     this.logic.state.round += 1;
     this.logic.loadCylinder();
+    this.tRoundStart = performance.now();
     this.logic.setPhase("reloading");
     this.notify();
     this.busy = true;
@@ -348,8 +421,13 @@ export class GameEngine {
 
   private async playerTurnStart() {
     if (this.logic.state.hp.enemy <= 0 || this.logic.state.hp.player <= 0) return;
+    const wasPublic = this.logic.state.countdown > 0;
     this.logic.setPhase("playerTurn");
     this.logic.startTurnTick();
+    if (wasPublic && this.logic.state.countdown <= 0 && this.logic.state.cylinder.length > 0) {
+      this.toast("THE BOARD FADED — memorize your shells!", "bad");
+      gameAudio.ghostFade();
+    }
     this.busy = false;
     this.notify();
   }
@@ -396,6 +474,9 @@ export class GameEngine {
       this.notify();
       return;
     }
+    // a spent TRIAL starts its 2-turn fade away
+    const sk = st.skills[id];
+    if (sk.trial && sk.charges <= 0) this.registerGhost(id);
     this.onEvent({ type: "skillFlash", id });
     await this.playSkillFx("player", id, oc);
     this.notify();
@@ -411,7 +492,16 @@ export class GameEngine {
     const st = this.logic.state;
     if (st.hp.enemy <= 0 || st.hp.player <= 0) return;
     st.phase = "enemyTurn";
+    const wasPublic = st.countdown > 0;
     this.logic.startTurnTick();
+    if (wasPublic && st.countdown <= 0 && st.cylinder.length > 0) {
+      this.toast("THE BOARD FADED — memorize your shells!", "bad");
+      gameAudio.ghostFade();
+    }
+    if (this.logic.lastSlip) {
+      // the Dealer lost count — and says so out loud
+      this.scene.enemySay([pick("aiForget")], 2.2);
+    }
     this.busy = true;
     this.notify();
 
@@ -453,9 +543,9 @@ export class GameEngine {
     }
 
     if (this.logic.isEmpty) {
-      await this.reloadSequence();
+      await this.maybeShopAndReload();
     }
-    const next = this.logic.endTurnAndPass();
+    const next = this.passTurn();
     this.notify();
     if (next === "player") {
       await this.playerTurnStart();
@@ -520,6 +610,26 @@ export class GameEngine {
       await sleep(900);
       this.notify();
       return "pass";
+    }
+
+    // CASH: every hit you land on the DEALER pays (reflections pay extra).
+    if (out.damageTo === "enemy") {
+      const gain = out.reflected ? 150 : 100;
+      this.money += gain;
+      this.toast(`+$${gain}${out.reflected ? " (reflected!)" : ""}`, "good");
+    }
+
+    if (out.phoenixSaved) {
+      // the killing blow burned the charm instead
+      gameAudio.phoenix();
+      this.scene.flash(0.65);
+      this.scene.setDesat(0.2);
+      setTimeout(() => this.scene.setDesat(0), 700);
+      this.registerGhost("phoenix");
+      this.scene.enemySetMood("scared");
+      this.scene.enemySay([pick("phoenix")], 2.6);
+      this.onEvent({ type: "banner", title: "PHOENIX!", sub: "You refuse to die — the charm burns for you." });
+      await sleep(1200);
     }
 
     if (out.shell === "live") {
@@ -602,16 +712,16 @@ export class GameEngine {
     return "pass";
   }
 
-  /** After a shot sequence: check death / reload / pass the turn. */
+  /** After a shot sequence: check death / shop / reload / pass the turn. */
   private async afterShot(shooter: Side, res: "pass" | "dead") {
     if (res === "dead") {
       await this.endGame();
       return;
     }
     if (this.logic.isEmpty) {
-      await this.reloadSequence();
+      await this.maybeShopAndReload();
     }
-    const next = this.logic.endTurnAndPass();
+    const next = this.passTurn();
     this.notify();
     if (next === "player" && shooter === "player") {
       // the enemy was cuffed, we go again
@@ -698,6 +808,22 @@ export class GameEngine {
         await sleep(1100);
         break;
       }
+      case "thirdEye": {
+        gameAudio.scanDing();
+        this.scene.flash(0.25);
+        const q = oc.queue ?? [];
+        this.onEvent({ type: "shellRevealQueue", shells: q });
+        this.scene.enemySetMood("scared");
+        this.scene.enemySay([pick("thirdEye")], 2.4);
+        this.toast(
+          q.length
+            ? `THIRD EYE: the next ${q.length} shell${q.length > 1 ? "s" : ""} lie bare!`
+            : "THIRD EYE: chamber empty?",
+          "voodoo",
+        );
+        await sleep(1800);
+        break;
+      }
     }
     this.notify();
   }
@@ -707,6 +833,7 @@ export class GameEngine {
   private async endGame() {
     const st = this.logic.state;
     const deadSide: Side = st.hp.enemy <= 0 ? "enemy" : "player";
+    this.tEnd = performance.now();
     gameAudio.stopHeartbeat();
     this.scene.setRedPulse(0);
 
@@ -746,5 +873,121 @@ export class GameEngine {
 
   skillIconOf(id: SkillId) {
     return dataURL(`icon-${id}`, texSkillIcon(id));
+  }
+
+  /* ---------------- ghosts (spent trials fading away) ---------------- */
+
+  /** A spent trial charm starts its 2-turn fade. */
+  private registerGhost(id: SkillId) {
+    const g = this.ghosts.find((x) => x.id === id);
+    if (g) g.turns = 2;
+    else this.ghosts.push({ id, turns: 2 });
+    gameAudio.ghostFade();
+  }
+
+  /** Every passed turn dissolves the ghosts a little more. */
+  private tickGhosts() {
+    if (!this.ghosts.length) return;
+    for (const g of this.ghosts) g.turns -= 1;
+    const done = this.ghosts.filter((g) => g.turns <= 0).map((g) => g.id);
+    for (const id of done) {
+      const sk = this.logic.state.skills[id];
+      sk.owned = false;
+      sk.trial = false;
+      this.toast(`${SKILL_META[id].name} faded away.`, "info");
+    }
+    this.ghosts = this.ghosts.filter((g) => g.turns > 0);
+  }
+
+  /** endTurnAndPass + ghost fade bookkeeping. */
+  private passTurn(): Side {
+    const next = this.logic.endTurnAndPass();
+    this.tickGhosts();
+    return next;
+  }
+
+  /* ---------------- shop ---------------- */
+
+  /** What the shop stocks this visit. Legends only on INSANE. */
+  shopCatalog(): ShopOffer[] {
+    const st = this.logic.state;
+    const activeCount = ALL_SKILL_IDS.filter((id) => {
+      const sk = st.skills[id];
+      return sk.owned && !(sk.trial && sk.charges <= 0);
+    }).length;
+    return ALL_SKILL_IDS.filter((id) => {
+      if (!(id in SHOP_PRICES)) return false;
+      if (LEGENDARY.includes(id) && st.difficulty !== "insane") return false;
+      return true;
+    }).map((id) => {
+      const sk = st.skills[id];
+      const price = SHOP_PRICES[id]!;
+      let disabled = false;
+      let reason: string | null = null;
+      if (sk.owned) {
+        disabled = true;
+        reason = sk.trial && sk.charges <= 0 ? "FADING AWAY" : "ALREADY HELD";
+      } else if (activeCount >= MAX_SKILLS) {
+        disabled = true;
+        reason = `SLOTS FULL (${MAX_SKILLS})`;
+      } else if (this.money < price) {
+        disabled = true;
+        reason = "TOO POOR";
+      }
+      return { id, price, disabled, reason, legendary: LEGENDARY.includes(id) };
+    });
+  }
+
+  /** How many skill slots are in active use (ghosts don't count). */
+  activeSkillCount() {
+    const st = this.logic.state;
+    return ALL_SKILL_IDS.filter((id) => {
+      const sk = st.skills[id];
+      return sk.owned && !(sk.trial && sk.charges <= 0);
+    }).length;
+  }
+
+  /** Open the shop between rounds and wait for the player to leave. */
+  private async openShop() {
+    const st = this.logic.state;
+    this.money += 75; // survival bonus
+    this.toast("ROUND SURVIVED: +$75", "good");
+    st.phase = "shop";
+    this.busy = true;
+    gameAudio.shopOpen();
+    this.scene.enemySay([pick("shop")], 2.6);
+    this.notify();
+    await new Promise<void>((res) => {
+      this.shopResolve = res;
+    });
+    this.busy = false;
+  }
+
+  /** Between rounds: shop first (if the cylinder ran dry), then reload. */
+  private async maybeShopAndReload() {
+    if (this.logic.isEmpty) {
+      await this.openShop();
+    }
+    await this.reloadSequence();
+  }
+
+  buyTrial(id: SkillId) {
+    if (this.logic.state.phase !== "shop") return;
+    const offer = this.shopCatalog().find((o) => o.id === id);
+    if (!offer || offer.disabled) return;
+    this.money -= offer.price;
+    this.logic.grantTrial("player", id);
+    gameAudio.buy();
+    this.onEvent({ type: "skillGet", id });
+    this.toast(`TRIAL ${SKILL_META[id].name} bought — one use, then it fades!`, "good");
+    this.notify();
+  }
+
+  closeShop() {
+    if (this.logic.state.phase !== "shop") return;
+    gameAudio.click();
+    const r = this.shopResolve;
+    this.shopResolve = null;
+    r?.();
   }
 }
