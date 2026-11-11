@@ -1,92 +1,92 @@
 /**
- * taunts.ts — dialog PAKDE si musuh doodle. Bahasa santai kayak orang
- * main kartu di pos ronda.
+ * taunts.ts — dialogue lines for THE DEALER, the doodle enemy.
+ * A grinning old card-shark who has done this far too many times.
  */
 
 export const TAUNTS = {
   gameStart: [
-    "Duduk yang manis ya.",
-    "Ini bukan permainan anak-anak.",
-    "Kamu yakin mau lanjut?",
-    "Revolver ini udah laper nih.",
+    "Take a seat, kid.",
+    "This is no children's game.",
+    "Sure you want to continue?",
+    "This revolver is getting hungry.",
   ],
   playerBlankSelf: [
-    "Husss... kosong.",
-    "Rezeki baru buat kamu.",
-    "Hati-hati, sisanya nunggu.",
+    "Hush... empty.",
+    "A little gift for you.",
+    "Careful, the rest are waiting.",
   ],
   playerHitSelf: [
-    "Dasar. HAHAHA.",
-    "Sakit kan? Sakit kan?",
-    "Nangis dulu, sana.",
+    "Pathetic. HAHAHA.",
+    "Hurts, doesn't it?",
+    "Go cry about it.",
   ],
   playerHitsEnemy: [
-    "Anjing... berani juga.",
-    "Ini baru seru!",
-    "Luka ini gue catat.",
+    "Ghh... you've got guts.",
+    "Now it's getting fun!",
+    "I'll remember that wound.",
   ],
   playerShootsBlank: [
-    "Meleset nasib, bukan peluru.",
-    "Coba lagi, janjian.",
-    "HAHA! Kosong!",
+    "Fate missed, not the bullet.",
+    "Try again, why don't you.",
+    "HAHA! Empty!",
   ],
   enemyTurn: [
-    "Gantian, nak.",
-    "Tolong doakan blank.",
-    "Jantungmu kedengeran lho.",
-    "Dingin ya pelorunya.",
+    "My turn, kid.",
+    "Pray for a blank.",
+    "I can hear your heart.",
+    "Cold steel, isn't it?",
   ],
   enemyBlankSelf: [
-    "Fuh... kosong.",
-    "Nasib gue masih bagus.",
-    "Satu langkah lagi.",
+    "Phew... empty.",
+    "My luck holds.",
+    "One step closer.",
   ],
   enemyHitPlayer: [
-    "Kebalik ya, nak.",
-    "Jangan nangis.",
-    "Itu baru peluru.",
+    "Tables turn, kid.",
+    "Don't cry.",
+    "THAT is a bullet.",
   ],
   enemyHitSelf: [
-    "SIAL!",
-    "Kira gue bales dendam?",
-    "Tch... luka kecil.",
+    "DAMN IT!",
+    "Think I'm afraid of pain?",
+    "Tch... a scratch.",
   ],
   enemyLowHp: [
-    "Gue belum kalah!",
-    "Serigua tua masih gigit.",
-    "Terakhir... ini serius.",
+    "I'm not done yet!",
+    "This old dog still bites.",
+    "Last one... no more games.",
   ],
   voodoo: [
-    "Gue pasang jimat.",
-    "Sakiti gue? Balik ke kamu.",
+    "My talisman is on.",
+    "Hurt me? It comes back to you.",
   ],
   playerVoodooCast: [
-    "Itu apaan? Bau aneh.",
-    "Jangan pake sihir, cuek!",
+    "What is that smell?",
+    "No witchcraft at my table!",
   ],
   reflect: [
-    "APA?! Kok balik?!",
-    "SIHIR! Ini sihir!",
+    "WHAT?! It came back?!",
+    "MAGIC! This is sorcery!",
   ],
   cuffed: [
-    "EI! Lepasin!",
-    "Main curang ya kamu...",
+    "HEY! Untie me!",
+    "Cheating at my table...",
   ],
   scan: [
-    "Bentar, gue mantau dulu.",
-    "Bau gue tajam malam ini.",
+    "Hold on, let me look.",
+    "My nose is sharp tonight.",
   ],
-  useBuang: [
-    "Yang ini gue tolak.",
-    "Buang yang busuk.",
+  useEject: [
+    "Not this one.",
+    "Throw out the rotten shell.",
   ],
-  useKopi: [
-    "Sruput... baru lagi.",
-    "Kopi gue! Jangan diganggu.",
+  useCoffee: [
+    "Sip... another round.",
+    "My coffee! Don't touch it.",
   ],
   useReroll: [
-    "Gue geser dikit nasibnya.",
-    "Puter lagi, tuhan.",
+    "Nudge fate a little.",
+    "Spin it again, gods.",
   ],
 } as const;
 

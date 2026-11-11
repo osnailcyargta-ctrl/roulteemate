@@ -1,0 +1,633 @@
+     1→     1→"use client";
+     2→     2→
+     3→     3→/**
+     4→     4→ * GameShell — lapisan React untuk HUD ULTIMATE ROULETTE.
+     5→     5→ * Mount engine (Three.js) + seluruh overlay doodle: menu, HP, shell counter,
+     6→     6→ * skill bar, toast, banner, rules, dan layar menang/kalah.
+     7→     7→ */
+     8→     8→
+     9→     9→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+    10→    10→import { GameEngine, type HudEvent, type HudSnapshot } from "@/game/engine";
+    11→    11→import { SKILL_META, dataURL, texBulletPip, texHeart, texSkillIcon, texSplat, texVoodooMask, type SkillId } from "@/game/doodle";
+    12→    12→import { gameAudio } from "@/game/audio";
+    13→    13→
+    14→    14→type Toast = { id: number; text: string; tone: string };
+    15→    15→type Pop = { id: number; side: string; text: string; tone: string };
+    16→    16→type Splat = { id: number; url: string; left: number; top: number; size: number; rot: number };
+    17→    17→type Stamp = { id: number; idSkill: SkillId };
+    18→    18→
+    19→    19→const DIFFS: { id: "gampang" | "normal" | "gila"; label: string; desc: string }[] = [
+    20→    20→  { id: "gampang", label: "GAMPANG", desc: "HP kamu 5. PAKDE agak lemot." },
+    21→    21→  { id: "normal", label: "NORMAL", desc: "HP 4 vs 4. Adil dan menakutkan." },
+    22→    22→  { id: "gila", label: "GILA", desc: "PAKDE tajam. Persiapan mati." },
+    23→    23→];
+    24→    24→
+    25→    25→export default function GameShell() {
+    26→    26→  const mountRef = useRef<HTMLDivElement>(null);
+    27→    27→  const engineRef = useRef<GameEngine | null>(null);
+    28→    28→  const evId = useRef(0);
+    29→    29→  const [ready, setReady] = useState(false);
+    30→    30→  const [snap, setSnap] = useState<HudSnapshot | null>(null);
+    31→    31→  const [toasts, setToasts] = useState<Toast[]>([]);
+    32→    32→  const [pops, setPops] = useState<Pop[]>([]);
+    33→    33→  const [splats, setSplats] = useState<Splat[]>([]);
+    34→    34→  const [stamps, setStamps] = useState<Stamp[]>([]);
+    35→    35→  const [banner, setBanner] = useState<{ title: string; sub?: string } | null>(null);
+    36→    36→  const [reveal, setReveal] = useState<{ shell: "live" | "blank" } | null>(null);
+    37→    37→  const [showHelp, setShowHelp] = useState(false);
+    38→    38→  const [muted, setMuted] = useState(false);
+    39→    39→  const [diff, setDiff] = useState<"gampang" | "normal" | "gila">("normal");
+    40→    40→  const [reloadPips, setReloadPips] = useState(0);
+    41→    41→  const [flashRed, setFlashRed] = useState(false);
+    42→    42→
+    43→    43→  /* ---------- dataURL aset HUD (setelah mount, client-only) ---------- */
+    44→    44→  const assets = useMemo(() => {
+    45→    45→    if (!ready) return null;
+    46→    46→    return {
+    47→    47→      heartFull: dataURL("heart-full", texHeart("full")),
+    48→    48→      heartEmpty: dataURL("heart-empty", texHeart("empty")),
+    49→    49→      pipLive: dataURL("pip-live", texBulletPip("live")),
+    50→    50→      pipBlank: dataURL("pip-blank", texBulletPip("blank")),
+    51→    51→      voodoo: dataURL("voodoo-mask", texVoodooMask()),
+    52→    52→      splat0: dataURL("splat-hud-0", texSplat(333)),
+    53→    53→      splat1: dataURL("splat-hud-1", texSplat(444)),
+    54→    54→    };
+    55→    55→  }, [ready]);
+    56→    56→
+    57→    57→  const assetsRef = useRef(assets);
+    58→    58→  useEffect(() => {
+    59→    59→    assetsRef.current = assets;
+    60→    60→  }, [assets]);
+    61→    61→
+    62→    62→  const handleEvent = useCallback((e: HudEvent) => {
+    63→    63→    const id = ++evId.current;
+    64→    64→    switch (e.type) {
+    65→    65→      case "toast":
+    66→    66→        setToasts((t) => [...t.slice(-4), { id, text: e.text, tone: e.tone ?? "info" }]);
+    67→    67→        setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200);
+    68→    68→        break;
+    69→    69→      case "banner":
+    70→    70→        setBanner({ title: e.title, sub: e.sub });
+    71→    71→        setTimeout(() => setBanner(null), 1700);
+    72→    72→        break;
+    73→    73→      case "skillGet":
+    74→    74→        setStamps((s) => [...s, { id, idSkill: e.id }]);
+    75→    75→        setTimeout(() => setStamps((s) => s.filter((x) => x.id !== id)), 1500);
+    76→    76→        break;
+    77→    77→      case "shellReveal":
+    78→    78→        if (e.shell) {
+    79→    79→          setReveal({ shell: e.shell });
+    80→    80→          setTimeout(() => setReveal(null), 1900);
+    81→    81→        }
+    82→    82→        break;
+    83→    83→      case "dmgPop":
+    84→    84→        setPops((p) => [...p.slice(-5), { id, side: e.side, text: e.text, tone: e.tone ?? "hit" }]);
+    85→    85→        setTimeout(() => setPops((p) => p.filter((x) => x.id !== id)), 1500);
+    86→    86→        break;
+    87→    87→      case "screenSplat": {
+    88→    88→        const url = evId.current % 2 === 0 ? "splat-hud-0" : "splat-hud-1";
+    89→    89→        const a = assetsRef.current;
+    90→    90→        if (!a) break;
+    91→    91→        setSplats((s) => [
+    92→    92→          ...s.slice(-3),
+    93→    93→          {
+    94→    94→            id,
+    95→    95→            url: a[url],
+    96→    96→            left: 15 + Math.random() * 55,
+    97→    97→            top: 8 + Math.random() * 50,
+    98→    98→            size: 130 + Math.random() * 160,
+    99→    99→            rot: Math.random() * 360,
+   100→   100→          },
+   101→   101→        ]);
+   102→   102→        setFlashRed(true);
+   103→   103→        setTimeout(() => setFlashRed(false), 180);
+   104→   104→        setTimeout(() => setSplats((s) => s.filter((x) => x.id !== id)), 2600);
+   105→   105→        break;
+   106→   106→      }
+   107→   107→      case "skillFlash":
+   108→   108→        break;
+   109→   109→      case "reloadStep":
+   110→   110→        setReloadPips(e.loaded);
+   111→   111→        setTimeout(() => setReloadPips(0), 2400);
+   112→   112→        break;
+   113→   113→    }
+   114→   114→  }, []);
+   115→   115→
+   116→   116→  /* ---------- mount engine ---------- */
+   117→   117→  useEffect(() => {
+   118→   118→    let disposed = false;
+   119→   119→    (async () => {
+   120→   120→      try {
+   121→   121→        await document.fonts.ready;
+   122→   122→      } catch {
+   123→   123→        /* noop */
+   124→   124→      }
+   125→   125→      if (disposed || !mountRef.current) return;
+   126→   126→      const engine = new GameEngine();
+   127→   127→      engineRef.current = engine;
+   128→   128→      (window as unknown as { __eng?: GameEngine }).__eng = engine;
+   129→   129→      engine.onHud = (s) => setSnap(s);
+   130→   130→      engine.onEvent = (e) => handleEvent(e);
+   131→   131→      engine.mount(mountRef.current);
+   132→   132→      setReady(true);
+   133→   133→    })();
+   134→   134→    return () => {
+   135→   135→      disposed = true;
+   136→   136→      engineRef.current?.dispose();
+   137→   137→      engineRef.current = null;
+   138→   138→    };
+   139→   139→     
+   140→   140→  }, []);
+   141→   141→
+   142→   142→  const toggleMute = useCallback(() => {
+   143→   143→    setMuted((prev) => {
+   144→   144→      const m = !prev;
+   145→   145→      gameAudio.setMuted(m);
+   146→   146→      return m;
+   147→   147→    });
+   148→   148→  }, []);
+   149→   149→
+   150→   150→  /* ---------- keyboard ---------- */
+   151→   151→  useEffect(() => {
+   152→   152→    const onKey = (ev: KeyboardEvent) => {
+   153→   153→      const eng = engineRef.current;
+   154→   154→      if (!eng || !snap) return;
+   155→   155→      const k = ev.key.toLowerCase();
+   156→   156→      if (k === "q") void eng.playerShoot("player");
+   157→   157→      else if (k === "e") void eng.playerShoot("enemy");
+   158→   158→      else if (k === "h") setShowHelp((v) => !v);
+   159→   159→      else if (k === "m") toggleMute();
+   160→   160→      else if (/^[1-6]$/.test(k)) {
+   161→   161→        const owned = snap.skills.filter((s) => s.owned);
+   162→   162→        const target = owned[parseInt(k) - 1];
+   163→   163→        if (target) void eng.playerUseSkill(target.id);
+   164→   164→      }
+   165→   165→    };
+   166→   166→    window.addEventListener("keydown", onKey);
+   167→   167→    return () => window.removeEventListener("keydown", onKey);
+   168→   168→     
+   169→   169→  }, [snap]);
+   170→   170→
+   171→   171→  const eng = engineRef.current;
+   172→   172→  const isPlayerTurn = snap?.phase === "playerTurn" && snap.turn === "player" && !snap.busy;
+   173→   173→  const phase = snap?.phase ?? "menu";
+   174→   174→  const inGame = phase !== "menu";
+   175→   175→
+   176→   176→  /* ---------- render ---------- */
+   177→   177→  return (
+   178→   178→    <div className="fixed inset-0 overflow-hidden bg-[#0b0a08] select-none">
+   179→   179→      {/* dunia 3D */}
+   180→   180→      <div ref={mountRef} className="absolute inset-0" />
+   181→   181→
+   182→   182→      {/* overlay filmis */}
+   183→   183→      <div className="pointer-events-none absolute inset-0 vignette-overlay z-10" />
+   184→   184→      <div className="pointer-events-none absolute inset-0 grain-overlay z-10" />
+   185→   185→      {flashRed && <div className="pointer-events-none absolute inset-0 z-10 bg-[rgba(199,62,46,0.35)]" />}
+   186→   186→      {snap && snap.hpPlayer === 1 && phase !== "menu" && (
+   187→   187→        <div className="pointer-events-none absolute inset-0 z-10 pulse-danger" />
+   188→   188→      )}
+   189→   189→      {snap && snap.voodooPlayer > 0 && (
+   190→   190→        <div
+   191→   191→          className="pointer-events-none absolute inset-0 z-10"
+   192→   192→          style={{ boxShadow: "inset 0 0 120px rgba(94,156,91,0.45)" }}
+   193→   193→        />
+   194→   194→      )}
+   195→   195→
+   196→   196→      {/* darah di layar */}
+   197→   197→      <div className="pointer-events-none absolute inset-0 z-20 overflow-hidden">
+   198→   198→        {assets &&
+   199→   199→          splats.map((s) => (
+   200→   200→             
+   201→   201→            <img
+   202→   202→              key={s.id}
+   203→   203→              src={s.url}
+   204→   204→              alt=""
+   205→   205→              className="absolute pop-in"
+   206→   206→              style={{
+   207→   207→                left: `${s.left}%`,
+   208→   208→                top: `${s.top}%`,
+   209→   209→                width: s.size,
+   210→   210→                transform: `rotate(${s.rot}deg)`,
+   211→   211→                transition: "opacity 1.2s ease 1s",
+   212→   212→                opacity: 0.92,
+   213→   213→              }}
+   214→   214→            />
+   215→   215→          ))}
+   216→   216→      </div>
+   217→   217→
+   218→   218→      {/* damage pops */}
+   219→   219→      <div className="pointer-events-none absolute inset-0 z-30">
+   220→   220→        {pops.map((p) => (
+   221→   221→          <div
+   222→   222→            key={p.id}
+   223→   223→            className={`absolute rise-fade font-marker text-3xl drop-shadow-[3px_3px_0_rgba(0,0,0,0.7)] ${
+   224→   224→              p.tone === "reflect" ? "text-[#8fdc8a]" : p.tone === "blank" ? "text-[#cfd8e3]" : "text-[#ff6b57]"
+   225→   225→            }`}
+   226→   226→            style={p.side === "enemy" ? { left: "58%", top: "28%" } : { left: "42%", top: "62%" }}
+   227→   227→          >
+   228→   228→            {p.text}
+   229→   229→          </div>
+   230→   230→        ))}
+   231→   231→      </div>
+   232→   232→
+   233→   233→      {/* ================= HUD IN-GAME ================= */}
+   234→   234→      {inGame && assets && snap && (
+   235→   235→        <>
+   236→   236→          {/* papan shell counter */}
+   237→   237→          <div className="absolute left-1/2 top-3 z-30 -translate-x-1/2">
+   238→   238→            <div className="doodle-box px-4 py-1.5 flex items-center gap-3">
+   239→   239→              <div className="flex items-center gap-1">
+   240→   240→                { }
+   241→   241→                <img src={assets.pipLive} alt="live" className="h-7 w-7" />
+   242→   242→                <span className="font-marker text-xl text-[#8f2418]">x{snap.live}</span>
+   243→   243→              </div>
+   244→   244→              <div className="h-6 w-0.5 bg-[#221a12]/30" />
+   245→   245→              <div className="flex items-center gap-1">
+   246→   246→                { }
+   247→   247→                <img src={assets.pipBlank} alt="blank" className="h-7 w-7" />
+   248→   248→                <span className="font-marker text-xl text-[#57697c]">x{snap.blank}</span>
+   249→   249→              </div>
+   250→   250→            </div>
+   251→   251→            {snap.known && (
+   252→   252→              <div className="mt-1 flex justify-center">
+   253→   253→                <div
+   254→   254→                  className={`pop-in font-hand-sc px-2 py-0.5 border-2 border-[#221a12] bg-[#f3ecd7] text-sm rotate-[-2deg] ${
+   255→   255→                    snap.known === "live" ? "text-[#8f2418]" : "text-[#57697c]"
+   256→   256→                  }`}
+   257→   257→                >
+   258→   258→                  CHAMBER: {snap.known.toUpperCase()}
+   259→   259→                </div>
+   260→   260→              </div>
+   261→   261→            )}
+   262→   262→          </div>
+   263→   263→
+   264→   264→          {/* kiri atas: ronde + tombol */}
+   265→   265→          <div className="absolute left-2 top-2 z-30 flex flex-col gap-1.5 sm:left-3 sm:top-3 sm:gap-2">
+   266→   266→            <div className="doodle-box doodle-dark px-2 py-0.5 font-marker text-xs rotate-[-1.5deg] sm:px-3 sm:py-1 sm:text-sm">
+   267→   267→              RONDE {snap.round}
+   268→   268→            </div>
+   269→   269→            <div className="flex gap-1.5 sm:gap-2">
+   270→   270→              <button
+   271→   271→                className="doodle-btn px-2 py-0.5 font-hand-sc text-xs sm:px-2.5 sm:py-1 sm:text-sm"
+   272→   272→                onClick={() => setShowHelp(true)}
+   273→   273→                aria-label="Cara main"
+   274→   274→              >
+   275→   275→                ? CARA
+   276→   276→              </button>
+   277→   277→              <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs sm:px-2.5 sm:py-1 sm:text-sm" onClick={toggleMute} aria-label="Suara">
+   278→   278→                {muted ? "SUARA OFF" : "SUARA ON"}
+   279→   279→              </button>
+   280→   280→            </div>
+   281→   281→          </div>
+   282→   282→
+   283→   283→          {/* kanan atas: PAKDE */}
+   284→   284→          <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-1">
+   285→   285→            <div className="doodle-box px-3 py-1 rotate-[1.5deg]">
+   286→   286→              <span className="font-marker text-lg text-[#8f2418]">PAKDE</span>
+   287→   287→              {snap.voodooEnemy > 0 && (
+   288→   288→                 
+   289→   289→                <img src={assets.voodoo} alt="voodoo" className="ml-2 inline h-6 w-6 wiggle align-middle" />
+   290→   290→              )}
+   291→   291→              {snap.enemyCuffed && (
+   292→   292→                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">diborgol</span>
+   293→   293→              )}
+   294→   294→            </div>
+   295→   295→            <div className="flex gap-1">
+   296→   296→              {Array.from({ length: snap.maxHp }).map((_, i) => (
+   297→   297→                 
+   298→   298→                <img key={i} src={i < snap.hpEnemy ? assets.heartFull : assets.heartEmpty} alt="hp" className="h-8 w-8" />
+   299→   299→              ))}
+   300→   300→            </div>
+   301→   301→          </div>
+   302→   302→
+   303→   303→          {/* pemain: kiri atas di mobile, kiri bawah di desktop */}
+   304→   304→          <div className="absolute left-2 top-[88px] z-30 flex flex-col gap-1 sm:left-3 sm:top-auto sm:bottom-3">
+   305→   305→            <div className="doodle-box w-fit px-2 py-0.5 rotate-[-1.5deg] sm:px-3 sm:py-1">
+   306→   306→              <span className="font-marker text-sm sm:text-lg">KAMU</span>
+   307→   307→              {snap.voodooPlayer > 0 && (
+   308→   308→                <span className="ml-2 font-hand-sc text-sm text-[#5e9c5b]">voodoo {snap.voodooPlayer}</span>
+   309→   309→              )}
+   310→   310→              {snap.playerCuffed && (
+   311→   311→                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">diborgol</span>
+   312→   312→              )}
+   313→   313→            </div>
+   314→   314→            <div className="flex gap-0.5 sm:gap-1">
+   315→   315→              {Array.from({ length: snap.maxHp }).map((_, i) => (
+   316→   316→                <img key={i} src={i < snap.hpPlayer ? assets.heartFull : assets.heartEmpty} alt="hp" className="h-7 w-7 sm:h-9 sm:w-9" />
+   317→   317→              ))}
+   318→   318→            </div>
+   319→   319→          </div>
+   320→   320→
+   321→   321→          {/* indikator giliran */}
+   322→   322→          <div className="pointer-events-none absolute left-1/2 top-[74px] z-20 -translate-x-1/2 sm:top-16">
+   323→   323→            {snap.turn === "player" && (
+   324→   324→              <div className="doodle-box px-4 py-0.5 font-marker text-[#8f2418] rotate-[-2deg] float-y">
+   325→   325→                GILIRANMU
+   326→   326→              </div>
+   327→   327→            )}
+   328→   328→            {snap.turn === "enemy" && (
+   329→   329→              <div className="doodle-box doodle-dark px-4 py-0.5 font-marker rotate-[2deg] float-y">
+   330→   330→                GILIRAN PAKDE...
+   331→   331→              </div>
+   332→   332→            )}
+   333→   333→          </div>
+   334→   334→
+   335→   335→          {/* must shoot */}
+   336→   336→          {snap.mustShoot && snap.turn === "player" && (
+   337→   337→            <div className="pointer-events-none absolute left-1/2 top-28 z-30 -translate-x-1/2">
+   338→   338→              <div className="doodle-box doodle-red px-4 py-1 font-marker text-xl blink-soft rotate-[-3deg]">
+   339→   339→                WAJIB TEMBAK!
+   340→   340→              </div>
+   341→   341→            </div>
+   342→   342→          )}
+   343→   343→
+   344→   344→          {/* reload pips */}
+   345→   345→          {reloadPips > 0 && (
+   346→   346→            <div className="pointer-events-none absolute left-1/2 top-[62%] z-30 flex -translate-x-1/2 gap-1.5">
+   347→   347→              {Array.from({ length: 6 }).map((_, i) => (
+   348→   348→                <div
+   349→   349→                  key={i}
+   350→   350→                  className={`h-4 w-4 rounded-full border-[3px] border-[#f3ecd7] ${
+   351→   351→                    i < reloadPips ? "bg-[#c73e2e]" : "bg-transparent"
+   352→   352→                  }`}
+   353→   353→                />
+   354→   354→              ))}
+   355→   355→            </div>
+   356→   356→          )}
+   357→   357→
+   358→   358→          {/* skill bar */}
+   359→   359→          <div className="absolute bottom-[104px] left-1/2 z-30 flex -translate-x-1/2 items-end gap-1.5 sm:bottom-3 sm:gap-2">
+   360→   360→            {snap.skills
+   361→   361→              .filter((s) => s.owned)
+   362→   362→              .map((s, idx) => (
+   363→   363→                <button
+   364→   364→                  key={s.id}
+   365→   365→                  className={`doodle-btn relative flex h-16 w-16 flex-col items-center justify-center gap-0.5 sm:h-[74px] sm:w-[74px] ${
+   366→   366→                    s.usable ? "" : "opacity-60"
+   367→   367→                  }`}
+   368→   368→                  disabled={!s.usable}
+   369→   369→                  onClick={() => void eng?.playerUseSkill(s.id)}
+   370→   370→                  title={SKILL_META[s.id].desc}
+   371→   371→                >
+   372→   372→                  <img src={s.icon} alt={s.id} className="h-8 w-8 sm:h-9 sm:w-9" />
+   373→   373→                  <span className="font-hand-sc text-[11px] leading-none">{SKILL_META[s.id].name}</span>
+   374→   374→                  <span className="absolute -top-2 -left-1.5 font-marker text-[11px] text-[#8f2418]">
+   375→   375→                    {idx + 1}
+   376→   376→                  </span>
+   377→   377→                  {s.charges >= 0 && (
+   378→   378→                    <span className="absolute -bottom-1 right-1 flex gap-0.5">
+   379→   379→                      {Array.from({ length: Math.max(s.charges, 0) }).map((_, c) => (
+   380→   380→                        <span key={c} className="h-2 w-2 rounded-full bg-[#5e9c5b] border border-[#221a12]" />
+   381→   381→                      ))}
+   382→   382→                    </span>
+   383→   383→                  )}
+   384→   384→                  {s.cooldown > 0 && (
+   385→   385→                    <span className="absolute inset-0 flex items-center justify-center rounded-[inherit] bg-black/55 font-marker text-2xl text-[#f3ecd7]">
+   386→   386→                      {s.cooldown}
+   387→   387→                    </span>
+   388→   388→                  )}
+   389→   389→                </button>
+   390→   390→              ))}
+   391→   391→          </div>
+   392→   392→
+   393→   393→          {/* tombol tembak */}
+   394→   394→          <div className="absolute bottom-3 right-2 z-30 flex flex-row gap-2 sm:right-3 sm:flex-col">
+   395→   395→            <button
+   396→   396→              className={`doodle-btn doodle-red px-3 py-2.5 font-marker text-sm sm:px-5 sm:text-lg ${isPlayerTurn ? "" : "opacity-50"}`}
+   397→   397→              disabled={!isPlayerTurn}
+   398→   398→              onClick={() => void eng?.playerShoot("enemy")}
+   399→   399→            >
+   400→   400→              TEMBAK PAKDE [E]
+   401→   401→            </button>
+   402→   402→            <button
+   403→   403→              className={`doodle-btn px-3 py-2.5 font-marker text-sm sm:px-5 sm:text-lg ${isPlayerTurn ? "" : "opacity-50"}`}
+   404→   404→              disabled={!isPlayerTurn}
+   405→   405→              onClick={() => void eng?.playerShoot("player")}
+   406→   406→            >
+   407→   407→              TEMBAK DIRI [Q]
+   408→   408→            </button>
+   409→   409→          </div>
+   410→   410→
+   411→   411→          {/* toast kiri */}
+   412→   412→          <div className="pointer-events-none absolute left-3 top-28 z-30 flex w-64 flex-col gap-1.5">
+   413→   413→            {toasts.map((t) => (
+   414→   414→              <div
+   415→   415→                key={t.id}
+   416→   416→                className={`doodle-box pop-in px-3 py-1.5 font-hand text-[15px] leading-tight ${
+   417→   417→                  t.tone === "good"
+   418→   418→                    ? "border-[#3f6b3d]"
+   419→   419→                    : t.tone === "bad"
+   420→   420→                      ? "border-[#8f2418] text-[#8f2418]"
+   421→   421→                      : t.tone === "voodoo"
+   422→   422→                        ? "border-[#5e9c5b] text-[#3f6b3d] bg-[#e9f0e2]"
+   423→   423→                        : ""
+   424→   424→                }`}
+   425→   425→              >
+   426→   426→                {t.text}
+   427→   427→              </div>
+   428→   428→            ))}
+   429→   429→          </div>
+   430→   430→        </>
+   431→   431→      )}
+   432→   432→
+   433→   433→      {/* stamp skill didapat */}
+   434→   434→      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+   435→   435→        {assets &&
+   436→   436→          stamps.map((s) => (
+   437→   437→            <div key={s.id} className="stamp-in absolute flex flex-col items-center">
+   438→   438→              <div className="doodle-box flex items-center gap-3 px-8 py-4 rotate-[-3deg]">
+   439→   439→                { }
+   440→   440→                <img src={snap?.skills.find((x) => x.id === s.idSkill)?.icon} alt={s.idSkill} className="h-16 w-16" />
+   441→   441→                <div>
+   442→   442→                  <div className="font-marker text-3xl text-[#8f2418]">{SKILL_META[s.idSkill].name}!</div>
+   443→   443→                  <div className="font-hand text-lg">{SKILL_META[s.idSkill].tag}</div>
+   444→   444→                </div>
+   445→   445→              </div>
+   446→   446→            </div>
+   447→   447→          ))}
+   448→   448→      </div>
+   449→   449→
+   450→   450→      {/* reveal shell (intuisi) */}
+   451→   451→      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+   452→   452→        {assets && reveal && (
+   453→   453→          <div className="pop-in flex flex-col items-center gap-2">
+   454→   454→            { }
+   455→   455→            <img
+   456→   456→              src={reveal.shell === "live" ? assets.pipLive : assets.pipBlank}
+   457→   457→              alt={reveal.shell}
+   458→   458→              className="h-40 w-40 float-y"
+   459→   459→              style={{ imageRendering: "auto", transform: "scale(1.6)" }}
+   460→   460→            />
+   461→   461→            <div
+   462→   462→              className={`doodle-box px-5 py-1 font-marker text-2xl rotate-[-2deg] ${
+   463→   463→                reveal.shell === "live" ? "text-[#8f2418]" : "text-[#57697c]"
+   464→   464→              }`}
+   465→   465→            >
+   466→   466→              {reveal.shell!.toUpperCase()}!
+   467→   467→            </div>
+   468→   468→          </div>
+   469→   469→        )}
+   470→   470→      </div>
+   471→   471→
+   472→   472→      {/* banner tengah */}
+   473→   473→      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+   474→   474→        {banner && (
+   475→   475→          <div className="stamp-in flex flex-col items-center gap-2">
+   476→   476→            <div className="doodle-box px-10 py-4 rotate-[-2deg]">
+   477→   477→              <div className="font-marker text-5xl text-[#221a12]">{banner.title}</div>
+   478→   478→              {banner.sub && <div className="mt-1 text-center font-hand text-xl text-[#8f2418]">{banner.sub}</div>}
+   479→   479→            </div>
+   480→   480→          </div>
+   481→   481→        )}
+   482→   482→      </div>
+   483→   483→
+   484→   484→      {/* ================= MENU ================= */}
+   485→   485→      {phase === "menu" && (
+   486→   486→        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
+   487→   487→          <div className="doodle-box w-[min(92vw,560px)] px-8 py-7 rotate-[-0.5deg]">
+   488→   488→            <div className="text-center">
+   489→   489→              <div className="font-marker text-5xl leading-none text-[#8f2418] rotate-[-1.5deg] drop-shadow-[3px_3px_0_rgba(0,0,0,0.15)]">
+   490→   490→                ULTIMATE
+   491→   491→              </div>
+   492→   492→              <div className="font-marker text-6xl leading-tight rotate-[1deg]">ROULETTE</div>
+   493→   493→              <div className="mt-1 font-hand text-xl text-[#4a4036]">
+   494→   494→                Russian roulette 2.5D. Satu revolver. Enam chamber. Dadu penentu nasib.
+   495→   495→              </div>
+   496→   496→            </div>
+   497→   497→
+   498→   498→            <div className="mt-5 flex flex-col gap-2">
+   499→   499→              {DIFFS.map((d) => (
+   500→   500→                <button
+   501→   501→                  key={d.id}
+   502→   502→                  onClick={() => {
+   503→   503→                    setDiff(d.id);
+   504→   504→                    gameAudio.ensure();
+   505→   505→                    gameAudio.click();
+   506→   506→                  }}
+   507→   507→                  className={`doodle-btn flex items-center justify-between px-4 py-2 ${
+   508→   508→                    diff === d.id ? "bg-[#221a12] text-[#f3ecd7]" : ""
+   509→   509→                  }`}
+   510→   510→                >
+   511→   511→                  <span className="font-marker text-xl">{d.label}</span>
+   512→   512→                  <span className="font-hand text-base opacity-80">{d.desc}</span>
+   513→   513→                </button>
+   514→   514→              ))}
+   515→   515→            </div>
+   516→   516→
+   517→   517→            <div className="mt-5 flex items-center justify-center gap-3">
+   518→   518→              <button
+   519→   519→                className="doodle-btn doodle-red px-10 py-3 font-marker text-2xl"
+   520→   520→                onClick={() => {
+   521→   521→                  gameAudio.ensure();
+   522→   522→                  void eng?.startGame(diff);
+   523→   523→                }}
+   524→   524→              >
+   525→   525→                MAJU KE MEJA
+   526→   526→              </button>
+   527→   527→              <button className="doodle-btn px-4 py-3 font-hand-sc text-lg" onClick={() => setShowHelp(true)}>
+   528→   528→                CARA MAIN
+   529→   529→              </button>
+   530→   530→            </div>
+   531→   531→            <div className="mt-3 text-center font-hand text-sm text-[#4a4036]">
+   532→   532→              Q = tembak diri &middot; E = tembak PAKDE &middot; 1-6 = skill &middot; M = mute
+   533→   533→            </div>
+   534→   534→          </div>
+   535→   535→        </div>
+   536→   536→      )}
+   537→   537→
+   538→   538→      {/* ================= GAME OVER / VICTORY ================= */}
+   539→   539→      {(phase === "gameover" || phase === "victory") && snap && (
+   540→   540→        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[2px]">
+   541→   541→          <div className={`doodle-box w-[min(92vw,520px)] px-8 py-7 ${phase === "victory" ? "rotate-[0.5deg]" : "rotate-[-0.7deg]"}`}>
+   542→   542→            <div className="text-center">
+   543→   543→              {phase === "victory" ? (
+   544→   544→                <>
+   545→   545→                  <div className="font-marker text-5xl text-[#3f6b3d] rotate-[1deg]">KAMU HIDUP!</div>
+   546→   546→                  <div className="mt-2 font-hand text-xl">
+   547→   547→                    PAKDE tumbang di ronde {snap.round}. Ruangan ini resmi milikmu.
+   548→   548→                  </div>
+   549→   549→                </>
+   550→   550→              ) : (
+   551→   551→                <>
+   552→   552→                  <div className="font-marker text-6xl text-[#8f2418] rotate-[-1.5deg]">GAME OVER</div>
+   553→   553→                  <div className="mt-2 font-hand text-xl">
+   554→   554→                    Peluru itu buat kamu. Bertahan sampai ronde {snap.round}.
+   555→   555→                  </div>
+   556→   556→                </>
+   557→   557→              )}
+   558→   558→              <div className="mt-3 font-hand text-lg text-[#4a4036]">
+   559→   559→                HP akhir: kamu {snap.hpPlayer}/{snap.maxHp} &middot; PAKDE {snap.hpEnemy}/{snap.maxHp}
+   560→   560→              </div>
+   561→   561→            </div>
+   562→   562→            <div className="mt-5 flex justify-center gap-3">
+   563→   563→              <button
+   564→   564→                className="doodle-btn doodle-red px-8 py-2.5 font-marker text-xl"
+   565→   565→                onClick={() => void eng?.startGame(snap.difficulty)}
+   566→   566→              >
+   567→   567→                MAIN LAGI
+   568→   568→              </button>
+   569→   569→              <button className="doodle-btn px-6 py-2.5 font-marker text-xl" onClick={() => eng?.backToMenu()}>
+   570→   570→                MENU
+   571→   571→              </button>
+   572→   572→            </div>
+   573→   573→          </div>
+   574→   574→        </div>
+   575→   575→      )}
+   576→   576→
+   577→   577→      {/* ================= HELP ================= */}
+   578→   578→      {showHelp && (
+   579→   579→        <div
+   580→   580→          className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+   581→   581→          onClick={() => setShowHelp(false)}
+   582→   582→        >
+   583→   583→          <div
+   584→   584→            className="doodle-box doodle-scroll max-h-[88vh] w-[min(94vw,680px)] overflow-y-auto px-7 py-6"
+   585→   585→            onClick={(e) => e.stopPropagation()}
+   586→   586→          >
+   587→   587→            <div className="flex items-start justify-between">
+   588→   588→              <div className="font-marker text-3xl text-[#8f2418]">CARA MAIN</div>
+   589→   589→              <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setShowHelp(false)}>
+   590→   590→                X
+   591→   591→              </button>
+   592→   592→            </div>
+   593→   593→            <div className="mt-3 space-y-2 font-hand text-lg leading-snug">
+   594→   594→              <p>
+   595→   595→                Di meja ada revolver 6-chamber. Tiap ronde diisi campuran shell{" "}
+   596→   596→                <b className="text-[#8f2418]">LIVE</b> (merah, sakit) dan <b className="text-[#57697c]">BLANK</b>{" "}
+   597→   597→                (biru, kosong). Jumlahnya jujur di papan atas, tapi urutannya acak.
+   598→   598→              </p>
+   599→   599→              <p>
+   600→   600→                Di giliranmu, pakai skill dulu kalau mau (gratis, gak pindah giliran), lalu pilih:{" "}
+   601→   601→                <b>TEMBAK DIRI</b> — kalau blank, kamu tetap lanjut menembak; kalau live, kamu kena dan giliran
+   602→   602→                pindah. <b>TEMBAK PAKDE</b> — kalau live dia kena, giliran pindah. HP habis = tamat.
+   603→   603→              </p>
+   604→   604→              <p>
+   605→   605→                Chamber habis? Reload + dadu bonus memberi skill baru. PAKDE juga punya skill dan dadunya
+   606→   606→                sendiri. Jangan remehkan dia.
+   607→   607→              </p>
+   608→   608→            </div>
+   609→   609→            <div className="mt-4 font-marker text-2xl">6 SKILL</div>
+   610→   610→            <div className="mt-2 space-y-2">
+   611→   611→              {(Object.keys(SKILL_META) as SkillId[]).map((id) => (
+   612→   612→                <div key={id} className="flex gap-3 border-2 border-[#221a12]/20 rounded-[14px_4px_16px_6px] bg-[#efe7d2] p-2.5">
+   613→   613→                  <img src={dataURL(`icon-${id}`, texSkillIcon(id))} alt={id} className="h-12 w-12 shrink-0" />
+   614→   614→                  <div>
+   615→   615→                    <div className="font-marker text-lg" style={{ color: SKILL_META[id].color }}>
+   616→   616→                      {SKILL_META[id].name} <span className="font-hand text-sm text-[#4a4036]">— {SKILL_META[id].tag}</span>
+   617→   617→                    </div>
+   618→   618→                    <div className="font-hand text-[15px] leading-tight">{SKILL_META[id].desc}</div>
+   619→   619→                  </div>
+   620→   620→                </div>
+   621→   621→              ))}
+   622→   622→            </div>
+   623→   623→            <div className="mt-4 font-hand text-base text-[#4a4036]">
+   624→   624→              Tips: INTUISI dulu sebelum memutuskan. Reroll kalau chamber terasa terlalu berbahaya. Voodoo paling
+   625→   625→              kejam dipasang saat PAKDE sedang berani.
+   626→   626→            </div>
+   627→   627→          </div>
+   628→   628→        </div>
+   629→   629→      )}
+   630→   630→    </div>
+   631→   631→  );
+   632→   632→}
+   633→   633→

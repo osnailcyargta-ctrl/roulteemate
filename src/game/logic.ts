@@ -1,36 +1,36 @@
 /**
- * logic.ts — aturan inti ULTIMATE ROULETTE (pure logic, tanpa render).
+ * logic.ts — core rules of ULTIMATE ROULETTE (pure logic, no rendering).
  *
- * Konsep: revolver 6-chamber diisi shell LIVE/BLANK. Jumlah masing-masing
- * diketahui kedua pihak, urutannya acak. Setiap tembakan menggeser chamber.
- * - Nembak diri sendiri + BLANK  -> giliran lanjut (gratis).
- * - Nembak diri sendiri + LIVE   -> kena damage, giliran pindah.
- * - Nembak musuh + LIVE          -> musuh kena damage, giliran pindah.
- * - Nembak musuh + BLANK         -> giliran pindah.
+ * Concept: a 6-chamber revolver loaded with LIVE/BLANK shells. Both sides
+ * know the counts, never the order. Every shot advances the cylinder.
+ * - Shoot SELF + BLANK  -> you automatically fire ONE free shot at the enemy.
+ * - Shoot SELF + LIVE   -> you take the damage, turn passes.
+ * - Shoot ENEMY + LIVE  -> enemy takes the damage, turn passes.
+ * - Shoot ENEMY + BLANK -> turn passes.
  *
- * SKILL:
- * - REROLL   : acak ulang shell di chamber sekali, lalu WAJIB nembak. CD 2 giliran.
- * - VOODOO   : 1x per game, aktif 2 giliran. Tembakan LIVE musuh ke kamu
- *              DIPANTULKAN ke musuh. Nembak diri sendiri saat aktif:
- *              BLANK -> shell di-reroll & wajib nembak diri 1x lagi;
- *              hasil reroll LIVE -> voodoo batal & kamu kena;
- *              LIVE langsung -> voodoo batal & kamu kena.
- * - INTUISI  : lihat isi chamber sekarang. CD 3 giliran.
- * - BUANG    : eject shell sekarang tanpa nembak (gratis). CD 3 giliran.
- * - KOPI     : +1 HP (maks 4). 2 charge per game.
- * - BORGOL   : musuh skip giliran berikutnya. 1 charge per game.
+ * SKILLS (player owns exactly 2, granted by the opening dice; the enemy owns
+ * 1 on EASY, 2 on NORMAL and 3 on INSANE):
+ * - REROLL   : rerandomize the current shell once, then you MUST shoot. CD 2 turns.
+ * - VOODOO   : 1x per game, active for 2 turns. While cursed, ANY live hit the
+ *              owner would take is REFLECTED to the opponent — even a live
+ *              round fired at yourself. Bonus curse: shooting yourself with a
+ *              BLANK rerolls the shell and forces one shot at the opponent.
+ * - PEEK     : look at the current shell. CD 3 turns.
+ * - EJECT    : eject the current shell without firing (free action). CD 3 turns.
+ * - COFFEE   : +1 HP (up to max). 2 charges per game.
+ * - CUFFS    : the enemy skips their next turn. 1 charge per game.
  */
 
 import type { SkillId } from "./doodle";
 
 export type ShellType = "live" | "blank";
 export type Side = "player" | "enemy";
-export type Difficulty = "gampang" | "normal" | "gila";
+export type Difficulty = "easy" | "normal" | "insane";
 
 export interface SkillState {
   owned: boolean;
-  charges: number; // untuk skill berbasis charge; -1 = berbasis cooldown
-  cooldown: number; // sisa giliran sebelum bisa dipakai lagi
+  charges: number; // for charge-based skills; -1 = cooldown-based
+  cooldown: number; // turns left before usable again
   maxCharges: number;
 }
 
@@ -49,34 +49,33 @@ export interface GameState {
   difficulty: Difficulty;
   maxHp: number;
   hp: Record<Side, number>;
-  cylinder: ShellType[]; // index 0 = shell berikutnya
+  cylinder: ShellType[]; // index 0 = next shell
   turn: Side;
-  skills: Record<SkillId, SkillState>; // pemain
-  enemySkills: Record<SkillId, SkillState>; // musuh
-  voodooTurns: Record<Side, number>; // sisa durasi voodoo (0 = off)
+  skills: Record<SkillId, SkillState>; // player
+  enemySkills: Record<SkillId, SkillState>; // enemy
+  voodooTurns: Record<Side, number>; // remaining voodoo duration (0 = off)
   enemySkipTurns: number;
   playerSkipTurns: number;
-  mustShoot: boolean; // true setelah reroll
+  mustShoot: boolean; // true after reroll
   usedRerollThisTurn: boolean;
 }
 
 export interface ShotOutcome {
   shooter: Side;
-  target: Side; // sasaran bidikan
-  shell: ShellType; // shell yang keluar
+  target: Side; // aim target
+  shell: ShellType; // shell that came out
   damageTo: Side | null;
-  reflected: boolean; // damage dipantulkan voodoo
-  shooterContinues: boolean; // self-shot blank -> tetap giliran dia
-  voodooReroll: boolean; // self-shot blank saat voodoo -> fate diacak, wajib nembak lagi
-  voodooCancelled: boolean;
+  reflected: boolean; // damage reflected by voodoo
+  bonusShot: boolean; // self-shot blank -> shooter auto-fires once at the opponent
+  voodooReroll: boolean; // self-shot blank while cursed -> fresh shell + forced shot
   death: Side | null;
-  forcedSelfShot: boolean; // tembakan ini dipaksa (dari reroll voodoo)
+  forced: boolean; // this shot was forced (from the voodoo curse)
 }
 
 export interface SkillOutcome {
   ok: boolean;
   reason?: string;
-  revealed?: ShellType | null; // intuisi / buang
+  revealed?: ShellType | null; // peek / eject
   healed?: boolean;
   rerolled?: boolean;
   cuffsApplied?: boolean;
@@ -85,31 +84,40 @@ export interface SkillOutcome {
 
 const CHAMBER_SIZE = 6;
 
+export function opponentOf(side: Side): Side {
+  return side === "player" ? "enemy" : "player";
+}
+
 function emptySkills(): Record<SkillId, SkillState> {
   return {
     reroll: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
-    voodoo: { owned: false, charges: 0, cooldown: 0, maxCharges: 2 },
-    intuisi: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
-    buang: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
-    kopi: { owned: false, charges: 0, cooldown: 0, maxCharges: 2 },
-    borgol: { owned: false, charges: 0, cooldown: 0, maxCharges: 2 },
+    voodoo: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
+    peek: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
+    eject: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
+    coffee: { owned: false, charges: 0, cooldown: 0, maxCharges: 2 },
+    cuffs: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
   };
 }
 
 export const SKILL_CD: Record<SkillId, number> = {
   reroll: 2,
   voodoo: 0,
-  intuisi: 3,
-  buang: 3,
-  kopi: 0,
-  borgol: 0,
+  peek: 3,
+  eject: 3,
+  coffee: 0,
+  cuffs: 0,
 };
+
+/** How many skills the ENEMY gets per difficulty. */
+export function enemySkillCount(diff: Difficulty): number {
+  return diff === "easy" ? 1 : diff === "normal" ? 2 : 3;
+}
 
 export class RouletteLogic {
   state: GameState;
-  /** pengetahuan khusus AI tentang shell saat ini (dari intuisi-nya) */
+  /** AI-only knowledge of the current shell (from its own peek). */
   aiKnown: ShellType | null = null;
-  /** pengetahuan pemain tentang shell saat ini (dari intuisi-nya) */
+  /** Player knowledge of the current shell (from peek). */
   playerKnown: ShellType | null = null;
 
   constructor(difficulty: Difficulty = "normal") {
@@ -117,7 +125,7 @@ export class RouletteLogic {
   }
 
   freshState(difficulty: Difficulty): GameState {
-    const maxHp = difficulty === "gampang" ? 5 : 4;
+    const maxHp = difficulty === "easy" ? 5 : 4;
     return {
       phase: "dice",
       round: 0,
@@ -174,17 +182,10 @@ export class RouletteLogic {
     return this.state.cylinder.length === 0;
   }
 
-  /* ---------------- skill grants (dadu) ---------------- */
+  /* ---------------- skill grants (dice) ---------------- */
 
-  /** Dadu memberi skill. Kalau sudah dimiliki: charge-skills +1 charge
-   *  (sampai cap), cooldown-skills direset cooldownnya. */
-  grantRandomSkill(side: Side): SkillId {
-    const pool = SKILL_POOL.filter(() => true);
-    const id = pool[Math.floor(Math.random() * pool.length)];
-    this.grantSkill(side, id);
-    return id;
-  }
-
+  /** The dice grants a skill. If already owned: charge skills +1 charge
+   *  (up to cap), cooldown skills get their cooldown reset. */
   grantSkill(side: Side, id: SkillId) {
     const sk = side === "player" ? this.state.skills[id] : this.state.enemySkills[id];
     sk.owned = true;
@@ -203,25 +204,25 @@ export class RouletteLogic {
     if (!sk.owned) return false;
     if (sk.cooldown > 0) return false;
     if (sk.charges === 0) return false;
-    if (side === "player" && st.mustShoot && id !== "kopi") return false;
+    if (side === "player" && st.mustShoot && id !== "coffee") return false;
     if (st.phase !== "playerTurn" && st.phase !== "enemyTurn") return false;
     if (side !== st.turn) return false;
-    if (id === "kopi" && st.hp[side] >= st.maxHp) return false;
-    if (id === "borgol" && (side === "player" ? st.enemySkipTurns : st.playerSkipTurns) > 0)
+    if (id === "coffee" && st.hp[side] >= st.maxHp) return false;
+    if (id === "cuffs" && (side === "player" ? st.enemySkipTurns : st.playerSkipTurns) > 0)
       return false;
     if (id === "voodoo" && st.voodooTurns[side] > 0) return false;
-    if (id === "buang" && st.cylinder.length === 0) return false;
+    if (id === "eject" && st.cylinder.length === 0) return false;
     if (id === "reroll" && (st.usedRerollThisTurn || st.cylinder.length === 0)) return false;
     return true;
   }
 
   useSkill(side: Side, id: SkillId): SkillOutcome {
-    if (!this.canUseSkill(side, id)) return { ok: false, reason: "tidak bisa dipakai" };
+    if (!this.canUseSkill(side, id)) return { ok: false, reason: "not usable" };
     const st = this.state;
     const sk = side === "player" ? st.skills[id] : st.enemySkills[id];
     switch (id) {
       case "reroll": {
-        // reroll murni: hasil acak, bisa saja sama (nama skill nya aja reroll)
+        // pure reroll: random result, may repeat itself
         const next: ShellType = Math.random() < 0.5 ? "live" : "blank";
         st.cylinder[0] = next;
         sk.cooldown = SKILL_CD.reroll;
@@ -231,26 +232,26 @@ export class RouletteLogic {
         this.aiKnown = null;
         return { ok: true, rerolled: true };
       }
-      case "intuisi": {
+      case "peek": {
         const cur = st.cylinder[0] ?? null;
-        sk.cooldown = SKILL_CD.intuisi;
+        sk.cooldown = SKILL_CD.peek;
         if (side === "player") this.playerKnown = cur;
         else this.aiKnown = cur;
         return { ok: true, revealed: cur };
       }
-      case "buang": {
+      case "eject": {
         const cur = st.cylinder.shift() ?? null;
-        sk.cooldown = SKILL_CD.buang;
+        sk.cooldown = SKILL_CD.eject;
         this.playerKnown = null;
         this.aiKnown = null;
         return { ok: true, ejected: cur };
       }
-      case "kopi": {
+      case "coffee": {
         st.hp[side] = Math.min(st.maxHp, st.hp[side] + 1);
         sk.charges -= 1;
         return { ok: true, healed: true };
       }
-      case "borgol": {
+      case "cuffs": {
         sk.charges -= 1;
         if (side === "player") st.enemySkipTurns += 1;
         else st.playerSkipTurns += 1;
@@ -271,7 +272,7 @@ export class RouletteLogic {
     return st.turn === side && st.cylinder.length > 0;
   }
 
-  /** Resolusi SATU tembakan. `forced` = tembakan paksa hasil reroll voodoo. */
+  /** Resolve ONE trigger pull. `forced` = the mandatory shot from the voodoo curse. */
   shoot(shooter: Side, target: Side, forced = false): ShotOutcome {
     const st = this.state;
     const shell = st.cylinder.shift()!;
@@ -284,11 +285,10 @@ export class RouletteLogic {
       shell,
       damageTo: null,
       reflected: false,
-      shooterContinues: false,
+      bonusShot: false,
       voodooReroll: false,
-      voodooCancelled: false,
       death: null,
-      forcedSelfShot: forced,
+      forced,
     };
 
     const shooterVoodoo = st.voodooTurns[shooter] > 0;
@@ -297,44 +297,40 @@ export class RouletteLogic {
 
     if (targetIsSelf) {
       if (shell === "live") {
-        // live ke diri sendiri
-        if (shooterVoodoo && !forced) {
-          // voodoo batal, damage tetap ditanggung penembak
-          st.voodooTurns[shooter] = 0;
-          out.voodooCancelled = true;
+        // live to your own head
+        if (shooterVoodoo) {
+          // VOODOO REFLECTION: even your own bullet cannot touch you —
+          // the pain crawls into the opponent instead.
+          out.reflected = true;
+          out.damageTo = opponentOf(shooter);
+        } else {
+          out.damageTo = shooter;
         }
-        out.damageTo = shooter;
       } else {
-        // blank ke diri sendiri
+        // blank to your own head
         if (shooterVoodoo && !forced) {
-          // KUTUKAN VOODOO: blank di-reroll, wajib nembak diri lagi.
-          // shell blank sudah terbuang (shift). masukkan shell acak baru.
+          // VOODOO CURSE: the blank shell is rerolled and you MUST fire once
+          // more — aimed at the opponent. The fresh shell is pushed on top.
           const fresh: ShellType = Math.random() < 0.5 ? "live" : "blank";
           st.cylinder.unshift(fresh);
           out.voodooReroll = true;
-          out.shooterContinues = true; // tetap gilirannya untuk tembakan paksa
           return out;
         }
-        out.shooterContinues = true;
+        // GLOBAL RULE: self-shot blank -> one automatic free shot at the enemy.
+        out.bonusShot = !forced;
       }
     } else {
-      // menembak lawan
+      // shooting the opponent
       if (shell === "live") {
         if (targetVoodoo) {
-          // DIPANTULKAN oleh voodoo target
+          // REFLECTED by the target's voodoo
           out.reflected = true;
           out.damageTo = shooter;
         } else {
           out.damageTo = target;
         }
       }
-      // blank ke lawan: tidak ada damage
-    }
-
-    // hasil reroll voodoo yang live: voodoo batal & penembak tanggung sendiri
-    if (forced && shooterVoodoo && targetIsSelf && shell === "live") {
-      st.voodooTurns[shooter] = 0;
-      out.voodooCancelled = true;
+      // blank at the opponent: no damage
     }
 
     if (out.damageTo) {
@@ -344,30 +340,22 @@ export class RouletteLogic {
       }
     }
 
-    // giliran lanjut atau pindah ditentukan engine via shouldKeepTurn()
     return out;
   }
 
-  /** Apakah penembak boleh lanjut menembak (self-shot blank, tanpa reroll voodoo). */
-  shouldKeepTurn(out: ShotOutcome): boolean {
-    if (out.death) return false;
-    if (out.voodooReroll) return true; // wajib tembakan paksa
-    return out.target === out.shooter && out.shell === "blank" && !out.damageTo;
-  }
+  /* ---------------- turn flow ---------------- */
 
-  /* ---------------- alur giliran ---------------- */
-
-  /** Akhiri giliran side saat ini: voodoo berkurang, pindah ke lawan,
-   *  proses skip (borgol) & cooldown dipanggil saat MULAI giliran. */
+  /** End the current side's turn: tick voodoo down, pass to the opponent.
+   *  Skips (cuffs) & cooldowns are processed when a turn STARTS. */
   endTurnAndPass(): Side {
     const st = this.state;
-    // voodoo side aktif menurun 1 di akhir gilirannya sendiri
+    // the active side's voodoo ticks down at the end of its own turn
     if (st.voodooTurns[st.turn] > 0) st.voodooTurns[st.turn] -= 1;
     st.mustShoot = false;
     st.usedRerollThisTurn = false;
 
-    let next: Side = st.turn === "player" ? "enemy" : "player";
-    // skip oleh borgol
+    let next: Side = opponentOf(st.turn);
+    // skips from cuffs
     if (next === "enemy" && st.enemySkipTurns > 0) {
       st.enemySkipTurns -= 1;
       next = "player";
@@ -379,7 +367,7 @@ export class RouletteLogic {
     return next;
   }
 
-  /** Dipanggil saat giliran baru dimulai: turunkan cooldown skill pemilik giliran. */
+  /** Called when a new turn starts: tick the owner's skill cooldowns down. */
   startTurnTick() {
     const st = this.state;
     const sks = st.turn === "player" ? st.skills : st.enemySkills;
@@ -396,10 +384,10 @@ export class RouletteLogic {
 export const SKILL_POOL: SkillId[] = [
   "reroll",
   "voodoo",
-  "intuisi",
-  "buang",
-  "kopi",
-  "borgol",
+  "peek",
+  "eject",
+  "coffee",
+  "cuffs",
 ];
 
 /* ---------------- AI ---------------- */
@@ -410,11 +398,11 @@ export interface AIDecision {
   target?: Side;
 }
 
-/** Kecerdasan musuh. `smart` 0..1 dari difficulty. */
+/** The enemy brain. `smart` 0..1 scales with difficulty. */
 export class EnemyAI {
   constructor(private logic: RouletteLogic, public smart: number) {}
 
-  /** Satu langkah AI: pakai 1 skill ATAU menembak. */
+  /** One AI step: use 1 skill OR shoot. */
   decide(): AIDecision {
     const st = this.logic.state;
     const total = this.logic.totalRemaining;
@@ -427,12 +415,12 @@ export class EnemyAI {
     const playerVoodoo = st.voodooTurns.player > 0;
     const rng = Math.random();
 
-    // 1. Kopi saat sekarat
-    if (sk.kopi.owned && sk.kopi.charges > 0 && hp <= 2 && this.logic.canUseSkill("enemy", "kopi")) {
-      if (rng < 0.85) return { kind: "skill", skill: "kopi" };
+    // 1. Coffee when dying
+    if (sk.coffee.owned && sk.coffee.charges > 0 && hp <= 2 && this.logic.canUseSkill("enemy", "coffee")) {
+      if (rng < 0.85) return { kind: "skill", skill: "coffee" };
     }
 
-    // 2. Voodoo saat terdesak / peluru banyak
+    // 2. Voodoo when cornered / many live shells
     if (
       sk.voodoo.owned &&
       sk.voodoo.charges > 0 &&
@@ -443,68 +431,70 @@ export class EnemyAI {
       return { kind: "skill", skill: "voodoo" };
     }
 
-    // 3. Intuisi saat ragu
+    // 3. Peek when unsure (more eager while the player's voodoo is up)
     if (
       known === null &&
-      sk.intuisi.owned &&
-      sk.intuisi.cooldown === 0 &&
+      sk.peek.owned &&
+      sk.peek.cooldown === 0 &&
       total > 1 &&
-      this.logic.canUseSkill("enemy", "intuisi") &&
-      rng < 0.4 + this.smart * 0.5 &&
+      this.logic.canUseSkill("enemy", "peek") &&
+      rng < (playerVoodoo ? 0.75 : 0.4) + this.smart * 0.5 &&
       (pLive > 0.25 && pLive < 0.85)
     ) {
-      return { kind: "skill", skill: "intuisi" };
+      return { kind: "skill", skill: "peek" };
     }
 
     const pLiveEff = known !== null ? (known === "live" ? 1 : 0) : pLive;
 
-    // 4. Buang shell live kalau mau memancing blank (known live & mau self-fish)
+    // 4. Eject a known live shell. While the player's voodoo is active,
+    //    firing that shell anywhere = pain for the enemy, so eject it ASAP.
     if (
       known === "live" &&
-      sk.buang.owned &&
-      sk.buang.cooldown === 0 &&
-      total > 2 &&
-      this.logic.canUseSkill("enemy", "buang") &&
-      rng < 0.35 + this.smart * 0.5
+      sk.eject.owned &&
+      sk.eject.cooldown === 0 &&
+      total > 1 &&
+      this.logic.canUseSkill("enemy", "eject") &&
+      rng < (playerVoodoo ? 0.95 : 0.35 + this.smart * 0.5)
     ) {
-      return { kind: "skill", skill: "buang" };
+      return { kind: "skill", skill: "eject" };
     }
 
-    // 5. Reroll: kalau yakin shell sekarang buruk buat rencananya
+    // 5. Reroll: when the current shell is known to be bad for the plan
     if (
       sk.reroll.owned &&
       sk.reroll.cooldown === 0 &&
       !st.usedRerollThisTurn &&
       total > 1 &&
       this.logic.canUseSkill("enemy", "reroll") &&
-      ((known === "blank" && rng < 0.4) || (pLiveEff >= 0.8 && rng < 0.45))
+      ((known === "blank" && rng < 0.4) || (pLiveEff >= 0.8 && playerVoodoo && rng < 0.5))
     ) {
       return { kind: "skill", skill: "reroll" };
     }
 
-    // 6. Borgol untuk menahan pemain kuat
+    // 6. Cuffs to hold down a strong player
     if (
-      sk.borgol.owned &&
-      sk.borgol.charges > 0 &&
-      this.logic.canUseSkill("enemy", "borgol") &&
+      sk.cuffs.owned &&
+      sk.cuffs.charges > 0 &&
+      this.logic.canUseSkill("enemy", "cuffs") &&
       ((playerHp <= 2 && hp <= 2 && rng < 0.6) || (hp === 1 && rng < 0.8))
     ) {
-      return { kind: "skill", skill: "borgol" };
+      return { kind: "skill", skill: "cuffs" };
     }
 
-    // 7. Keputusan menembak
+    // 7. Shooting decision
     if (playerVoodoo && pLiveEff > 0) {
-      // menembak pemain berisiko dipantulkan; memancing blank lebih aman
-      return { kind: "shoot", target: "enemy" }; // nembak diri sendiri (fishing)
+      // shooting the player = reflected pain; fish for a blank instead
+      // (a self-blank still grants the free shot, and a live hurts only itself)
+      if (known === "live" && total <= 1) return { kind: "shoot", target: "player" }; // forced, nothing better
+      return { kind: "shoot", target: "enemy" }; // self-fish
     }
     if (pLiveEff >= 0.6) {
-      // banyak live: tembak pemain; kalau pemain pakai voodoo, tetap menembak (nekat)
       return { kind: "shoot", target: "player" };
     }
     if (pLiveEff <= 0.34) {
-      return { kind: "shoot", target: "enemy" }; // self-fish
+      return { kind: "shoot", target: "enemy" }; // self-fish (blank -> free shot)
     }
-    // zona abu-abu: kecenderungan by smart
+    // grey zone: lean by smart
     if (rng < 0.35 + this.smart * 0.3) return { kind: "shoot", target: "player" };
     return { kind: "shoot", target: "enemy" };
   }

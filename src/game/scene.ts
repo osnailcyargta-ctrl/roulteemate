@@ -232,7 +232,7 @@ export class RouletteScene {
     this.composer.addPass(this.finalPass);
 
     window.addEventListener("resize", this.onResize);
-    // debug handle (dipakai untuk inspeksi via agent-browser)
+    // debug handle (used for inspection via agent-browser)
     (window as unknown as { __rs?: RouletteScene }).__rs = this;
   }
 
@@ -284,7 +284,7 @@ export class RouletteScene {
     front.rotation.y = Math.PI;
     this.scene.add(front);
 
-    const left = mkWall(texWall(13, "MENYESAL"), 11, 3.5);
+    const left = mkWall(texWall(13, "REGRET"), 11, 3.5);
     left.position.set(-4.6, 1.75, 0);
     left.rotation.y = Math.PI / 2;
     left.receiveShadow = true;
@@ -383,7 +383,7 @@ export class RouletteScene {
     this.lampPivot.add(this.spot);
     this.spot.target = target;
 
-    // cahaya pengisi hangat lembut agar PAKDE terlihat
+    // warm soft fill light so THE DEALER is visible
     const fill = new THREE.PointLight(0xffd9a0, 1.6, 4.5, 2);
     fill.position.set(0.25, 2.3, -1.5);
     this.scene.add(fill);
@@ -863,7 +863,7 @@ export class RouletteScene {
     this.lampPivot.rotation.z = Math.sin(t * 0.9) * 0.035;
     this.lampPivot.rotation.x = Math.cos(t * 0.7) * 0.02;
 
-    // musuh: bobbing idle
+    // enemy: idle bobbing
     this.enemyWobble += dt;
     this.enemyMesh.position.y = this.enemyBasePos.y + Math.sin(t * 1.9) * 0.02;
     this.enemyMesh.rotation.z = Math.sin(t * 1.3) * 0.012;

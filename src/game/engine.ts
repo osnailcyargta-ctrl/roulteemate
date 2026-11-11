@@ -1,14 +1,25 @@
 /**
- * engine.ts — orchestrator ULTIMATE ROULETTE.
- * Menghubungkan logic (aturan), scene (Three.js), audio, dan HUD (React).
- * Berisi: intro dadu, reload antar-ronde, alur giliran pemain/AI,
- * dan seluruh timeline VFX (guncangan, darah, flash, slow-mo, dll).
+ * engine.ts — orchestrator of ULTIMATE ROULETTE.
+ * Connects logic (rules), scene (Three.js), audio and the React HUD.
+ * Contains: the opening dice intro (2 skills for the player, 1/2/3 for the
+ * enemy by difficulty), between-round reloads, player/AI turn flow and the
+ * full VFX timeline (shakes, blood, flash, slow-mo, low-HP dread...).
  */
 
 import * as THREE from "three";
 import { RouletteScene } from "./scene";
-import { RouletteLogic, EnemyAI, type Difficulty, type ShotOutcome, type Side, type SkillOutcome, type ShellType } from "./logic";
-import { SKILL_IDS, SKILL_META, texDieFace, texSkillIcon, dataURL, type SkillId } from "./doodle";
+import {
+  RouletteLogic,
+  EnemyAI,
+  enemySkillCount,
+  type AIDecision,
+  type Difficulty,
+  type ShotOutcome,
+  type Side,
+  type SkillOutcome,
+  type ShellType,
+} from "./logic";
+import { SKILL_IDS, texDieFace, texSkillIcon, dataURL, type SkillId } from "./doodle";
 import { gameAudio } from "./audio";
 import { pick } from "./taunts";
 
@@ -34,6 +45,7 @@ export interface HudSnapshot {
   blank: number;
   turn: Side | null;
   skills: HudSkillSlot[];
+  enemySkills: { id: SkillId; icon: string }[];
   known: ShellType | null;
   voodooPlayer: number;
   voodooEnemy: number;
@@ -55,7 +67,16 @@ export type HudEvent =
   | { type: "skillFlash"; id: SkillId }
   | { type: "reloadStep"; loaded: number; total: number };
 
-const SMART: Record<Difficulty, number> = { gampang: 0.55, normal: 0.8, gila: 0.95 };
+const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.95 };
+
+function shuffled<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 export class GameEngine {
   scene = new RouletteScene();
@@ -117,6 +138,10 @@ export class GameEngine {
           icon: dataURL(`icon-${id}`, texSkillIcon(id)),
         };
       }),
+      enemySkills: SKILL_IDS.filter((id) => st.enemySkills[id].owned).map((id) => ({
+        id,
+        icon: dataURL(`icon-${id}`, texSkillIcon(id)),
+      })),
       known: this.logic.playerKnown,
       voodooPlayer: st.voodooTurns.player,
       voodooEnemy: st.voodooTurns.enemy,
@@ -137,6 +162,7 @@ export class GameEngine {
     this.onEvent({ type: "toast", text, tone });
   }
 
+  /** Low-HP tension: blood vignette hooks + heartbeat + red pulse. */
   private checkHealthFx() {
     const hp = this.logic.state.hp.player;
     if (hp === 1) {
@@ -144,16 +170,20 @@ export class GameEngine {
       this.scene.setRedPulse(0.32);
       if (!this.lowHpTaunted && this.logic.state.hp.enemy > 0) {
         this.lowHpTaunted = true;
-        this.toast("JANTUNG BERDEBAR... 1 HP!", "bad");
+        this.toast("YOUR HEART POUNDS... 1 HP LEFT!", "bad");
       }
-    } else if (hp >= 2) {
+    } else if (hp === 2) {
+      gameAudio.startHeartbeat(false);
+      this.scene.setRedPulse(0.12);
+      this.lowHpTaunted = false;
+    } else {
       gameAudio.stopHeartbeat();
       this.scene.setRedPulse(0);
       this.lowHpTaunted = false;
     }
   }
 
-  /* ---------------- alur utama ---------------- */
+  /* ---------------- main flow ---------------- */
 
   async startGame(diff: Difficulty) {
     gameAudio.ensure();
@@ -182,21 +212,18 @@ export class GameEngine {
     this.notify();
   }
 
-  /** Intro dadu: 3 lemparan, tiap lemparan memberi 1 skill pasti beda. */
+  /** Dice intro: 2 rolls for the player (their only skills for the match),
+   *  then the enemy silently receives 1/2/3 skills depending on difficulty. */
   private async diceIntro() {
+    const diff = this.logic.state.difficulty;
     this.logic.setPhase("dice");
     this.notify();
     await sleep(400);
     this.scene.enemySetMood("grin");
-    this.scene.enemySay(["Dadu dulu. Nasibmu", "ditentukan di sini."], 2.8);
+    this.scene.enemySay(["Dice first.", "Your fate is decided here."], 2.8);
     gameAudio.gasp();
 
-    const pool = [...SKILL_IDS];
-    for (let i = pool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [pool[i], pool[j]] = [pool[j], pool[i]];
-    }
-    const granted = pool.slice(0, 3);
+    const granted = shuffled(SKILL_IDS).slice(0, 2);
 
     this.scene.diceVisible(true);
     for (const id of granted) {
@@ -211,13 +238,9 @@ export class GameEngine {
     }
     this.scene.diceVisible(false);
 
-    // musuh diam-diam dapat 3 skill
-    const epool = [...SKILL_IDS];
-    for (let i = epool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [epool[i], epool[j]] = [epool[j], epool[i]];
-    }
-    for (const id of epool.slice(0, 3)) this.logic.grantSkill("enemy", id);
+    // the enemy quietly takes its skills
+    const n = enemySkillCount(diff);
+    for (const id of shuffled(SKILL_IDS).slice(0, n)) this.logic.grantSkill("enemy", id);
 
     this.scene.enemySetMood("laugh");
     gameAudio.laugh();
@@ -225,25 +248,7 @@ export class GameEngine {
     await sleep(1200);
   }
 
-  /** Satu lemparan dadu (dipakai intro & tiap reload). */
-  private async diceRollOnce(): Promise<SkillId> {
-    const id = SKILL_IDS[Math.floor(Math.random() * SKILL_IDS.length)];
-    this.scene.diceVisible(true);
-    gameAudio.diceShake();
-    await sleep(420);
-    await this.diceTumble(id);
-    this.logic.grantSkill("player", id);
-    gameAudio.stamp();
-    this.onEvent({ type: "skillGet", id });
-    this.notify();
-    await sleep(950);
-    this.scene.diceVisible(false);
-    // musuh juga dapat
-    this.logic.grantSkill("enemy", SKILL_IDS[Math.floor(Math.random() * SKILL_IDS.length)]);
-    return id;
-  }
-
-  /** Animasi tumbling dadu di depan kamera. */
+  /** One dice tumble animation in front of the camera. */
   private diceTumble(finalId: SkillId): Promise<void> {
     const { main, ghosts } = this.scene.diceMeshes();
     let lastSwitch = 0;
@@ -251,6 +256,7 @@ export class GameEngine {
     const setFace = (id: SkillId) => this.scene.diceSetFace(id, texDieFace(id));
     const dur = 1400;
     const start = performance.now();
+    gameAudio.diceRoll(); // physical tumbling knocks while the die spins
     return new Promise<void>((resolve) => {
       const step = () => {
         const t = Math.min(1, (performance.now() - start) / dur);
@@ -296,7 +302,7 @@ export class GameEngine {
     });
   }
 
-  /** Reload antar-ronde: gun terbuka, shell masuk, dadu bonus. */
+  /** Between-round reload: gun opens, shells drop in, cylinder spins. */
   private async reloadSequence() {
     this.logic.state.round += 1;
     this.logic.loadCylinder();
@@ -326,13 +332,11 @@ export class GameEngine {
     await sleep(420);
     this.scene.gunAim(null);
 
-    await this.diceRollOnce();
-
     const live = this.logic.liveRemaining;
     const blank = this.logic.blankRemaining;
     this.onEvent({
       type: "banner",
-      title: `RONDE ${this.logic.state.round}`,
+      title: `ROUND ${this.logic.state.round}`,
       sub: `LIVE ${live} — BLANK ${blank}`,
     });
     gameAudio.hammerCock();
@@ -340,7 +344,7 @@ export class GameEngine {
     this.busy = false;
   }
 
-  /* ---------------- giliran pemain ---------------- */
+  /* ---------------- player turn ---------------- */
 
   private async playerTurnStart() {
     if (this.logic.state.hp.enemy <= 0 || this.logic.state.hp.player <= 0) return;
@@ -357,15 +361,26 @@ export class GameEngine {
     this.busy = true;
     this.notify();
 
+    // LOW-HP TENSION: below 3 HP a self-shot gets 0.7s of pure dread first.
+    const tension = target === "player" && st.hp.player < 3;
+
     this.scene.gunAim(target === "player" ? "self" : "enemy");
     gameAudio.hammerCock();
-    gameAudio.riser(0.55);
+    gameAudio.riser(tension ? 1.5 : 0.55);
     await sleep(800);
+    if (tension) {
+      // 0.7s: the trigger finger trembles... 240 + 240 + 220
+      this.scene.addTrauma(0.14);
+      await sleep(240);
+      this.scene.addTrauma(0.18);
+      await sleep(240);
+      this.scene.addTrauma(0.22);
+      await sleep(220);
+    }
 
-    const out = this.logic.shoot("player", target);
-    const res = await this.resolveShot(out);
+    const res = await this.shootSequence("player", target, tension);
     this.scene.gunAim(null);
-    await this.afterShot("player", out, res);
+    await this.afterShot("player", res);
   }
 
   async playerUseSkill(id: SkillId) {
@@ -390,7 +405,7 @@ export class GameEngine {
     this.notify();
   }
 
-  /* ---------------- giliran musuh ---------------- */
+  /* ---------------- enemy turn ---------------- */
 
   private async enemyTurnStart() {
     const st = this.logic.state;
@@ -406,40 +421,35 @@ export class GameEngine {
 
     let skillsUsed = 0;
     let guard = 0;
-    // AI loop: skill / tembak
+    let decision: AIDecision | null = null;
+    // AI loop: burn skills first, then shoot
     for (;;) {
       if (st.hp.enemy <= 0 || st.hp.player <= 0) return;
       if (this.logic.isEmpty || guard++ > 24) break;
       const d = this.ai.decide();
       if (d.kind === "skill" && d.skill && skillsUsed < 3) {
         const oc = this.logic.useSkill("enemy", d.skill);
-        if (!oc.ok) break;
+        if (!oc.ok) continue;
         skillsUsed++;
         await this.playSkillFx("enemy", d.skill, oc);
         this.notify();
         await sleep(rnd(500, 850));
         continue;
       }
-      if (d.kind === "shoot" && d.target) {
-        const target: Side = d.target;
-        this.scene.enemySetMood("aim");
-        gameAudio.riser(1.0);
-        await sleep(rnd(850, 1400));
-        const out = this.logic.shoot("enemy", target);
-        const res = await this.resolveShot(out);
-        this.scene.enemySetMood("idle1");
-        if (res === "dead") {
-          await this.endGame(out.death!);
-          return;
-        }
-        if (res === "continue") {
-          this.notify();
-          await sleep(rnd(600, 1000));
-          continue;
-        }
-        break;
-      }
+      decision = d;
       break;
+    }
+
+    if (decision && decision.kind === "shoot" && decision.target && !this.logic.isEmpty) {
+      this.scene.enemySetMood("aim");
+      gameAudio.riser(1.0);
+      await sleep(rnd(850, 1400));
+      const res = await this.shootSequence("enemy", decision.target);
+      this.scene.enemySetMood("idle1");
+      if (res === "dead") {
+        await this.endGame();
+        return;
+      }
     }
 
     if (this.logic.isEmpty) {
@@ -450,34 +460,66 @@ export class GameEngine {
     if (next === "player") {
       await this.playerTurnStart();
     } else {
-      // pemain diborgol musuh
-      this.toast("Kamu diborgol! Giliran PAKDE lagi.", "bad");
+      // the player is cuffed
+      this.toast("You're cuffed! The DEALER goes again.", "bad");
       await sleep(800);
       await this.enemyTurnStart();
     }
   }
 
-  /* ---------------- resolusi tembakan ---------------- */
+  /* ---------------- shot resolution ---------------- */
 
-  /** Animasi + efek untuk SATU resolusi tembakan (kedua belah pihak). */
-  private async resolveShot(out: ShotOutcome): Promise<"continue" | "pass" | "dead"> {
+  /** Fire one shot and resolve EVERYTHING that follows it:
+   *  the voodoo curse (fresh shell + forced shot) and the global
+   *  self-blank rule (one automatic free shot at the opponent). */
+  private async shootSequence(shooter: Side, target: Side, tensionSelf = false, forced = false): Promise<"pass" | "dead"> {
+    const out = this.logic.shoot(shooter, target, forced);
+    const res = await this.resolveShot(out, tensionSelf);
+    if (res === "dead") return "dead";
+
+    const opp: Side = shooter === "player" ? "enemy" : "player";
+
+    if (out.voodooReroll) {
+      // VOODOO CURSE: blank was rerolled — the shooter MUST fire once more,
+      // and the gun swings toward the opponent.
+      this.notify();
+      await sleep(300);
+      const out2 = this.logic.shoot(shooter, opp, true);
+      const res2 = await this.resolveShot(out2, false);
+      if (res2 === "dead") return "dead";
+    } else if (out.bonusShot && !this.logic.isEmpty) {
+      // GLOBAL RULE: shot yourself with a blank -> ONE automatic shot at the enemy.
+      this.notify();
+      if (shooter === "player") {
+        this.toast("BLANK! Free shot at the DEALER!", "good");
+        this.scene.gunAim("enemy");
+        gameAudio.hammerCock();
+        await sleep(750);
+      } else {
+        this.scene.enemySetMood("aim");
+        this.toast("DEALER blanks himself — free shot at you!", "bad");
+        await sleep(750);
+      }
+      const out2 = this.logic.shoot(shooter, opp);
+      const res2 = await this.resolveShot(out2, false);
+      if (res2 === "dead") return "dead";
+    }
+    return "pass";
+  }
+
+  /** Animation + effects for ONE trigger pull (both sides). */
+  private async resolveShot(out: ShotOutcome, tensionSelf = false): Promise<"pass" | "dead"> {
     const shooterIsPlayer = out.shooter === "player";
 
     if (out.voodooReroll) {
-      // KUTUKAN VOODOO: blank di-reroll, wajib nembak diri lagi
       gameAudio.blankClick();
-      this.toast("VOODOO: blank di-REROLL! Wajib nembak 1x lagi!", "voodoo");
+      this.toast("VOODOO: blank rerolled! Now FIRE at the enemy!", "voodoo");
       await sleep(700);
       gameAudio.spinCylinder();
       this.scene.addTrauma(0.25);
       await sleep(900);
       this.notify();
-      const forced = this.logic.shoot(out.shooter, out.shooter, true);
-      const r = await this.resolveShot(forced);
-      if (forced.voodooCancelled) {
-        this.toast("VOODOO BATAL! Kamu kena hasil reroll.", "bad");
-      }
-      return r;
+      return "pass";
     }
 
     if (out.shell === "live") {
@@ -489,13 +531,14 @@ export class GameEngine {
         this.scene.addTrauma(0.5);
         this.scene.flash(0.4);
       }
-      await sleep(140);
+      // bullet-exit delay: at low HP a self-shot lingers 0.2s longer
+      await sleep(tensionSelf ? 340 : 140);
 
       if (out.reflected) {
-        // voodoo memantulkan ke penembak
+        // voodoo reflected the pain back to the shooter
         gameAudio.voodooReflect();
         this.scene.flash(0.55);
-        this.onEvent({ type: "dmgPop", side: out.damageTo!, text: "DIPANTULKAN!", tone: "reflect" });
+        this.onEvent({ type: "dmgPop", side: out.damageTo!, text: "REFLECTED!", tone: "reflect" });
         if (out.damageTo === "enemy") {
           this.scene.bloodBurst("enemy");
           this.scene.enemySetMood("hit");
@@ -515,7 +558,7 @@ export class GameEngine {
           this.scene.enemySetMood("laugh");
           this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
         } else {
-          this.scene.enemySetMood(out.voodooCancelled ? "grin" : "laugh");
+          this.scene.enemySetMood("laugh");
           this.scene.enemySay([pick("playerHitSelf")], 2.4);
           this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
         }
@@ -524,15 +567,12 @@ export class GameEngine {
         this.scene.addTrauma(0.4);
         this.scene.bloodBurst("enemy", !!out.death);
         this.scene.enemySetMood("hit");
-        this.onEvent({ type: "dmgPop", side: "enemy", text: out.reflected ? "DIPANTULKAN!" : "-1 HP", tone: out.reflected ? "reflect" : "hit" });
+        this.onEvent({ type: "dmgPop", side: "enemy", text: "-1 HP", tone: "hit" });
         await sleep(650);
         if (out.death !== "enemy") {
           this.scene.enemySetMood("grin");
           this.scene.enemySay([pick("playerHitsEnemy")], 2.2);
         }
-      }
-      if (out.voodooCancelled && out.damageTo !== "player") {
-        this.toast("VOODOO BATAL!", "bad");
       }
       await sleep(520);
     } else {
@@ -543,8 +583,13 @@ export class GameEngine {
       } else {
         this.scene.enemySetMood("scared");
       }
-      const who = shooterIsPlayer ? (out.target === "player" ? pick("playerBlankSelf") : pick("playerShootsBlank")) : out.target === "enemy" ? pick("enemyBlankSelf") : pick("playerShootsBlank");
-      this.onEvent({ type: "dmgPop", side: out.target, text: "KLIK! kosong", tone: "blank" });
+      this.onEvent({ type: "dmgPop", side: out.target, text: "CLICK! blank", tone: "blank" });
+      const who =
+        !shooterIsPlayer && out.target === "enemy"
+          ? pick("enemyBlankSelf")
+          : shooterIsPlayer && out.target === "player"
+            ? pick("playerBlankSelf")
+            : pick("playerShootsBlank");
       if (!shooterIsPlayer) {
         this.scene.enemySay([who], 2);
       }
@@ -554,94 +599,85 @@ export class GameEngine {
     if (out.death) return "dead";
     this.notify();
     this.checkHealthFx();
-    return this.logic.shouldKeepTurn(out) ? "continue" : "pass";
+    return "pass";
   }
 
-  /** Setelah tembakan selesai: cek mati / reload / lanjut giliran. */
-  private async afterShot(shooter: Side, out: ShotOutcome, res: "continue" | "pass" | "dead") {
+  /** After a shot sequence: check death / reload / pass the turn. */
+  private async afterShot(shooter: Side, res: "pass" | "dead") {
     if (res === "dead") {
-      await this.endGame(out.death!);
+      await this.endGame();
       return;
     }
     if (this.logic.isEmpty) {
       await this.reloadSequence();
     }
-    if (res === "continue" && shooter === "player") {
-      this.busy = false;
-      this.notify();
-      return;
-    }
-    if (res === "continue" && shooter === "enemy") {
-      // enemy loop handles
-      return;
-    }
     const next = this.logic.endTurnAndPass();
     this.notify();
-    if (next === "player") {
-      if (shooter === "player") {
-        this.toast("PAKDE DIBORGOL! Giliranmu lagi.", "good");
-        await sleep(700);
-      }
+    if (next === "player" && shooter === "player") {
+      // the enemy was cuffed, we go again
+      this.toast("THE DEALER IS CUFFED! Your turn again.", "good");
+      await sleep(700);
+      await this.playerTurnStart();
+    } else if (next === "player") {
       await this.playerTurnStart();
     } else {
       await this.enemyTurnStart();
     }
   }
 
-  /* ---------------- efek skill ---------------- */
+  /* ---------------- skill FX ---------------- */
 
   private async playSkillFx(side: Side, id: SkillId, oc: SkillOutcome) {
     const isPlayer = side === "player";
-    const meta = SKILL_META[id];
     this.onEvent({ type: "skillFlash", id });
     switch (id) {
       case "reroll": {
         gameAudio.rerollTick();
         gameAudio.spinCylinder();
         this.scene.addTrauma(0.2);
-        if (isPlayer) this.toast("Chamber di-REROLL! Sekarang WAJIB TEMBAK.", "info");
+        if (isPlayer) this.toast("Chamber REROLLED! Now you MUST shoot.", "info");
         else this.scene.enemySay([pick("useReroll")], 2);
         await sleep(900);
         break;
       }
-      case "intuisi": {
+      case "peek": {
         gameAudio.scanDing();
         if (isPlayer) {
           this.onEvent({ type: "shellReveal", shell: oc.revealed ?? null });
-          this.toast(oc.revealed ? `INTUISI: shell ini ${oc.revealed.toUpperCase()}!` : "INTUISI: chamber kosong?", "info");
+          this.toast(oc.revealed ? `PEEK: this shell is ${oc.revealed.toUpperCase()}!` : "PEEK: chamber empty?", "info");
         } else {
           this.scene.enemySay([pick("scan")], 2);
         }
         await sleep(1300);
         break;
       }
-      case "buang": {
+      case "eject": {
         gameAudio.ejectShell();
         const from = isPlayer ? this.scene.muzzleWorldPos() : this.scene.enemyWorldPos().add(new THREE.Vector3(0, 0.3, 0));
         const to = isPlayer
           ? this.scene.muzzleWorldPos().add(new THREE.Vector3(0.7, -0.4, 0.2))
           : this.scene.enemyWorldPos().add(new THREE.Vector3(0.8, -0.6, 0.4));
-        this.scene.flyShell("blank", from, to, 0.55);
-        if (isPlayer) this.toast("Shell dibuang tanpa dibakar.", "info");
-        else this.scene.enemySay([pick("useBuang")], 2);
+        this.scene.flyShell(oc.ejected ?? "blank", from, to, 0.55);
+        if (isPlayer) this.toast("Shell tossed out unfired.", "info");
+        else this.scene.enemySay([pick("useEject")], 2);
         await sleep(600);
         break;
       }
-      case "kopi": {
+      case "coffee": {
         gameAudio.heal();
-        if (isPlayer) this.toast("Sruput... +1 HP. Segerrr.", "good");
-        else this.scene.enemySay([pick("useKopi")], 2);
+        if (isPlayer) this.toast("Sip... +1 HP. That hits the spot.", "good");
+        else this.scene.enemySay([pick("useCoffee")], 2);
         await sleep(800);
         break;
       }
-      case "borgol": {
+      case "cuffs": {
         gameAudio.cuffs();
         if (isPlayer) {
           this.scene.enemySetMood("scared");
           this.scene.enemySay([pick("cuffed")], 2.2);
-          this.toast("PAKDE DIBORGOL! Dia skip giliran berikutnya.", "good");
+          this.toast("THE DEALER IS CUFFED! He skips his next turn.", "good");
         } else {
-          this.toast("PAKDE memborgol kamu!", "bad");
+          this.toast("The DEALER cuffs you!", "bad");
         }
         await sleep(900);
         break;
@@ -652,11 +688,11 @@ export class GameEngine {
         this.scene.setDesat(0.15);
         setTimeout(() => this.scene.setDesat(0), 600);
         if (isPlayer) {
-          this.toast("VOODOO AKTIF 2 GILIRAN: tembakan live musuh dipantulkan!", "voodoo");
+          this.toast("VOODOO ACTIVE (2 turns): every live hit on you is REFLECTED!", "voodoo");
           this.scene.enemySetMood("scared");
           this.scene.enemySay([pick("playerVoodooCast")], 2.4);
         } else {
-          this.toast("PAKDE memasang VOODOO! Hati-hati menembak dia.", "bad");
+          this.toast("The DEALER cast VOODOO! Think twice before shooting him.", "bad");
           this.scene.enemySay([pick("voodoo")], 2.2);
         }
         await sleep(1100);
@@ -666,10 +702,11 @@ export class GameEngine {
     this.notify();
   }
 
-  /* ---------------- akhir game ---------------- */
+  /* ---------------- game over ---------------- */
 
-  private async endGame(deadSide: Side) {
+  private async endGame() {
     const st = this.logic.state;
+    const deadSide: Side = st.hp.enemy <= 0 ? "enemy" : "player";
     gameAudio.stopHeartbeat();
     this.scene.setRedPulse(0);
 
@@ -685,7 +722,7 @@ export class GameEngine {
       await sleep(1600);
       this.scene.setTimeScale(1);
       this.scene.setDesat(0);
-      this.onEvent({ type: "banner", title: "KAMU HIDUP", sub: "PAKDE tumbang. Ruangan ini milikmu." });
+      this.onEvent({ type: "banner", title: "YOU SURVIVED", sub: "The DEALER falls. This room is yours now." });
     } else {
       st.phase = "gameover";
       this.scene.setTimeScale(0.22, true);
@@ -695,7 +732,7 @@ export class GameEngine {
       this.scene.setDesat(0.5);
       gameAudio.lose();
       this.scene.enemySetMood("laugh");
-      this.scene.enemySay(["Sudah kubilang...", "jangan mainmain."], 4);
+      this.scene.enemySay(["I told you...", "don't play with death."], 4);
       this.notify();
       await sleep(1800);
       this.scene.setTimeScale(1);
@@ -705,7 +742,7 @@ export class GameEngine {
     this.notify();
   }
 
-  /* ---------------- util dipakai scene event ---------------- */
+  /* ---------------- util used by scene events ---------------- */
 
   skillIconOf(id: SkillId) {
     return dataURL(`icon-${id}`, texSkillIcon(id));

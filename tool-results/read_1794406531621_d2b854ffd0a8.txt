@@ -1,0 +1,864 @@
+  1301→        sketchLine(ctx, cx - 62, hy + 58, cx + 60, hy + 56, rng, { width: 6, jitter: 2 });
+  1302→        for (let i = -2; i <= 2; i++) {
+  1303→          sketchLine(ctx, cx + i * 24, hy + 48, cx + i * 24, hy + 60, rng, { width: 4, jitter: 1 });
+  1304→        }
+  1305→      } else {
+  1306→        sketchEllipse(ctx, exL, eyeY, 26, 30, rng, { width: 7, fill: "#ffffff" });
+  1307→        sketchEllipse(ctx, exR, eyeY, 26, 30, rng, { width: 7, fill: "#ffffff" });
+  1308→        const px = mood === "idle2" ? 6 : -3;
+  1309→        const py = mood === "idle2" ? -2 : 3;
+  1310→        sketchCircle(ctx, exL + px, eyeY + py, 9, rng, { width: 4, fill: INK });
+  1311→        sketchCircle(ctx, exR + px, eyeY + py, 9, rng, { width: 4, fill: INK });
+  1312→        sketchStroke(ctx, [[exL - 28, eyeY - 40], [exL + 22, eyeY - 34]], rng, { width: 8, jitter: 2 });
+  1313→        sketchStroke(ctx, [[exR - 22, eyeY - 34], [exR + 28, eyeY - 40]], rng, { width: 8, jitter: 2 });
+  1314→        if (mood === "idle2") {
+  1315→          sketchStroke(ctx, [[cx - 40, hy + 66], [cx, hy + 76], [cx + 40, hy + 64]], rng, { width: 7, jitter: 2 });
+  1316→        } else {
+  1317→          sketchStroke(ctx, [[cx - 36, hy + 70], [cx + 36, hy + 70]], rng, { width: 7, jitter: 2 });
+  1318→        }
+  1319→      }
+  1320→      sketchStroke(ctx, [[cx, hy + 18], [cx - 8, hy + 34], [cx + 6, hy + 38]], rng, { width: 6, jitter: 2 });
+  1321→
+  1322→      hatch(ctx, 92, 470, 90, 160, rng, "rgba(0,0,0,0.35)", 11);
+  1323→      hatch(ctx, 460, 480, 84, 150, rng, "rgba(0,0,0,0.35)", 11);
+  1324→
+  1325→      // lengan aim dengan revolver
+  1326→      if (mood === "aim") {
+  1327→        ctx.fillStyle = "#4b5a4e";
+  1328→        wobblePath(
+  1329→          ctx,
+  1330→          [
+  1331→            [470, 500],
+  1332→            [560, 400],
+  1333→            [596, 300],
+  1334→            [540, 268],
+  1335→            [470, 330],
+  1336→            [430, 430],
+  1337→          ],
+  1338→          rng,
+  1339→          4,
+  1340→          true,
+  1341→        );
+  1342→        ctx.fill();
+  1343→        sketchStroke(
+  1344→          ctx,
+  1345→          [
+  1346→            [470, 500],
+  1347→            [560, 400],
+  1348→            [596, 300],
+  1349→            [540, 268],
+  1350→            [470, 330],
+  1351→            [430, 430],
+  1352→          ],
+  1353→          rng,
+  1354→          { width: 8, jitter: 4, close: true },
+  1355→        );
+  1356→        sketchCircle(ctx, 540, 280, 44, rng, { width: 7, fill: PAPER });
+  1357→        sketchCircle(ctx, 540, 208, 54, rng, { width: 7, fill: "#3a3129" });
+  1358→        sketchCircle(ctx, 540, 208, 26, rng, { width: 6, fill: "#0d0a07" });
+  1359→        sketchStroke(ctx, [[508, 232], [500, 258]], rng, { width: 6 });
+  1360→        sketchStroke(ctx, [[572, 232], [580, 258]], rng, { width: 6 });
+  1361→      }
+  1362→      ctx.restore();
+  1363→    },
+  1364→    71 + mood.length,
+  1365→  );
+  1366→}
+  1367→
+  1368→/* ============================ SPEECH ============================ */
+  1369→
+  1370→/** Balon kata doodle dengan teks. */
+  1371→export function texSpeech(lines: string[]) {
+  1372→  const clean = lines.slice(0, 4);
+  1373→  const key = `speech-${clean.join("|")}`;
+  1374→  return makeCanvas(
+  1375→    key,
+  1376→    768,
+  1377→    380,
+  1378→    (ctx, w, h, rng) => {
+  1379→      ctx.font = '44px "Patrick Hand", cursive';
+  1380→      const maxW = Math.max(...clean.map((l) => ctx.measureText(l).width), 120);
+  1381→      const bw = Math.min(maxW + 90, w - 20);
+  1382→      const bh = 62 + clean.length * 56;
+  1383→      const bx = (w - bw) / 2;
+  1384→      const by = 12;
+  1385→      ctx.fillStyle = PAPER;
+  1386→      wobblePath(
+  1387→        ctx,
+  1388→        [
+  1389→          [bx + 30, by],
+  1390→          [bx + bw - 30, by - 4],
+  1391→          [bx + bw, by + 34],
+  1392→          [bx + bw - 6, by + bh - 30],
+  1393→          [bx + bw - 60, by + bh],
+  1394→          [bx + 40, by + bh - 4],
+  1395→          [bx, by + bh - 36],
+  1396→          [bx + 6, by + 30],
+  1397→        ],
+  1398→        rng,
+  1399→        4,
+  1400→        true,
+  1401→      );
+  1402→      ctx.fill();
+  1403→      sketchStroke(
+  1404→        ctx,
+  1405→        [
+  1406→          [bx + 30, by],
+  1407→          [bx + bw - 30, by - 4],
+  1408→          [bx + bw, by + 34],
+  1409→          [bx + bw - 6, by + bh - 30],
+  1410→          [bx + bw - 60, by + bh],
+  1411→          [bx + 40, by + bh - 4],
+  1412→          [bx, by + bh - 36],
+  1413→          [bx + 6, by + 30],
+  1414→        ],
+  1415→        rng,
+  1416→        { width: 7, jitter: 3, close: true },
+  1417→      );
+  1418→      ctx.fillStyle = PAPER;
+  1419→      wobblePath(
+  1420→        ctx,
+  1421→        [
+  1422→          [bx + 90, by + bh - 6],
+  1423→          [bx + 40, by + bh + 66],
+  1424→          [bx + 150, by + bh - 10],
+  1425→        ],
+  1426→        rng,
+  1427→        3,
+  1428→        true,
+  1429→      );
+  1430→      ctx.fill();
+  1431→      sketchStroke(
+  1432→        ctx,
+  1433→        [
+  1434→          [bx + 90, by + bh - 6],
+  1435→          [bx + 40, by + bh + 66],
+  1436→          [bx + 150, by + bh - 10],
+  1437→        ],
+  1438→        rng,
+  1439→        { width: 6, jitter: 3, close: true },
+  1440→      );
+  1441→      ctx.font = '44px "Patrick Hand", cursive';
+  1442→      ctx.fillStyle = INK;
+  1443→      ctx.textAlign = "center";
+  1444→      ctx.textBaseline = "middle";
+  1445→      clean.forEach((l, i) => {
+  1446→        ctx.fillText(l, w / 2, by + 58 + i * 56);
+  1447→      });
+  1448→    },
+  1449→    90 + clean.length,
+  1450→  );
+  1451→}
+  1452→
+  1453→/* ============================ VFX SPRITES ============================ */
+  1454→
+  1455→export function texMuzzle() {
+  1456→  return makeCanvas(
+  1457→    "muzzle",
+  1458→    512,
+  1459→    512,
+  1460→    (ctx, w, h, rng) => {
+  1461→      const cx = w / 2;
+  1462→      const cy = h / 2;
+  1463→      const spikes = 12;
+  1464→      ctx.beginPath();
+  1465→      for (let i = 0; i < spikes * 2; i++) {
+  1466→        const a = (i / (spikes * 2)) * Math.PI * 2;
+  1467→        const r = i % 2 === 0 ? 150 + rng() * 80 : 60 + rng() * 30;
+  1468→        const x = cx + Math.cos(a) * r;
+  1469→        const y = cy + Math.sin(a) * r;
+  1470→        if (i === 0) ctx.moveTo(x, y);
+  1471→        else ctx.lineTo(x, y);
+  1472→      }
+  1473→      ctx.closePath();
+  1474→      const g = ctx.createRadialGradient(cx, cy, 10, cx, cy, 220);
+  1475→      g.addColorStop(0, "#fffbe8");
+  1476→      g.addColorStop(0.45, "#ffd75e");
+  1477→      g.addColorStop(0.8, "#ff9a3d");
+  1478→      g.addColorStop(1, "rgba(255,120,40,0)");
+  1479→      ctx.fillStyle = g;
+  1480→      ctx.fill();
+  1481→      ctx.strokeStyle = "rgba(255,255,255,0.8)";
+  1482→      ctx.lineWidth = 5;
+  1483→      ctx.stroke();
+  1484→      ctx.beginPath();
+  1485→      ctx.arc(cx, cy, 52, 0, Math.PI * 2);
+  1486→      ctx.fillStyle = "#ffffff";
+  1487→      ctx.fill();
+  1488→    },
+  1489→    101,
+  1490→  );
+  1491→}
+  1492→
+  1493→export function texSmoke() {
+  1494→  return makeCanvas(
+  1495→    "smoke",
+  1496→    256,
+  1497→    256,
+  1498→    (ctx, w, h, rng) => {
+  1499→      const cx = w / 2;
+  1500→      const cy = h / 2;
+  1501→      for (let i = 0; i < 7; i++) {
+  1502→        const a = rng() * Math.PI * 2;
+  1503→        const d = rng() * 46;
+  1504→        const r = 40 + rng() * 44;
+  1505→        const g = ctx.createRadialGradient(
+  1506→          cx + Math.cos(a) * d,
+  1507→          cy + Math.sin(a) * d,
+  1508→          4,
+  1509→          cx + Math.cos(a) * d,
+  1510→          cy + Math.sin(a) * d,
+  1511→          r,
+  1512→        );
+  1513→        g.addColorStop(0, "rgba(230,224,210,0.5)");
+  1514→        g.addColorStop(1, "rgba(230,224,210,0)");
+  1515→        ctx.fillStyle = g;
+  1516→        ctx.beginPath();
+  1517→        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, 0, Math.PI * 2);
+  1518→        ctx.fill();
+  1519→      }
+  1520→    },
+  1521→    103,
+  1522→  );
+  1523→}
+  1524→
+  1525→export function texSplat(seed = 111) {
+  1526→  return makeCanvas(
+  1527→    `splat-${seed}`,
+  1528→    512,
+  1529→    512,
+  1530→    (ctx, w, h, rng) => {
+  1531→      const cx = w / 2;
+  1532→      const cy = w / 2;
+  1533→      for (let i = 0; i < 9; i++) {
+  1534→        const a = rng() * Math.PI * 2;
+  1535→        const d = rng() * 120;
+  1536→        const r = 30 + rng() * 60;
+  1537→        ctx.fillStyle = i % 3 === 0 ? RED_DARK : RED;
+  1538→        ctx.beginPath();
+  1539→        ctx.ellipse(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, r * (0.7 + rng() * 0.4), rng() * 3, 0, Math.PI * 2);
+  1540→        ctx.fill();
+  1541→      }
+  1542→      for (let i = 0; i < 16; i++) {
+  1543→        const a = rng() * Math.PI * 2;
+  1544→        const d = 130 + rng() * 110;
+  1545→        const r = 6 + rng() * 16;
+  1546→        ctx.fillStyle = rng() > 0.5 ? RED : RED_DARK;
+  1547→        ctx.beginPath();
+  1548→        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, 0, Math.PI * 2);
+  1549→        ctx.fill();
+  1550→      }
+  1551→      ctx.fillStyle = "rgba(255,255,255,0.16)";
+  1552→      for (let i = 0; i < 5; i++) {
+  1553→        const a = rng() * Math.PI * 2;
+  1554→        const d = rng() * 90;
+  1555→        ctx.beginPath();
+  1556→        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, 8 + rng() * 14, 0, Math.PI * 2);
+  1557→        ctx.fill();
+  1558→      }
+  1559→    },
+  1560→    seed,
+  1561→  );
+  1562→}
+  1563→
+  1564→export function texSpark() {
+  1565→  return makeCanvas(
+  1566→    "spark",
+  1567→    128,
+  1568→    128,
+  1569→    (ctx, w, h, rng) => {
+  1570→      const cx = w / 2;
+  1571→      const cy = h / 2;
+  1572→      ctx.strokeStyle = "#ffd75e";
+  1573→      ctx.lineWidth = 9;
+  1574→      ctx.lineCap = "round";
+  1575→      const r1 = 46;
+  1576→      for (const a of [0, Math.PI / 2, Math.PI / 4, -Math.PI / 4]) {
+  1577→        ctx.beginPath();
+  1578→        ctx.moveTo(cx - Math.cos(a) * r1, cy - Math.sin(a) * r1);
+  1579→        ctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+  1580→        ctx.stroke();
+  1581→      }
+  1582→      ctx.fillStyle = "#fffbe8";
+  1583→      ctx.beginPath();
+  1584→      ctx.arc(cx, cy, 12, 0, Math.PI * 2);
+  1585→      ctx.fill();
+  1586→    },
+  1587→    105,
+  1588→  );
+  1589→}
+  1590→
+  1591→export function texRing() {
+  1592→  return makeCanvas(
+  1593→    "ring",
+  1594→    256,
+  1595→    256,
+  1596→    (ctx, w, h, rng) => {
+  1597→      sketchCircle(ctx, w / 2, h / 2, 96, rng, { width: 10, color: "#f6f1e3", jitter: 5 });
+  1598→      sketchCircle(ctx, w / 2, h / 2, 66, rng, { width: 6, color: "rgba(246,241,227,0.6)", jitter: 4 });
+  1599→    },
+  1600→    107,
+  1601→  );
+  1602→}
+  1603→
+  1604→export function texDust() {
+  1605→  return makeCanvas(
+  1606→    "dust",
+  1607→    256,
+  1608→    256,
+  1609→    (ctx, w, h, rng) => {
+  1610→      const cx = w / 2;
+  1611→      const cy = h / 2;
+  1612→      for (let i = 0; i < 10; i++) {
+  1613→        const a = rng() * Math.PI * 2;
+  1614→        const d = rng() * 70;
+  1615→        const r = 18 + rng() * 30;
+  1616→        const g = ctx.createRadialGradient(
+  1617→          cx + Math.cos(a) * d,
+  1618→          cy + Math.sin(a) * d,
+  1619→          2,
+  1620→          cx + Math.cos(a) * d,
+  1621→          cy + Math.sin(a) * d,
+  1622→          r,
+  1623→        );
+  1624→        g.addColorStop(0, "rgba(214,200,170,0.5)");
+  1625→        g.addColorStop(1, "rgba(214,200,170,0)");
+  1626→        ctx.fillStyle = g;
+  1627→        ctx.beginPath();
+  1628→        ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, 0, Math.PI * 2);
+  1629→        ctx.fill();
+  1630→      }
+  1631→    },
+  1632→    109,
+  1633→  );
+  1634→}
+  1635→
+  1636→export function texVoodooMask() {
+  1637→  return makeCanvas(
+  1638→    "voodoo-mask",
+  1639→    256,
+  1640→    256,
+  1641→    (ctx, w, h, rng) => {
+  1642→      const cx = w / 2;
+  1643→      ctx.fillStyle = "#c9b48a";
+  1644→      sketchEllipse(ctx, cx, 120, 78, 92, rng, { width: 7, fill: "#c9b48a" });
+  1645→      sketchStroke(ctx, [[cx - 30, 44], [cx - 12, 60], [cx - 26, 74]], rng, { width: 4, jitter: 1.5 });
+  1646→      sketchStroke(ctx, [[cx - 44, 100], [cx - 16, 128]], rng, { width: 6 });
+  1647→      sketchStroke(ctx, [[cx - 16, 100], [cx - 44, 128]], rng, { width: 6 });
+  1648→      sketchStroke(ctx, [[cx + 16, 100], [cx + 44, 128]], rng, { width: 6 });
+  1649→      sketchStroke(ctx, [[cx + 44, 100], [cx + 16, 128]], rng, { width: 6 });
+  1650→      sketchLine(ctx, cx - 26, 158, cx + 26, 158, rng, { width: 5 });
+  1651→      for (let i = -2; i <= 2; i++) {
+  1652→        sketchLine(ctx, cx + i * 12, 150, cx + i * 12, 166, rng, { width: 3, jitter: 1 });
+  1653→      }
+  1654→      sketchStroke(ctx, [[cx + 60, 60], [cx + 108, 16]], rng, { width: 6, color: "#8a5a13" });
+  1655→      ctx.strokeStyle = "rgba(94,156,91,0.65)";
+  1656→      ctx.lineWidth = 6;
+  1657→      ctx.beginPath();
+  1658→      ctx.arc(cx, 120, 108, 0.6, 2.6);
+  1659→      ctx.stroke();
+  1660→      ctx.beginPath();
+  1661→      ctx.arc(cx, 120, 122, 3.6, 5.6);
+  1662→      ctx.stroke();
+  1663→    },
+  1664→    113,
+  1665→  );
+  1666→}
+  1667→
+  1668→/* ============================ HUD bits ============================ */
+  1669→
+  1670→export function texHeart(kind: "full" | "empty") {
+  1671→  return makeCanvas(
+  1672→    `heart-${kind}`,
+  1673→    128,
+  1674→    128,
+  1675→    (ctx, w, h, rng) => {
+  1676→      const cx = w / 2;
+  1677→      const cy = h / 2 + 6;
+  1678→      if (kind === "full") {
+  1679→        ctx.fillStyle = RED;
+  1680→        ctx.beginPath();
+  1681→        ctx.moveTo(cx, cy + 44);
+  1682→        ctx.bezierCurveTo(cx - 74, cy - 12, cx - 44, cy - 56, cx, cy - 20);
+  1683→        ctx.bezierCurveTo(cx + 44, cy - 56, cx + 74, cy - 12, cx, cy + 44);
+  1684→        ctx.fill();
+  1685→      }
+  1686→      ctx.strokeStyle = kind === "full" ? "#5c120a" : "rgba(246,241,227,0.75)";
+  1687→      ctx.lineWidth = 7;
+  1688→      ctx.beginPath();
+  1689→      ctx.moveTo(cx, cy + 44);
+  1690→      ctx.bezierCurveTo(cx - 74, cy - 12, cx - 44, cy - 56, cx, cy - 20);
+  1691→      ctx.bezierCurveTo(cx + 44, cy - 56, cx + 74, cy - 12, cx, cy + 44);
+  1692→      ctx.stroke();
+  1693→      if (kind === "full") {
+  1694→        ctx.fillStyle = "rgba(255,255,255,0.35)";
+  1695→        ctx.beginPath();
+  1696→        ctx.ellipse(cx - 22, cy - 18, 12, 8, -0.6, 0, Math.PI * 2);
+  1697→        ctx.fill();
+  1698→      }
+  1699→    },
+  1700→    121,
+  1701→  );
+  1702→}
+  1703→
+  1704→export function texBulletPip(kind: "live" | "blank") {
+  1705→  return makeCanvas(
+  1706→    `pip-${kind}`,
+  1707→    96,
+  1708→    96,
+  1709→    (ctx, w, h, rng) => {
+  1710→      const cx = w / 2;
+  1711→      const body = kind === "live" ? RED : BLANK_BLUE;
+  1712→      const dark = kind === "live" ? RED_DARK : "#57697c";
+  1713→      ctx.fillStyle = body;
+  1714→      wobblePath(ctx, [[cx - 24, 18], [cx + 24, 18], [cx + 27, 58], [cx + 20, 76], [cx - 20, 76], [cx - 27, 58]], rng, 2, true);
+  1715→      ctx.fill();
+  1716→      sketchStroke(ctx, [[cx - 24, 18], [cx + 24, 18], [cx + 27, 58], [cx + 20, 76], [cx - 20, 76], [cx - 27, 58]], rng, {
+  1717→        width: 5,
+  1718→        jitter: 1.5,
+  1719→        close: true,
+  1720→        color: dark,
+  1721→      });
+  1722→      ctx.fillStyle = BRASS;
+  1723→      ctx.fillRect(cx - 21, 76, 42, 12);
+  1724→      if (kind === "live") {
+  1725→        sketchCircle(ctx, cx, 44, 7, rng, { width: 4, fill: INK });
+  1726→      } else {
+  1727→        sketchCircle(ctx, cx, 46, 8, rng, { width: 4 });
+  1728→      }
+  1729→    },
+  1730→    123,
+  1731→  );
+  1732→}
+  1733→
+  1734→/* ============================ ENVIRONMENT ============================ */
+  1735→
+  1736→export function texWall(seed: number, label?: string) {
+  1737→  return makeCanvas(
+  1738→    `wall-${seed}`,
+  1739→    1024,
+  1740→    1024,
+  1741→    (ctx, w, h, rng) => {
+  1742→      const g = ctx.createLinearGradient(0, 0, 0, h);
+  1743→      g.addColorStop(0, "#2c261e");
+  1744→      g.addColorStop(1, "#231d16");
+  1745→      ctx.fillStyle = g;
+  1746→      ctx.fillRect(0, 0, w, h);
+  1747→      for (let i = 0; i < 46; i++) {
+  1748→        const x = rng() * w;
+  1749→        const y = rng() * h;
+  1750→        const r = 20 + rng() * 90;
+  1751→        ctx.fillStyle = `rgba(${rng() > 0.5 ? "20,16,12" : "60,50,38"},${0.05 + rng() * 0.08})`;
+  1752→        ctx.beginPath();
+  1753→        ctx.ellipse(x, y, r, r * (0.5 + rng() * 0.6), rng() * 3, 0, Math.PI * 2);
+  1754→        ctx.fill();
+  1755→      }
+  1756→      ctx.strokeStyle = "rgba(12,9,6,0.55)";
+  1757→      ctx.lineWidth = 3;
+  1758→      for (let i = 0; i < 6; i++) {
+  1759→        let x = rng() * w;
+  1760→        let y = rng() * h;
+  1761→        ctx.beginPath();
+  1762→        ctx.moveTo(x, y);
+  1763→        for (let s = 0; s < 8; s++) {
+  1764→          x += (rng() - 0.5) * 90;
+  1765→          y += rng() * 70;
+  1766→          ctx.lineTo(x, y);
+  1767→        }
+  1768→        ctx.stroke();
+  1769→      }
+  1770→      const chalk = "rgba(214,204,180,0.30)";
+  1771→      ctx.strokeStyle = chalk;
+  1772→      ctx.lineWidth = 6;
+  1773→      ctx.lineCap = "round";
+  1774→      const tallyX = 130 + rng() * 200;
+  1775→      const tallyY = 150 + rng() * 140;
+  1776→      for (let i = 0; i < 8; i++) {
+  1777→        const col = Math.floor(i / 5);
+  1778→        const row = i % 5;
+  1779→        const x = tallyX + col * 110 + row * 20;
+  1780→        ctx.beginPath();
+  1781→        ctx.moveTo(x, tallyY);
+  1782→        ctx.lineTo(x + (rng() - 0.5) * 8, tallyY + 56);
+  1783→        ctx.stroke();
+  1784→      }
+  1785→      ctx.beginPath();
+  1786→      ctx.moveTo(tallyX - 18, tallyY + 10);
+  1787→      ctx.lineTo(tallyX + 66, tallyY + 48);
+  1788→      ctx.stroke();
+  1789→      const eyeX = 700 + rng() * 180;
+  1790→      const eyeY = 620 + rng() * 200;
+  1791→      ctx.strokeStyle = chalk;
+  1792→      ctx.lineWidth = 5;
+  1793→      ctx.beginPath();
+  1794→      ctx.ellipse(eyeX, eyeY, 64, 34, 0, 0, Math.PI * 2);
+  1795→      ctx.stroke();
+  1796→      ctx.beginPath();
+  1797→      ctx.arc(eyeX, eyeY, 16, 0, Math.PI * 2);
+  1798→      ctx.stroke();
+  1799→      ctx.beginPath();
+  1800→      let first = true;
+  1801→      for (let a = 0; a < Math.PI * 4; a += 0.2) {
+  1802→        const r = 6 + a * 7;
+  1803→        const x = 220 + rng() * 20 + 280 + Math.cos(a) * r;
+  1804→        const y = 760 + Math.sin(a) * r;
+  1805→        if (first) {
+  1806→          ctx.moveTo(x, y);
+  1807→          first = false;
+  1808→        } else {
+  1809→          ctx.lineTo(x, y);
+  1810→        }
+  1811→      }
+  1812→      ctx.stroke();
+  1813→      if (label) {
+  1814→        handText(ctx, label, 320 + rng() * 360, 380 + rng() * 120, 74, chalk, (rng() - 0.5) * 0.2, '"Patrick Hand", cursive');
+  1815→      }
+  1816→      sketchCircle(ctx, 830, 240, 56, rng, { width: 5, color: chalk, jitter: 8 });
+  1817→      sketchCircle(ctx, 830, 240, 20, rng, { width: 4, color: chalk, jitter: 4 });
+  1818→    },
+  1819→    seed,
+  1820→  );
+  1821→}
+  1822→
+  1823→export function texFloor() {
+  1824→  return makeCanvas(
+  1825→    "floor",
+  1826→    1024,
+  1827→    1024,
+  1828→    (ctx, w, h, rng) => {
+  1829→      ctx.fillStyle = "#3a2d20";
+  1830→      ctx.fillRect(0, 0, w, h);
+  1831→      const plankH = 128;
+  1832→      for (let row = 0; row < h / plankH; row++) {
+  1833→        const shade = 0.9 + rng() * 0.25;
+  1834→        ctx.fillStyle = `rgb(${Math.round(58 * shade)},${Math.round(45 * shade)},${Math.round(31 * shade)})`;
+  1835→        ctx.fillRect(0, row * plankH, w, plankH - 3);
+  1836→        ctx.strokeStyle = "rgba(20,14,9,0.4)";
+  1837→        ctx.lineWidth = 2;
+  1838→        for (let i = 0; i < 7; i++) {
+  1839→          const y = row * plankH + 12 + rng() * (plankH - 24);
+  1840→          ctx.beginPath();
+  1841→          ctx.moveTo(0, y);
+  1842→          for (let x = 0; x <= w; x += 64) {
+  1843→            ctx.lineTo(x, y + Math.sin(x * 0.02 + row) * 5 + (rng() - 0.5) * 3);
+  1844→          }
+  1845→          ctx.stroke();
+  1846→        }
+  1847→        const seam = rng() * w;
+  1848→        ctx.strokeStyle = "rgba(12,8,5,0.8)";
+  1849→        ctx.lineWidth = 4;
+  1850→        ctx.beginPath();
+  1851→        ctx.moveTo(seam, row * plankH);
+  1852→        ctx.lineTo(seam, row * plankH + plankH - 3);
+  1853→        ctx.stroke();
+  1854→      }
+  1855→      for (let i = 0; i < 20; i++) {
+  1856→        ctx.fillStyle = `rgba(10,7,4,${0.06 + rng() * 0.1})`;
+  1857→        ctx.beginPath();
+  1858→        ctx.ellipse(rng() * w, rng() * h, 30 + rng() * 80, 20 + rng() * 50, rng() * 3, 0, Math.PI * 2);
+  1859→        ctx.fill();
+  1860→      }
+  1861→    },
+  1862→    131,
+  1863→  );
+  1864→}
+  1865→
+  1866→export function texCeiling() {
+  1867→  return makeCanvas(
+  1868→    "ceiling",
+  1869→    512,
+  1870→    512,
+  1871→    (ctx, w, h, rng) => {
+  1872→      ctx.fillStyle = "#191510";
+  1873→      ctx.fillRect(0, 0, w, h);
+  1874→      for (let i = 0; i < 9; i++) {
+  1875→        ctx.fillStyle = `rgba(40,33,24,${0.2 + rng() * 0.2})`;
+  1876→        ctx.beginPath();
+  1877→        ctx.ellipse(rng() * w, rng() * h, 40 + rng() * 90, 24 + rng() * 60, rng() * 3, 0, Math.PI * 2);
+  1878→        ctx.fill();
+  1879→      }
+  1880→    },
+  1881→    133,
+  1882→  );
+  1883→}
+  1884→
+  1885→export function texTableTop() {
+  1886→  return makeCanvas(
+  1887→    "tabletop",
+  1888→    1024,
+  1889→    1024,
+  1890→    (ctx, w, h, rng) => {
+  1891→      ctx.fillStyle = "#5a4128";
+  1892→      ctx.fillRect(0, 0, w, h);
+  1893→      ctx.strokeStyle = "rgba(30,20,12,0.5)";
+  1894→      ctx.lineWidth = 3;
+  1895→      for (let i = 0; i < 26; i++) {
+  1896→        const y = rng() * h;
+  1897→        ctx.beginPath();
+  1898→        ctx.moveTo(0, y);
+  1899→        for (let x = 0; x <= w; x += 80) {
+  1900→          ctx.lineTo(x, y + Math.sin(x * 0.015 + i) * 7 + (rng() - 0.5) * 4);
+  1901→        }
+  1902→        ctx.stroke();
+  1903→      }
+  1904→      ctx.strokeStyle = "rgba(20,13,8,0.65)";
+  1905→      ctx.lineWidth = 4;
+  1906→      for (let i = 0; i < 14; i++) {
+  1907→        const x = rng() * w;
+  1908→        const y = rng() * h;
+  1909→        ctx.beginPath();
+  1910→        ctx.moveTo(x, y);
+  1911→        ctx.lineTo(x + (rng() - 0.5) * 160, y + (rng() - 0.5) * 60);
+  1912→        ctx.stroke();
+  1913→      }
+  1914→      sketchCircle(ctx, 200 + rng() * 600, 200 + rng() * 600, 70, rng, {
+  1915→        width: 9,
+  1916→        color: "rgba(20,13,8,0.4)",
+  1917→        jitter: 6,
+  1918→      });
+  1919→      handText(ctx, "hidup?", 560, 760, 52, "rgba(20,13,8,0.5)", -0.15, '"Patrick Hand", cursive');
+  1920→      sketchCircle(ctx, 300, 300, 34, rng, { width: 5, color: "rgba(20,13,8,0.45)", jitter: 7 });
+  1921→    },
+  1922→    137,
+  1923→  );
+  1924→}
+  1925→
+  1926→/* ============================ PROPS ============================ */
+  1927→
+  1928→export function texBottle() {
+  1929→  return makeCanvas(
+  1930→    "bottle",
+  1931→    256,
+  1932→    512,
+  1933→    (ctx, w, h, rng) => {
+  1934→      const cx = w / 2;
+  1935→      ctx.fillStyle = "#3f5a3c";
+  1936→      wobblePath(
+  1937→        ctx,
+  1938→        [
+  1939→          [cx - 62, 480],
+  1940→          [cx - 66, 300],
+  1941→          [cx - 34, 250],
+  1942→          [cx - 34, 130],
+  1943→          [cx + 34, 130],
+  1944→          [cx + 34, 250],
+  1945→          [cx + 66, 300],
+  1946→          [cx + 62, 480],
+  1947→        ],
+  1948→        rng,
+  1949→        4,
+  1950→        true,
+  1951→      );
+  1952→      ctx.fill();
+  1953→      sketchStroke(
+  1954→        ctx,
+  1955→        [
+  1956→          [cx - 62, 480],
+  1957→          [cx - 66, 300],
+  1958→          [cx - 34, 250],
+  1959→          [cx - 34, 130],
+  1960→          [cx + 34, 130],
+  1961→          [cx + 34, 250],
+  1962→          [cx + 66, 300],
+  1963→          [cx + 62, 480],
+  1964→        ],
+  1965→        rng,
+  1966→        { width: 7, jitter: 3, close: true },
+  1967→      );
+  1968→      ctx.fillStyle = "#8a5a13";
+  1969→      ctx.fillRect(cx - 40, 96, 80, 38);
+  1970→      sketchStroke(ctx, [[cx - 40, 96], [cx + 40, 96], [cx + 40, 134], [cx - 40, 134]], rng, { width: 6, jitter: 2, close: true });
+  1971→      ctx.fillStyle = PAPER;
+  1972→      ctx.fillRect(cx - 52, 330, 104, 84);
+  1973→      sketchStroke(ctx, [[cx - 52, 330], [cx + 52, 330], [cx + 52, 414], [cx - 52, 414]], rng, { width: 5, jitter: 2, close: true });
+  1974→      handText(ctx, "BERANI?", cx, 372, 30, INK, -0.06, '"Patrick Hand", cursive');
+  1975→      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  1976→      ctx.lineWidth = 8;
+  1977→      ctx.beginPath();
+  1978→      ctx.moveTo(cx - 40, 300);
+  1979→      ctx.quadraticCurveTo(cx - 48, 380, cx - 40, 452);
+  1980→      ctx.stroke();
+  1981→    },
+  1982→    141,
+  1983→  );
+  1984→}
+  1985→
+  1986→export function texCards() {
+  1987→  return makeCanvas(
+  1988→    "cards",
+  1989→    256,
+  1990→    256,
+  1991→    (ctx, w, h, rng) => {
+  1992→      const draw = (x: number, y: number, rot: number, face: boolean) => {
+  1993→        ctx.save();
+  1994→        ctx.translate(x, y);
+  1995→        ctx.rotate(rot);
+  1996→        ctx.fillStyle = face ? PAPER : "#8f2418";
+  1997→        wobblePath(ctx, [[-52, -74], [52, -70], [56, 70], [-48, 74]], rng, 3, true);
+  1998→        ctx.fill();
+  1999→        sketchStroke(ctx, [[-52, -74], [52, -70], [56, 70], [-48, 74]], rng, { width: 6, jitter: 2, close: true });
+  2000→        if (face) {
+  2001→          handText(ctx, "A", 0, 0, 64, RED_DARK, -0.1);
+  2002→          handText(ctx, "A", -32, -44, 22, INK, 0);
+  2003→        }
+  2004→        ctx.restore();
+  2005→      };
+  2006→      draw(120, 168, 0.2, false);
+  2007→      draw(132, 150, -0.15, false);
+  2008→      draw(126, 128, 0.05, true);
+  2009→    },
+  2010→    143,
+  2011→  );
+  2012→}
+  2013→
+  2014→export function texShellBox() {
+  2015→  return makeCanvas(
+  2016→    "shellbox",
+  2017→    320,
+  2018→    256,
+  2019→    (ctx, w, h, rng) => {
+  2020→      const cx = w / 2;
+  2021→      ctx.fillStyle = "#a3542e";
+  2022→      wobblePath(ctx, [[40, 90], [280, 84], [288, 210], [34, 214]], rng, 3, true);
+  2023→      ctx.fill();
+  2024→      sketchStroke(ctx, [[40, 90], [280, 84], [288, 210], [34, 214]], rng, { width: 7, jitter: 3, close: true });
+  2025→      ctx.fillStyle = "#c06a3a";
+  2026→      wobblePath(ctx, [[44, 88], [276, 82], [270, 40], [50, 44]], rng, 3, true);
+  2027→      ctx.fill();
+  2028→      sketchStroke(ctx, [[44, 88], [276, 82], [270, 40], [50, 44]], rng, { width: 6, jitter: 3, close: true });
+  2029→      handText(ctx, "6 CHAMBER", cx, 140, 34, PAPER, -0.03);
+  2030→      handText(ctx, "HATI-HATI", cx, 182, 28, "#f3d9c2", 0.04, '"Patrick Hand", cursive');
+  2031→    },
+  2032→    145,
+  2033→  );
+  2034→}
+  2035→
+  2036→export function texBoombox() {
+  2037→  return makeCanvas(
+  2038→    "boombox",
+  2039→    320,
+  2040→    256,
+  2041→    (ctx, w, h, rng) => {
+  2042→      const cx = w / 2;
+  2043→      ctx.fillStyle = "#2e2a24";
+  2044→      wobblePath(ctx, [[30, 60], [290, 54], [296, 208], [26, 214]], rng, 4, true);
+  2045→      ctx.fill();
+  2046→      sketchStroke(ctx, [[30, 60], [290, 54], [296, 208], [26, 214]], rng, { width: 7, jitter: 3, close: true });
+  2047→      sketchCircle(ctx, cx - 76, 134, 52, rng, { width: 6, fill: "#1a1712" });
+  2048→      sketchCircle(ctx, cx + 76, 132, 52, rng, { width: 6, fill: "#1a1712" });
+  2049→      sketchCircle(ctx, cx - 76, 134, 18, rng, { width: 4 });
+  2050→      sketchCircle(ctx, cx + 76, 132, 18, rng, { width: 4 });
+  2051→      ctx.fillStyle = "#4a4036";
+  2052→      ctx.fillRect(cx - 34, 96, 68, 74);
+  2053→      sketchStroke(ctx, [[cx - 34, 96], [cx + 34, 96], [cx + 34, 170], [cx - 34, 170]], rng, { width: 4, jitter: 2, close: true });
+  2054→      sketchCircle(ctx, cx - 14, 132, 9, rng, { width: 3 });
+  2055→      sketchCircle(ctx, cx + 14, 132, 9, rng, { width: 3 });
+  2056→      sketchStroke(ctx, [[70, 58], [100, 10], [220, 8], [250, 54]], rng, { width: 7, jitter: 3 });
+  2057→      sketchStroke(ctx, [[286, 60], [314, -6]], rng, { width: 5, jitter: 2 });
+  2058→      sketchCircle(ctx, 314, -6, 7, rng, { width: 4 });
+  2059→      handText(ctx, "MUSIK MENCEM", cx, 192, 24, "rgba(246,241,227,0.75)", 0, '"Patrick Hand", cursive');
+  2060→    },
+  2061→    147,
+  2062→  );
+  2063→}
+  2064→
+  2065→/** Poster kertas di dinding. */
+  2066→export function texPoster(seed: number, title: string) {
+  2067→  return makeCanvas(
+  2068→    `poster-${seed}`,
+  2069→    512,
+  2070→    700,
+  2071→    (ctx, w, h, rng) => {
+  2072→      wobblePath(
+  2073→        ctx,
+  2074→        [
+  2075→          [60, 40],
+  2076→          [452, 30],
+  2077→          [466, 620],
+  2078→          [380, 660],
+  2079→          [200, 640],
+  2080→          [70, 655],
+  2081→          [50, 380],
+  2082→        ],
+  2083→        rng,
+  2084→        6,
+  2085→        true,
+  2086→      );
+  2087→      ctx.fillStyle = PAPER;
+  2088→      ctx.fill();
+  2089→      sketchStroke(
+  2090→        ctx,
+  2091→        [
+  2092→          [60, 40],
+  2093→          [452, 30],
+  2094→          [466, 620],
+  2095→          [380, 660],
+  2096→          [200, 640],
+  2097→          [70, 655],
+  2098→          [50, 380],
+  2099→        ],
+  2100→        rng,
+  2101→        { width: 6, jitter: 4, close: true },
+  2102→      );
+  2103→      handText(ctx, title, w / 2, 150, 72, INK, -0.03);
+  2104→      sketchCircle(ctx, w / 2, 340, 110, rng, { width: 7, fill: "#efe7d2" });
+  2105→      sketchCircle(ctx, w / 2 - 40, 320, 26, rng, { width: 5, fill: INK });
+  2106→      sketchCircle(ctx, w / 2 + 40, 320, 26, rng, { width: 5, fill: INK });
+  2107→      for (let i = -2; i <= 2; i++) {
+  2108→        sketchLine(ctx, w / 2 + i * 20, 390, w / 2 + i * 20, 416, rng, { width: 4, jitter: 1 });
+  2109→      }
+  2110→      handText(ctx, "jangan takut", w / 2, 520, 40, "#4a4036", 0.03, '"Patrick Hand", cursive');
+  2111→      handText(ctx, "takut itu mewah", w / 2, 570, 40, "#4a4036", -0.02, '"Patrick Hand", cursive');
+  2112→      ctx.fillStyle = "rgba(120,90,40,0.18)";
+  2113→      ctx.beginPath();
+  2114→      ctx.ellipse(140, 600, 60, 30, 0.5, 0, Math.PI * 2);
+  2115→      ctx.fill();
+  2116→    },
+  2117→    151 + seed,
+  2118→  );
+  2119→}
+  2120→
+  2121→/** Papan panjang doodle di dinding. */
+  2122→export function texArrowSign() {
+  2123→  return makeCanvas(
+  2124→    "arrow-sign",
+  2125→    512,
+  2126→    256,
+  2127→    (ctx, w, h, rng) => {
+  2128→      ctx.fillStyle = PAPER;
+  2129→      wobblePath(
+  2130→        ctx,
+  2131→        [
+  2132→          [40, 60],
+  2133→          [380, 50],
+  2134→          [380, 30],
+  2135→          [480, 120],
+  2136→          [380, 210],
+  2137→          [380, 190],
+  2138→          [40, 196],
+  2139→        ],
+  2140→        rng,
+  2141→        4,
+  2142→        true,
+  2143→      );
+  2144→      ctx.fill();
+  2145→      sketchStroke(
+  2146→        ctx,
+  2147→        [
+  2148→          [40, 60],
+  2149→          [380, 50],
+  2150→          [380, 30],
+  2151→          [480, 120],
+  2152→          [380, 210],
+  2153→          [380, 190],
+  2154→          [40, 196],
+  2155→        ],
+  2156→        rng,
+  2157→        { width: 7, jitter: 4, close: true },
+  2158→      );
+  2159→      handText(ctx, "JANGAN MATI", 200, 126, 52, RED_DARK, -0.02);
+  2160→    },
+  2161→    157,
+  2162→  );
+  2163→}
+  2164→

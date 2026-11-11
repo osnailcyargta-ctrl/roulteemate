@@ -1,0 +1,938 @@
+     1→/**
+     2→ * scene.ts — dunia 3D Three.js untuk ULTIMATE ROULETTE.
+     3→ * Interior 3D (ruangan, meja, lampu) + semua objek/gameplay 2D doodle
+     4→ * (billboard sprites) = gaya 2.5D. Post-processing: bloom, grain,
+     5→ * chromatic aberration, vignette, flash, desaturasi.
+     6→ */
+     7→
+     8→import * as THREE from "three";
+     9→import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+    10→import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+    11→import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+    12→import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+    13→import {
+    14→  texGunAimEnemy,
+    15→  texGunAimSelf,
+    16→  texGunTable,
+    17→  texGunOpen,
+    18→  texShell,
+    19→  texEnemy,
+    20→  texSpeech,
+    21→  texMuzzle,
+    22→  texSmoke,
+    23→  texSplat,
+    24→  texSpark,
+    25→  texRing,
+    26→  texDust,
+    27→  texWall,
+    28→  texFloor,
+    29→  texCeiling,
+    30→  texTableTop,
+    31→  texBottle,
+    32→  texCards,
+    33→  texShellBox,
+    34→  texBoombox,
+    35→  texPoster,
+    36→  texArrowSign,
+    37→  type EnemyMood,
+    38→} from "./doodle";
+    39→
+    40→const FinalShader = {
+    41→  uniforms: {
+    42→    tDiffuse: { value: null as THREE.Texture | null },
+    43→    uTime: { value: 0 },
+    44→    uAberration: { value: 0 },
+    45→    uVignette: { value: 0.55 },
+    46→    uFlash: { value: 0 },
+    47→    uDesat: { value: 0 },
+    48→    uRedPulse: { value: 0 },
+    49→    uGrain: { value: 0.045 },
+    50→  },
+    51→  vertexShader: /* glsl */ `
+    52→    varying vec2 vUv;
+    53→    void main() {
+    54→      vUv = uv;
+    55→      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    56→    }
+    57→  `,
+    58→  fragmentShader: /* glsl */ `
+    59→    uniform sampler2D tDiffuse;
+    60→    uniform float uTime;
+    61→    uniform float uAberration;
+    62→    uniform float uVignette;
+    63→    uniform float uFlash;
+    64→    uniform float uDesat;
+    65→    uniform float uRedPulse;
+    66→    uniform float uGrain;
+    67→    varying vec2 vUv;
+    68→
+    69→    float hash(vec2 p) {
+    70→      return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+    71→    }
+    72→
+    73→    void main() {
+    74→      vec2 uv = vUv;
+    75→      vec2 dir = uv - 0.5;
+    76→      float d = length(dir);
+    77→      float ab = uAberration * (0.004 + d * 0.02);
+    78→      float r = texture2D(tDiffuse, uv + dir * ab).r;
+    79→      float g = texture2D(tDiffuse, uv).g;
+    80→      float b = texture2D(tDiffuse, uv - dir * ab).b;
+    81→      vec3 col = vec3(r, g, b);
+    82→      col = mix(col, vec3(1.0, 0.97, 0.9), uFlash);
+    83→      col = mix(col, vec3(0.72, 0.06, 0.04), uRedPulse * (0.3 + 0.7 * d));
+    84→      float l = dot(col, vec3(0.299, 0.587, 0.114));
+    85→      col = mix(col, vec3(l), uDesat);
+    86→      col *= 1.0 - uVignette * smoothstep(0.3, 0.82, d);
+    87→      float n = hash(uv * (1.0 + fract(uTime) * 13.7) + fract(uTime) * 7.3);
+    88→      col += (n - 0.5) * uGrain;
+    89→      gl_FragColor = vec4(col, 1.0);
+    90→    }
+    91→  `,
+    92→};
+    93→
+    94→interface Particle {
+    95→  mesh: THREE.Mesh;
+    96→  vel: THREE.Vector3;
+    97→  rotVel: number;
+    98→  life: number;
+    99→  maxLife: number;
+   100→  grow: number;
+   101→  gravity: number;
+   102→  fadePow: number;
+   103→}
+   104→
+   105→function doodleMat(tex: THREE.Texture, opts: { lit?: boolean; alphaTest?: number } = {}) {
+   106→  if (opts.lit) {
+   107→    return new THREE.MeshLambertMaterial({
+   108→      map: tex,
+   109→      transparent: true,
+   110→      alphaTest: opts.alphaTest ?? 0.02,
+   111→      side: THREE.DoubleSide,
+   112→      emissive: new THREE.Color(0x8a8378),
+   113→      emissiveMap: tex,
+   114→      emissiveIntensity: 0.55,
+   115→    });
+   116→  }
+   117→  return new THREE.MeshBasicMaterial({
+   118→    map: tex,
+   119→    transparent: true,
+   120→    alphaTest: opts.alphaTest ?? 0.02,
+   121→    side: THREE.DoubleSide,
+   122→    depthWrite: true,
+   123→  });
+   124→}
+   125→
+   126→function ctex(cv: HTMLCanvasElement, repeat?: [number, number]) {
+   127→  const t = new THREE.CanvasTexture(cv);
+   128→  t.colorSpace = THREE.SRGBColorSpace;
+   129→  t.anisotropy = 4;
+   130→  if (repeat) {
+   131→    t.wrapS = THREE.RepeatWrapping;
+   132→    t.wrapT = THREE.RepeatWrapping;
+   133→    t.repeat.set(repeat[0], repeat[1]);
+   134→  }
+   135→  return t;
+   136→}
+   137→
+   138→export class RouletteScene {
+   139→  renderer!: THREE.WebGLRenderer;
+   140→  scene!: THREE.Scene;
+   141→  camera!: THREE.PerspectiveCamera;
+   142→  composer!: EffectComposer;
+   143→  finalPass!: ShaderPass;
+   144→  bloomPass!: UnrealBloomPass;
+   145→
+   146→  private camGroup = new THREE.Group();
+   147→  private camRig = new THREE.Group();
+   148→  private lookX = 0;
+   149→  private lookY = 0;
+   150→  private lookXT = 0;
+   151→  private lookYT = 0;
+   152→
+   153→  private lampPivot!: THREE.Group;
+   154→  private spot!: THREE.SpotLight;
+   155→  private muzzleLight!: THREE.PointLight;
+   156→  private ambience!: THREE.HemisphereLight;
+   157→
+   158→  private enemyMesh!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>;
+   159→  private enemyBasePos = new THREE.Vector3(0, 1.42, -1.92);
+   160→  private enemyWobble = 0;
+   161→  private speechMesh!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+   162→  private speechTimer = 0;
+   163→
+   164→  private gunMesh!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+   165→  private gunAimTex: { enemy: THREE.Texture; self: THREE.Texture; open: THREE.Texture };
+   166→  private gunAimTexEnemy2: THREE.Texture;
+   167→  private muzzleMesh!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+   168→  private gunTarget = new THREE.Vector3(0, -0.5, -0.8);
+   169→  private gunCurrent = new THREE.Vector3(0, -0.9, -0.75);
+   170→  private gunPose: "enemy" | "self" | null = null;
+   171→  private gunRecoil = 0;
+   172→
+   173→  private diceMesh!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+   174→  private diceGhosts: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = [];
+   175→  private diceFaceTex: Record<string, THREE.Texture> = {};
+   176→
+   177→  private particles: Particle[] = [];
+   178→  private shellTex: { live: THREE.Texture; blank: THREE.Texture };
+   179→  private splatTexs: THREE.Texture[] = [];
+   180→  private sparkTex!: THREE.Texture;
+   181→  private smokeTex!: THREE.Texture;
+   182→  private ringTex!: THREE.Texture;
+   183→  private dustTex!: THREE.Texture;
+   184→  private muzzleTex!: THREE.Texture;
+   185→
+   186→  private trauma = 0;
+   187→  private timeScale = 1;
+   188→  private timeScaleTarget = 1;
+   189→  private lampFlicker = 1;
+   190→  private lampBoost = 1;
+   191→  private shakeOff = new THREE.Vector2();
+   192→
+   193→  onFrame: ((dt: number, t: number) => void) | null = null;
+   194→
+   195→  init(container: HTMLElement) {
+   196→    const w = container.clientWidth;
+   197→    const h = container.clientHeight;
+   198→
+   199→    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+   200→    this.renderer.setSize(w, h);
+   201→    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+   202→    this.renderer.shadowMap.enabled = true;
+   203→    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+   204→    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+   205→    this.renderer.toneMappingExposure = 1.12;
+   206→    container.appendChild(this.renderer.domElement);
+   207→
+   208→    this.scene = new THREE.Scene();
+   209→    this.scene.background = new THREE.Color(0x0b0a08);
+   210→    this.scene.fog = new THREE.FogExp2(0x0b0a08, 0.055);
+   211→
+   212→    this.camera = new THREE.PerspectiveCamera(56, w / h, 0.05, 40);
+   213→    this.camera.position.set(0, 1.42, 1.5);
+   214→    this.camGroup.add(this.camera);
+   215→    this.camRig.add(this.camGroup);
+   216→    this.scene.add(this.camRig);
+   217→
+   218→    this.buildRoom();
+   219→    this.buildLights();
+   220→    this.buildTable();
+   221→    this.buildEnemy();
+   222→    this.buildGun();
+   223→    this.buildDice();
+   224→    this.buildParticles();
+   225→
+   226→    // post processing
+   227→    this.composer = new EffectComposer(this.renderer);
+   228→    this.composer.addPass(new RenderPass(this.scene, this.camera));
+   229→    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 1.0);
+   230→    this.composer.addPass(this.bloomPass);
+   231→    this.finalPass = new ShaderPass(FinalShader);
+   232→    this.composer.addPass(this.finalPass);
+   233→
+   234→    window.addEventListener("resize", this.onResize);
+   235→    // debug handle (dipakai untuk inspeksi via agent-browser)
+   236→    (window as unknown as { __rs?: RouletteScene }).__rs = this;
+   237→  }
+   238→
+   239→  private onResize = () => {
+   240→    const el = this.renderer.domElement.parentElement;
+   241→    if (!el) return;
+   242→    const w = el.clientWidth;
+   243→    const h = el.clientHeight;
+   244→    this.camera.aspect = w / h;
+   245→    this.camera.updateProjectionMatrix();
+   246→    this.renderer.setSize(w, h);
+   247→    this.composer.setSize(w, h);
+   248→  };
+   249→
+   250→  /* ---------------- build ---------------- */
+   251→
+   252→  private buildRoom() {
+   253→    const floorTex = ctex(texFloor(), [2, 2]);
+   254→    const floor = new THREE.Mesh(
+   255→      new THREE.PlaneGeometry(11, 11),
+   256→      new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.92 }),
+   257→    );
+   258→    floor.rotation.x = -Math.PI / 2;
+   259→    floor.receiveShadow = true;
+   260→    this.scene.add(floor);
+   261→
+   262→    const ceilTex = ctex(texCeiling(), [2, 2]);
+   263→    const ceil = new THREE.Mesh(
+   264→      new THREE.PlaneGeometry(11, 11),
+   265→      new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 1 }),
+   266→    );
+   267→    ceil.rotation.x = Math.PI / 2;
+   268→    ceil.position.y = 3.5;
+   269→    this.scene.add(ceil);
+   270→
+   271→    const mkWall = (tex: HTMLCanvasElement, w: number, h: number) =>
+   272→      new THREE.Mesh(
+   273→        new THREE.PlaneGeometry(w, h),
+   274→        new THREE.MeshStandardMaterial({ map: ctex(tex), roughness: 0.95 }),
+   275→      );
+   276→
+   277→    const back = mkWall(texWall(5, "HA HA HA"), 11, 3.5);
+   278→    back.position.set(0, 1.75, -3.6);
+   279→    back.receiveShadow = true;
+   280→    this.scene.add(back);
+   281→
+   282→    const front = mkWall(texWall(9), 11, 3.5);
+   283→    front.position.set(0, 1.75, 3.8);
+   284→    front.rotation.y = Math.PI;
+   285→    this.scene.add(front);
+   286→
+   287→    const left = mkWall(texWall(13, "MENYESAL"), 11, 3.5);
+   288→    left.position.set(-4.6, 1.75, 0);
+   289→    left.rotation.y = Math.PI / 2;
+   290→    left.receiveShadow = true;
+   291→    this.scene.add(left);
+   292→
+   293→    const right = mkWall(texWall(17), 11, 3.5);
+   294→    right.position.set(4.6, 1.75, 0);
+   295→    right.rotation.y = -Math.PI / 2;
+   296→    this.scene.add(right);
+   297→
+   298→    // poster di dinding belakang
+   299→    const poster = new THREE.Mesh(
+   300→      new THREE.PlaneGeometry(0.62, 0.85),
+   301→      doodleMat(ctex(texPoster(1, "LAST CALL")), { lit: true }),
+   302→    );
+   303→    poster.position.set(-1.55, 2.1, -3.58);
+   304→    poster.rotation.z = 0.05;
+   305→    this.scene.add(poster);
+   306→
+   307→    const poster2 = new THREE.Mesh(
+   308→      new THREE.PlaneGeometry(0.62, 0.85),
+   309→      doodleMat(ctex(texPoster(2, "OUT!")), { lit: true }),
+   310→    );
+   311→    poster2.position.set(-3.2, 2.0, -3.58);
+   312→    poster2.rotation.z = -0.08;
+   313→    this.scene.add(poster2);
+   314→
+   315→    // papan panah di dinding kanan
+   316→    const sign = new THREE.Mesh(
+   317→      new THREE.PlaneGeometry(0.8, 0.4),
+   318→      doodleMat(ctex(texArrowSign()), { lit: true }),
+   319→    );
+   320→    sign.position.set(4.58, 1.9, -1.2);
+   321→    sign.rotation.y = -Math.PI / 2;
+   322→    sign.rotation.z = 0.06;
+   323→    this.scene.add(sign);
+   324→
+   325→    // crate + boombox di pojok kiri
+   326→    const crate = new THREE.Mesh(
+   327→      new THREE.BoxGeometry(0.55, 0.55, 0.55),
+   328→      new THREE.MeshStandardMaterial({ color: 0x4a3a26, roughness: 0.95 }),
+   329→    );
+   330→    crate.position.set(-3.6, 0.275, -2.7);
+   331→    crate.rotation.y = 0.4;
+   332→    crate.castShadow = true;
+   333→    this.scene.add(crate);
+   334→    const boombox = new THREE.Mesh(
+   335→      new THREE.PlaneGeometry(0.62, 0.5),
+   336→      doodleMat(ctex(texBoombox()), { lit: true }),
+   337→    );
+   338→    boombox.position.set(-3.6, 0.85, -2.7);
+   339→    boombox.rotation.y = 0.35;
+   340→    this.scene.add(boombox);
+   341→  }
+   342→
+   343→  private buildLights() {
+   344→    this.ambience = new THREE.HemisphereLight(0x35281c, 0x0c0a07, 0.95);
+   345→    this.scene.add(this.ambience);
+   346→
+   347→    // lampu gantung
+   348→    this.lampPivot = new THREE.Group();
+   349→    this.lampPivot.position.set(0, 3.5, -0.55);
+   350→    this.scene.add(this.lampPivot);
+   351→
+   352→    const wire = new THREE.Mesh(
+   353→      new THREE.CylinderGeometry(0.012, 0.012, 0.62, 6),
+   354→      new THREE.MeshStandardMaterial({ color: 0x14100c }),
+   355→    );
+   356→    wire.position.y = -0.31;
+   357→    this.lampPivot.add(wire);
+   358→
+   359→    const shade = new THREE.Mesh(
+   360→      new THREE.ConeGeometry(0.34, 0.3, 24, 1, true),
+   361→      new THREE.MeshStandardMaterial({ color: 0x233324, roughness: 0.7, side: THREE.DoubleSide }),
+   362→    );
+   363→    shade.position.y = -0.68;
+   364→    shade.castShadow = true;
+   365→    this.lampPivot.add(shade);
+   366→
+   367→    const bulb = new THREE.Mesh(
+   368→      new THREE.SphereGeometry(0.075, 16, 12),
+   369→      new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 2.7, 1.7) }),
+   370→    );
+   371→    bulb.position.y = -0.76;
+   372→    this.lampPivot.add(bulb);
+   373→
+   374→    this.spot = new THREE.SpotLight(0xffdc9e, 60, 9, 0.95, 0.55, 1.6);
+   375→    this.spot.position.set(0, -0.7, 0);
+   376→    this.spot.castShadow = true;
+   377→    this.spot.shadow.mapSize.set(1024, 1024);
+   378→    this.spot.shadow.bias = -0.002;
+   379→    // target statis di meja (bukan child pivot, agar arah cahaya benar)
+   380→    const target = new THREE.Object3D();
+   381→    target.position.set(0, 0.86, -0.45);
+   382→    this.scene.add(target);
+   383→    this.lampPivot.add(this.spot);
+   384→    this.spot.target = target;
+   385→
+   386→    // cahaya pengisi hangat lembut agar PAKDE terlihat
+   387→    const fill = new THREE.PointLight(0xffd9a0, 1.6, 4.5, 2);
+   388→    fill.position.set(0.25, 2.3, -1.5);
+   389→    this.scene.add(fill);
+   390→
+   391→    this.muzzleLight = new THREE.PointLight(0xffc46b, 0, 6, 1.8);
+   392→    this.muzzleLight.position.set(0, 1.3, 0.6);
+   393→    this.scene.add(this.muzzleLight);
+   394→  }
+   395→
+   396→  private buildTable() {
+   397→    const top = new THREE.Mesh(
+   398→      new THREE.BoxGeometry(2.7, 0.09, 1.35),
+   399→      new THREE.MeshStandardMaterial({ map: ctex(texTableTop()), roughness: 0.85 }),
+   400→    );
+   401→    top.position.set(0, 0.86, -0.25);
+   402→    top.castShadow = true;
+   403→    top.receiveShadow = true;
+   404→    this.scene.add(top);
+   405→
+   406→    const legMat = new THREE.MeshStandardMaterial({ color: 0x2e2117, roughness: 0.95 });
+   407→    for (const [lx, lz] of [
+   408→      [-1.2, -0.75],
+   409→      [1.2, -0.75],
+   410→      [-1.2, 0.25],
+   411→      [1.2, 0.25],
+   412→    ]) {
+   413→      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.82, 0.09), legMat);
+   414→      leg.position.set(lx, 0.41, lz - 0.0);
+   415→      leg.castShadow = true;
+   416→      this.scene.add(leg);
+   417→    }
+   418→
+   419→    // props doodle di meja (billboard 2D)
+   420→    const gun = new THREE.Mesh(
+   421→      new THREE.PlaneGeometry(0.58, 0.39),
+   422→      doodleMat(ctex(texGunTable()), { lit: true }),
+   423→    );
+   424→    gun.position.set(-0.82, 1.1, -0.18);
+   425→    gun.rotation.y = 0.32;
+   426→    this.scene.add(gun);
+   427→
+   428→    const box = new THREE.Mesh(
+   429→      new THREE.PlaneGeometry(0.34, 0.27),
+   430→      doodleMat(ctex(texShellBox()), { lit: true }),
+   431→    );
+   432→    box.position.set(0.85, 1.05, -0.42);
+   433→    box.rotation.y = -0.25;
+   434→    this.scene.add(box);
+   435→
+   436→    const cards = new THREE.Mesh(
+   437→      new THREE.PlaneGeometry(0.26, 0.26),
+   438→      doodleMat(ctex(texCards()), { lit: true }),
+   439→    );
+   440→    cards.position.set(0.12, 0.96, 0.22);
+   441→    cards.rotation.x = -0.42;
+   442→    this.scene.add(cards);
+   443→
+   444→    const bottle = new THREE.Mesh(
+   445→      new THREE.PlaneGeometry(0.2, 0.4),
+   446→      doodleMat(ctex(texBottle()), { lit: true }),
+   447→    );
+   448→    bottle.position.set(-1.05, 1.13, -0.6);
+   449→    bottle.rotation.y = 0.5;
+   450→    this.scene.add(bottle);
+   451→  }
+   452→
+   453→  private buildEnemy() {
+   454→    const tex = ctex(texEnemy("idle1"));
+   455→    this.enemyMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.6), doodleMat(tex, { lit: true }));
+   456→    this.enemyMesh.position.copy(this.enemyBasePos);
+   457→    this.scene.add(this.enemyMesh);
+   458→
+   459→    this.speechMesh = new THREE.Mesh(
+   460→      new THREE.PlaneGeometry(1.3, 0.64),
+   461→      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, alphaTest: 0.02, depthWrite: false }),
+   462→    );
+   463→    this.speechMesh.position.set(0.72, 2.32, -1.7);
+   464→    this.speechMesh.renderOrder = 5;
+   465→    this.scene.add(this.speechMesh);
+   466→  }
+   467→
+   468→  private buildGun() {
+   469→    const tEnemy = ctex(texGunAimEnemy());
+   470→    this.gunAimTex = {
+   471→      enemy: tEnemy,
+   472→      self: ctex(texGunAimSelf()),
+   473→      open: ctex(texGunOpen()),
+   474→    };
+   475→    this.gunAimTexEnemy2 = tEnemy;
+   476→    this.gunMesh = new THREE.Mesh(
+   477→      new THREE.PlaneGeometry(1.5, 1.12),
+   478→      new THREE.MeshBasicMaterial({
+   479→        map: this.gunAimTex.enemy,
+   480→        transparent: true,
+   481→        alphaTest: 0.02,
+   482→        side: THREE.DoubleSide,
+   483→      }),
+   484→    );
+   485→    this.gunMesh.position.copy(this.gunCurrent);
+   486→    this.gunMesh.visible = false;
+   487→    this.gunMesh.renderOrder = 8;
+   488→    this.camera.add(this.gunMesh);
+   489→
+   490→    this.muzzleMesh = new THREE.Mesh(
+   491→      new THREE.PlaneGeometry(0.85, 0.85),
+   492→      new THREE.MeshBasicMaterial({
+   493→        map: ctex(texMuzzle()),
+   494→        transparent: true,
+   495→        opacity: 0,
+   496→        depthWrite: false,
+   497→        blending: THREE.AdditiveBlending,
+   498→        color: new THREE.Color(2.4, 2.4, 2.4),
+   499→      }),
+   500→    );
+   501→    this.muzzleMesh.position.set(0, -0.26, -1.35);
+   502→    this.muzzleMesh.renderOrder = 9;
+   503→    this.camera.add(this.muzzleMesh);
+   504→  }
+   505→
+   506→  private buildDice() {
+   507→    this.diceMesh = new THREE.Mesh(
+   508→      new THREE.PlaneGeometry(0.74, 0.74),
+   509→      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false }),
+   510→    );
+   511→    this.diceMesh.renderOrder = 20;
+   512→    this.diceMesh.position.set(0, -0.02, -1.55);
+   513→    this.camera.add(this.diceMesh);
+   514→    for (let i = 0; i < 3; i++) {
+   515→      const g = new THREE.Mesh(
+   516→        new THREE.PlaneGeometry(0.74, 0.74),
+   517→        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false }),
+   518→      );
+   519→      g.renderOrder = 19 - i;
+   520→      g.position.set(0, -0.02, -1.55 - (i + 1) * 0.02);
+   521→      this.camera.add(g);
+   522→      this.diceGhosts.push(g);
+   523→    }
+   524→  }
+   525→
+   526→  private buildParticles() {
+   527→    this.shellTex = {
+   528→      live: ctex(texShell("live")),
+   529→      blank: ctex(texShell("blank")),
+   530→    };
+   531→    this.splatTexs = [ctex(texSplat(111)), ctex(texSplat(222))];
+   532→    this.sparkTex = ctex(texSpark());
+   533→    this.smokeTex = ctex(texSmoke());
+   534→    this.ringTex = ctex(texRing());
+   535→    this.dustTex = ctex(texDust());
+   536→    this.muzzleTex = ctex(texMuzzle());
+   537→  }
+   538→
+   539→  /* ---------------- helpers ---------------- */
+   540→
+   541→  setLook(nx: number, ny: number) {
+   542→    this.lookXT = nx;
+   543→    this.lookYT = ny;
+   544→  }
+   545→
+   546→  addTrauma(v: number) {
+   547→    this.trauma = Math.min(1, this.trauma + v);
+   548→  }
+   549→
+   550→  private fovKick = 0;
+   551→
+   552→  fovPunch() {
+   553→    this.fovKick = 1;
+   554→  }
+   555→
+   556→  setTimeScale(v: number, snap = false) {
+   557→    this.timeScaleTarget = v;
+   558→    if (snap) this.timeScale = v;
+   559→  }
+   560→
+   561→  flash(v = 0.85) {
+   562→    this.finalPass.uniforms.uFlash.value = v;
+   563→  }
+   564→
+   565→  setAberration(v: number) {
+   566→    this.finalPass.uniforms.uAberration.value = v;
+   567→  }
+   568→
+   569→  setRedPulse(v: number) {
+   570→    this.finalPass.uniforms.uRedPulse.value = v;
+   571→  }
+   572→
+   573→  setDesat(v: number) {
+   574→    this.finalPass.uniforms.uDesat.value = v;
+   575→  }
+   576→
+   577→  setLampBoost(v: number) {
+   578→    this.lampBoost = v;
+   579→  }
+   580→
+   581→  private spawn(
+   582→    tex: THREE.Texture,
+   583→    pos: THREE.Vector3,
+   584→    opts: {
+   585→      size?: number;
+   586→      vel?: THREE.Vector3;
+   587→      rotVel?: number;
+   588→      life?: number;
+   589→      grow?: number;
+   590→      gravity?: number;
+   591→      fadePow?: number;
+   592→      blending?: THREE.Blending;
+   593→      lit?: boolean;
+   594→      parent?: THREE.Object3D;
+   595→    } = {},
+   596→  ) {
+   597→    const mat = new THREE.MeshBasicMaterial({
+   598→      map: tex,
+   599→      transparent: true,
+   600→      depthWrite: false,
+   601→      blending: opts.blending ?? THREE.NormalBlending,
+   602→      opacity: 1,
+   603→      side: THREE.DoubleSide,
+   604→    });
+   605→    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(opts.size ?? 0.3, opts.size ?? 0.3), mat);
+   606→    mesh.position.copy(pos);
+   607→    (opts.parent ?? this.scene).add(mesh);
+   608→    // billboard ke kamera untuk partikel dunia
+   609→    if (!opts.parent) mesh.lookAt(this.camera.getWorldPosition(new THREE.Vector3()));
+   610→    this.particles.push({
+   611→      mesh,
+   612→      vel: opts.vel ?? new THREE.Vector3(),
+   613→      rotVel: opts.rotVel ?? 0,
+   614→      life: 0,
+   615→      maxLife: opts.life ?? 1,
+   616→      grow: opts.grow ?? 0,
+   617→      gravity: opts.gravity ?? 0,
+   618→      fadePow: opts.fadePow ?? 1,
+   619→    });
+   620→    return mesh;
+   621→  }
+   622→
+   623→  /* ---------------- API VFX ---------------- */
+   624→
+   625→  enemySetMood(mood: EnemyMood) {
+   626→    const tex = ctex(texEnemy(mood));
+   627→    this.enemyMesh.material.map = tex;
+   628→    this.enemyMesh.material.emissiveMap = tex;
+   629→    // redupkan respons cahaya agar kertas putih tidak overexposed
+   630→    this.enemyMesh.material.color.setScalar(0.62);
+   631→    this.enemyMesh.material.emissiveIntensity = 0.5;
+   632→    this.enemyMesh.material.needsUpdate = true;
+   633→  }
+   634→
+   635→  enemySay(lines: string[], dur = 2.6) {
+   636→    const tex = ctex(texSpeech(lines));
+   637→    this.speechMesh.material.map = tex;
+   638→    this.speechMesh.material.opacity = 1;
+   639→    this.speechMesh.material.needsUpdate = true;
+   640→    this.speechMesh.scale.set(0.6, 0.6, 1);
+   641→    this.speechTimer = dur;
+   642→  }
+   643→
+   644→  muzzleFlash() {
+   645→    this.muzzleMesh.material.opacity = 1;
+   646→    this.muzzleMesh.rotation.z = Math.random() * Math.PI;
+   647→    this.muzzleMesh.scale.setScalar(0.8 + Math.random() * 0.4);
+   648→    this.muzzleLight.intensity = 55;
+   649→    this.flash(0.5);
+   650→    this.addTrauma(0.55);
+   651→    this.fovPunch();
+   652→    // asap
+   653→    for (let i = 0; i < 5; i++) {
+   654→      const p = this.muzzleMesh.getWorldPosition(new THREE.Vector3());
+   655→      p.x += (Math.random() - 0.5) * 0.25;
+   656→      p.y += (Math.random() - 0.5) * 0.25;
+   657→      this.spawn(this.smokeTex, p, {
+   658→        size: 0.22 + Math.random() * 0.2,
+   659→        vel: new THREE.Vector3((Math.random() - 0.5) * 0.3, 0.35 + Math.random() * 0.3, (Math.random() - 0.5) * 0.2),
+   660→        life: 1.4 + Math.random() * 0.8,
+   661→        grow: 0.35,
+   662→      });
+   663→    }
+   664→  }
+   665→
+   666→  bloodBurst(at: "enemy" | "player", big = false) {
+   667→    const splat = this.splatTexs[Math.floor(Math.random() * this.splatTexs.length)];
+   668→    if (at === "enemy") {
+   669→      const p = this.enemyBasePos.clone();
+   670→      for (let i = 0; i < (big ? 14 : 7); i++) {
+   671→        this.spawn(splat, new THREE.Vector3(p.x + (Math.random() - 0.5) * 0.7, p.y + 0.4 + (Math.random() - 0.5) * 0.9, p.z + 0.1), {
+   672→          size: 0.16 + Math.random() * 0.22,
+   673→          vel: new THREE.Vector3((Math.random() - 0.5) * 1.2, 0.6 + Math.random() * 1.2, 0.4 + Math.random() * 0.8),
+   674→          gravity: -4.4,
+   675→          rotVel: (Math.random() - 0.5) * 8,
+   676→          life: 0.8 + Math.random() * 0.5,
+   677→        });
+   678→      }
+   679→      this.spawn(splat, new THREE.Vector3(p.x, p.y + 0.25, p.z + 0.05), {
+   680→        size: big ? 1.7 : 1.1,
+   681→        life: 0.75,
+   682→        grow: 0.2,
+   683→        fadePow: 1.6,
+   684→      });
+   685→    } else {
+   686→      // darah di layar: partikel di depan kamera
+   687→      for (let i = 0; i < (big ? 10 : 5); i++) {
+   688→        const p = this.camera.getWorldPosition(new THREE.Vector3());
+   689→        const dir = this.camera.getWorldDirection(new THREE.Vector3());
+   690→        p.addScaledVector(dir, 0.5);
+   691→        p.x += (Math.random() - 0.5) * 0.6;
+   692→        p.y += (Math.random() - 0.5) * 0.4;
+   693→        this.spawn(splat, p, {
+   694→          size: 0.14 + Math.random() * 0.2,
+   695→          vel: new THREE.Vector3((Math.random() - 0.5) * 0.2, 0.1, 0),
+   696→          life: 0.7 + Math.random() * 0.5,
+   697→          parent: this.scene,
+   698→        });
+   699→      }
+   700→    }
+   701→  }
+   702→
+   703→  ringBurst(at: THREE.Vector3, size = 0.6) {
+   704→    this.spawn(this.ringTex, at, { size, life: 0.5, grow: 1.6, fadePow: 1.4 });
+   705→  }
+   706→
+   707→  sparkBurst(at: THREE.Vector3, n = 8) {
+   708→    for (let i = 0; i < n; i++) {
+   709→      this.spawn(this.sparkTex, at, {
+   710→        size: 0.1 + Math.random() * 0.12,
+   711→        vel: new THREE.Vector3((Math.random() - 0.5) * 2.4, Math.random() * 2, (Math.random() - 0.5) * 1.2),
+   712→        gravity: -5,
+   713→        rotVel: (Math.random() - 0.5) * 12,
+   714→        life: 0.4 + Math.random() * 0.4,
+   715→        blending: THREE.AdditiveBlending,
+   716→      });
+   717→    }
+   718→  }
+   719→
+   720→  dustPuff(at: THREE.Vector3, n = 6) {
+   721→    for (let i = 0; i < n; i++) {
+   722→      this.spawn(this.dustTex, at, {
+   723→        size: 0.2 + Math.random() * 0.25,
+   724→        vel: new THREE.Vector3((Math.random() - 0.5) * 0.8, 0.2 + Math.random() * 0.4, (Math.random() - 0.5) * 0.5),
+   725→        life: 0.7 + Math.random() * 0.5,
+   726→        grow: 0.5,
+   727→      });
+   728→    }
+   729→  }
+   730→
+   731→  /** Shell melayang (reload / eject). onDone dipanggil saat selesai. */
+   732→  flyShell(kind: "live" | "blank", from: THREE.Vector3, to: THREE.Vector3, dur: number, onDone?: () => void) {
+   733→    const mat = new THREE.MeshBasicMaterial({ map: this.shellTex[kind], transparent: true, side: THREE.DoubleSide });
+   734→    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.16), mat);
+   735→    mesh.position.copy(from);
+   736→    this.scene.add(mesh);
+   737→    const start = performance.now();
+   738→    const step = () => {
+   739→      const t = Math.min(1, (performance.now() - start) / (dur * 1000));
+   740→      const e = 1 - Math.pow(1 - t, 2);
+   741→      mesh.position.lerpVectors(from, to, e);
+   742→      mesh.position.y += Math.sin(t * Math.PI) * 0.55;
+   743→      mesh.rotation.z += 0.22;
+   744→      mesh.lookAt(this.camera.getWorldPosition(new THREE.Vector3()));
+   745→      if (t < 1) requestAnimationFrame(step);
+   746→      else {
+   747→        this.scene.remove(mesh);
+   748→        mesh.geometry.dispose();
+   749→        mat.dispose();
+   750→        onDone?.();
+   751→      }
+   752→    };
+   753→    requestAnimationFrame(step);
+   754→  }
+   755→
+   756→  /* ---------------- gun pose ---------------- */
+   757→
+   758→  gunAim(pose: "enemy" | "self" | null, instant = false) {
+   759→    this.gunPose = pose;
+   760→    this.gunMesh.visible = pose !== null;
+   761→    if (pose === "enemy") {
+   762→      this.gunMesh.material.map = this.gunAimTex.enemy;
+   763→      this.gunTarget.set(0, -0.52, -0.8);
+   764→      this.gunMesh.scale.setScalar(1);
+   765→    } else if (pose === "self") {
+   766→      this.gunMesh.material.map = this.gunAimTex.self;
+   767→      this.gunTarget.set(0.52, -0.38, -0.95);
+   768→      this.gunMesh.scale.setScalar(0.92);
+   769→    }
+   770→    if (instant) this.gunCurrent.copy(this.gunTarget);
+   771→    this.gunMesh.material.needsUpdate = true;
+   772→  }
+   773→
+   774→  gunOpenCylinder(open: boolean) {
+   775→    this.gunMesh.visible = true;
+   776→    this.gunMesh.material.map = open ? this.gunAimTex.open : this.gunAimTex.enemy;
+   777→    this.gunMesh.material.needsUpdate = true;
+   778→  }
+   779→
+   780→  gunKick() {
+   781→    this.gunRecoil = 1;
+   782→  }
+   783→
+   784→  /* ---------------- dice ---------------- */
+   785→
+   786→  diceSetFace(id: string, cv: HTMLCanvasElement) {
+   787→    let tex = this.diceFaceTex[id];
+   788→    if (!tex) {
+   789→      tex = ctex(cv);
+   790→      this.diceFaceTex[id] = tex;
+   791→    }
+   792→    this.diceMesh.material.map = tex;
+   793→    this.diceMesh.material.needsUpdate = true;
+   794→  }
+   795→
+   796→  diceVisible(v: boolean) {
+   797→    this.diceMesh.visible = v;
+   798→    this.diceGhosts.forEach((g) => (g.visible = v));
+   799→    this.diceMesh.material.opacity = v ? 1 : 0;
+   800→    if (!v) {
+   801→      this.diceGhosts.forEach((g) => (g.material.opacity = 0));
+   802→    }
+   803→  }
+   804→
+   805→  diceMeshes() {
+   806→    return { main: this.diceMesh, ghosts: this.diceGhosts };
+   807→  }
+   808→
+   809→  /* ---------------- posisi util ---------------- */
+   810→
+   811→  muzzleWorldPos(): THREE.Vector3 {
+   812→    return this.muzzleMesh.getWorldPosition(new THREE.Vector3());
+   813→  }
+   814→
+   815→  enemyWorldPos(): THREE.Vector3 {
+   816→    return this.enemyMesh.position.clone();
+   817→  }
+   818→
+   819→  dustPuffAtCamera() {
+   820→    const p = this.camera.getWorldPosition(new THREE.Vector3());
+   821→    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+   822→    p.addScaledVector(dir, 0.7);
+   823→    p.y -= 0.1;
+   824→    for (let i = 0; i < 4; i++) {
+   825→      this.spawn(this.smokeTex, p, {
+   826→        size: 0.16 + Math.random() * 0.18,
+   827→        vel: new THREE.Vector3((Math.random() - 0.5) * 0.5, 0.3 + Math.random() * 0.3, 0),
+   828→        life: 0.9 + Math.random() * 0.5,
+   829→        grow: 0.4,
+   830→      });
+   831→    }
+   832→  }
+   833→
+   834→  /* ---------------- render loop ---------------- */
+   835→
+   836→  render(now: number) {
+   837→    const dt0 = Math.min(0.1, (now - (this.lastNow ?? now)) / 1000);
+   838→    this.lastNow = now;
+   839→    this.timeScale += (this.timeScaleTarget - this.timeScale) * Math.min(1, dt0 * 6);
+   840→    const dt = dt0 * this.timeScale;
+   841→    const t = now / 1000;
+   842→
+   843→    // kamera: parallax + napas + shake
+   844→    this.lookX += (this.lookXT - this.lookX) * Math.min(1, dt0 * 5);
+   845→    this.lookY += (this.lookYT - this.lookY) * Math.min(1, dt0 * 5);
+   846→    this.trauma = Math.max(0, this.trauma - dt0 * 1.7);
+   847→    const sh = this.trauma * this.trauma;
+   848→    const n1 = Math.sin(t * 61) * Math.sin(t * 23.7);
+   849→    const n2 = Math.cos(t * 47.3) * Math.sin(t * 31.1);
+   850→    this.shakeOff.set(n1 * sh * 0.09, n2 * sh * 0.07);
+   851→
+   852→    this.camGroup.rotation.y = -this.lookX * 0.09 + n1 * sh * 0.05;
+   853→    this.camGroup.rotation.x = -this.lookY * 0.06 + n2 * sh * 0.045;
+   854→    this.camGroup.position.x = this.shakeOff.x;
+   855→    this.camGroup.position.y = Math.sin(t * 1.7) * 0.012 + this.shakeOff.y;
+   856→
+   857→    // lampu flicker
+   858→    this.lampFlicker += (1 - this.lampFlicker) * Math.min(1, dt0 * 8);
+   859→    if (Math.random() < 0.012) this.lampFlicker = 0.55 + Math.random() * 0.3;
+   860→    const flick = this.lampFlicker * this.lampBoost * (0.92 + Math.sin(t * 13.3) * 0.05);
+   861→    this.spot.intensity = 85 * flick;
+   862→    this.ambience.intensity = 0.55 * flick;
+   863→    this.lampPivot.rotation.z = Math.sin(t * 0.9) * 0.035;
+   864→    this.lampPivot.rotation.x = Math.cos(t * 0.7) * 0.02;
+   865→
+   866→    // musuh: bobbing idle
+   867→    this.enemyWobble += dt;
+   868→    this.enemyMesh.position.y = this.enemyBasePos.y + Math.sin(t * 1.9) * 0.02;
+   869→    this.enemyMesh.rotation.z = Math.sin(t * 1.3) * 0.012;
+   870→
+   871→    // speech bubble
+   872→    if (this.speechTimer > 0) {
+   873→      this.speechTimer -= dt0;
+   874→      const s = Math.min(1, this.speechMesh.scale.x + dt0 * 5);
+   875→      this.speechMesh.scale.set(s, s, 1);
+   876→      if (this.speechTimer <= 0) {
+   877→        this.speechMesh.material.opacity = 0;
+   878→      }
+   879→    }
+   880→
+   881→    // gun lerp + recoil
+   882→    this.gunCurrent.lerp(this.gunTarget, Math.min(1, dt0 * 7));
+   883→    this.gunRecoil = Math.max(0, this.gunRecoil - dt0 * 5.5);
+   884→    this.fovKick = Math.max(0, this.fovKick - dt0 * 4);
+   885→    const targetFov = 56 + this.fovKick * 4.5;
+   886→    if (Math.abs(this.camera.fov - targetFov) > 0.01) {
+   887→      this.camera.fov = targetFov;
+   888→      this.camera.updateProjectionMatrix();
+   889→    }
+   890→    this.gunMesh.position.copy(this.gunCurrent);
+   891→    this.gunMesh.position.z += this.gunRecoil * 0.22;
+   892→    this.gunMesh.rotation.x = this.gunRecoil * 0.3 - Math.sin(t * 1.7) * 0.008;
+   893→    this.gunMesh.rotation.z = this.gunPose === "self" ? -0.06 : Math.sin(t * 1.4) * 0.006;
+   894→
+   895→    // muzzle fade
+   896→    if (this.muzzleMesh.material.opacity > 0) {
+   897→      this.muzzleMesh.material.opacity = Math.max(0, this.muzzleMesh.material.opacity - dt0 * 7);
+   898→      this.muzzleLight.intensity = Math.max(0, this.muzzleLight.intensity - dt0 * 260);
+   899→    }
+   900→
+   901→    // flash & pulse fade
+   902→    const u = this.finalPass.uniforms;
+   903→    u.uFlash.value = Math.max(0, u.uFlash.value - dt0 * 2.6);
+   904→    u.uTime.value = t;
+   905→
+   906→    // partikel
+   907→    for (let i = this.particles.length - 1; i >= 0; i--) {
+   908→      const p = this.particles[i];
+   909→      p.life += dt;
+   910→      const k = p.life / p.maxLife;
+   911→      if (k >= 1) {
+   912→        (p.mesh.parent ?? this.scene).remove(p.mesh);
+   913→        p.mesh.geometry.dispose();
+   914→        (p.mesh.material as THREE.Material).dispose();
+   915→        this.particles.splice(i, 1);
+   916→        continue;
+   917→      }
+   918→      p.vel.y += p.gravity * dt;
+   919→      p.mesh.position.addScaledVector(p.vel, dt);
+   920→      p.mesh.rotation.z += p.rotVel * dt;
+   921→      const sc = 1 + p.grow * p.life;
+   922→      p.mesh.scale.set(sc, sc, 1);
+   923→      (p.mesh.material as THREE.MeshBasicMaterial).opacity = Math.pow(1 - k, p.fadePow);
+   924→    }
+   925→
+   926→    this.onFrame?.(dt, t);
+   927→    this.composer.render();
+   928→  }
+   929→
+   930→  private lastNow: number | null = null;
+   931→
+   932→  dispose() {
+   933→    window.removeEventListener("resize", this.onResize);
+   934→    this.renderer?.dispose();
+   935→    this.renderer?.domElement?.remove();
+   936→  }
+   937→}
+   938→

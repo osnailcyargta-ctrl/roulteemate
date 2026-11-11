@@ -230,6 +230,96 @@ body {
   animation: pulse-danger 1.1s ease-in-out infinite;
 }
 
+/* ---------- low-HP blood vignette ---------- */
+
+@keyframes blood-breathe {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.blood-vignette {
+  background: radial-gradient(
+    ellipse at center,
+    transparent 22%,
+    rgba(122, 8, 4, 0.3) 52%,
+    rgba(64, 3, 0, 0.72) 84%,
+    rgba(30, 0, 0, 0.9) 100%
+  );
+  animation: blood-breathe 1.6s ease-in-out infinite;
+  transition: opacity 0.8s ease;
+}
+
+.blood-vignette.heavy {
+  background: radial-gradient(
+    ellipse at center,
+    transparent 8%,
+    rgba(110, 6, 2, 0.42) 40%,
+    rgba(58, 2, 0, 0.85) 72%,
+    rgba(18, 0, 0, 0.96) 100%
+  );
+  animation: blood-breathe 1.05s ease-in-out infinite;
+}
+
+@keyframes blood-drip-fall {
+  0% {
+    transform: translateY(-110%);
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  72% {
+    transform: translateY(72vh);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(108vh);
+    opacity: 0;
+  }
+}
+
+.blood-drip {
+  position: absolute;
+  top: 0;
+  width: 7px;
+  border-radius: 0 0 7px 7px;
+  background: linear-gradient(
+    to bottom,
+    rgba(146, 12, 5, 0.95),
+    rgba(96, 5, 2, 0.8) 60%,
+    rgba(60, 2, 0, 0)
+  );
+  animation: blood-drip-fall 7.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  filter: drop-shadow(0 0 4px rgba(90, 0, 0, 0.6));
+}
+.drip-1 {
+  left: 14%;
+  height: 13vh;
+  animation-delay: 0s;
+}
+.drip-2 {
+  left: 38%;
+  height: 9vh;
+  animation-delay: 2.6s;
+  width: 5px;
+}
+.drip-3 {
+  left: 64%;
+  height: 15vh;
+  animation-delay: 4.4s;
+}
+.drip-4 {
+  left: 86%;
+  height: 10vh;
+  animation-delay: 6s;
+  width: 6px;
+}
+
 @keyframes wiggle {
   0%,
   100% {

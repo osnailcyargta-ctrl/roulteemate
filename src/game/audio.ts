@@ -1,7 +1,7 @@
 /**
- * audio.ts — mesin SFX prosedural (WebAudio API).
- * Tidak ada file audio eksternal; semua suara disintesis:
- * tembakan, klik blank, dadu, voodoo, detak jantung, ambient drone, dll.
+ * audio.ts — procedural SFX engine (WebAudio API).
+ * No external audio files; every sound is synthesized:
+ * gunshots, blank clicks, dice knocks, voodoo, heartbeat, ambient drone, etc.
  */
 
 export class GameAudio {
@@ -267,45 +267,65 @@ export class GameAudio {
     }
   }
 
-  /* ---------------- dadu ---------------- */
+  /* ---------------- dice (real plastic-dice knock synthesis) ---------------- */
 
+  /** One hard "clack" of dice hitting each other / the table:
+   *  a resonant body tone with a fast pitch drop + a tiny click transient.
+   *  This reads as bone/plastic knocking — never as white-noise static. */
+  private knock(when: number, freq: number, peak: number) {
+    if (!this.ctx) return;
+    const t0 = this.now() + when;
+    // body resonance (the "wood block" core)
+    const body = this.ctx.createOscillator();
+    body.type = "triangle";
+    body.frequency.setValueAtTime(freq, t0);
+    body.frequency.exponentialRampToValueAtTime(Math.max(freq * 0.55, 60), t0 + 0.07);
+    const bg = this.ctx.createGain();
+    this.env(bg, t0, peak, 0.002, 0.07);
+    body.connect(bg).connect(this.master!);
+    body.start(t0);
+    body.stop(t0 + 0.12);
+    // bright click transient on top
+    const clack = this.ctx.createOscillator();
+    clack.type = "square";
+    clack.frequency.setValueAtTime(freq * 2.6 + Math.random() * 500, t0);
+    const cg = this.ctx.createGain();
+    this.env(cg, t0, peak * 0.35, 0.001, 0.025);
+    clack.connect(cg).connect(this.master!);
+    clack.start(t0);
+    clack.stop(t0 + 0.05);
+  }
+
+  /** Shaking the dice cup: a tight irregular burst of knocks. */
   diceShake() {
     if (!this.ctx) return;
-    for (let i = 0; i < 6; i++) {
-      const t0 = this.now() + i * 0.07;
-      const src = this.noise(0.04);
-      const hp = this.ctx.createBiquadFilter();
-      hp.type = "highpass";
-      hp.frequency.value = 1800;
-      const g = this.ctx.createGain();
-      this.env(g, t0, 0.2, 0.003, 0.05);
-      src.connect(hp).connect(g).connect(this.master!);
+    let t = 0.02;
+    const n = 6 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < n; i++) {
+      this.knock(t, 900 + Math.random() * 900, 0.16 + Math.random() * 0.08);
+      t += 0.035 + Math.random() * 0.05;
     }
   }
 
+  /** Long tumble on the table: knocks get sparser and lower as the die settles. */
   diceRoll() {
     if (!this.ctx) return;
-    // rattle memanjang makin jarang
     let t = 0;
-    for (let i = 0; i < 16; i++) {
-      const t0 = this.now() + t;
-      const src = this.noise(0.03);
-      const bp = this.ctx.createBiquadFilter();
-      bp.type = "bandpass";
-      bp.frequency.value = 1200 + Math.random() * 2000;
-      bp.Q.value = 3;
-      const g = this.ctx.createGain();
-      this.env(g, t0, 0.16, 0.003, 0.04);
-      src.connect(bp).connect(g).connect(this.master!);
-      t += 0.05 + i * 0.014;
+    for (let i = 0; i < 14; i++) {
+      const k = i / 14;
+      const f = 1500 - k * 700 + Math.random() * 350;
+      this.knock(t, f, 0.2 * (1 - k * 0.4));
+      if (i % 3 === 0) this.knock(t + 0.012, f * 0.5, 0.1); // low body double-hit
+      t += 0.055 + k * 0.16 + Math.random() * 0.03;
     }
   }
 
   diceLand() {
     if (!this.ctx) return;
-    this.tone("triangle", 260, 0.1, 0.4);
-    this.tone("triangle", 520, 0.06, 0.2, 0.03);
-    this.tone("square", 3000, 0.02, 0.06, 0.04);
+    // settling thump + final clack pair
+    this.tone("sine", 190, 0.12, 0.5, 0, 70);
+    this.knock(0.0, 1250, 0.3);
+    this.knock(0.07, 900, 0.18);
   }
 
   stamp() {

@@ -1,25 +1,25 @@
 /**
- * doodle.ts — pabrik tekstur 2D bergaya doodle (hand-drawn).
- * Semua aset visual game digambar secara prosedural di canvas:
- * senjata, shell, dadu, ikon skill, musuh, partikel, dinding, dll.
- * Deterministik: setiap tekstur memakai seed tetap agar tidak berkedip.
+ * doodle.ts — 2D doodle (hand-drawn) texture factory.
+ * Every visual asset is drawn procedurally on canvas:
+ * guns, shells, dice, skill icons, the enemy, particles, walls, etc.
+ * Deterministic: every texture uses a fixed seed so nothing flickers.
  */
 
 export type SkillId =
   | "reroll"
   | "voodoo"
-  | "intuisi"
-  | "buang"
-  | "kopi"
-  | "borgol";
+  | "peek"
+  | "eject"
+  | "coffee"
+  | "cuffs";
 
 export const SKILL_IDS: SkillId[] = [
   "reroll",
   "voodoo",
-  "intuisi",
-  "buang",
-  "kopi",
-  "borgol",
+  "peek",
+  "eject",
+  "coffee",
+  "cuffs",
 ];
 
 export const SKILL_META: Record<
@@ -28,38 +28,38 @@ export const SKILL_META: Record<
 > = {
   reroll: {
     name: "REROLL",
-    tag: "Acak ulang nasib",
-    desc: "Acak ulang isi chamber SEKALI, lalu kamu WAJIB nembak di giliran ini. Cooldown 2 giliran.",
+    tag: "Reweave fate",
+    desc: "Rerandomize the chamber ONCE, then you MUST shoot this turn. 2-turn cooldown.",
     color: "#d9a441",
   },
   voodoo: {
     name: "VOODOO",
-    tag: "Kutukan 2 giliran",
-    desc: "1x per game, aktif 2 giliran: tembakan LIVE dari musuh DIPANTULKAN ke dia. Tapi kalau kamu nembak diri sendiri: BLANK = shell di-reroll + wajib nembak 1x lagi; LIVE = voodoo batal & kamu tetap kena.",
+    tag: "2-turn curse",
+    desc: "1x per game, lasts 2 turns: ANY live hit you would take is REFLECTED to the enemy — even a bullet from your own gun. Curse: shooting yourself with a BLANK rerolls the shell and forces one shot at the enemy.",
     color: "#5e9c5b",
   },
-  intuisi: {
-    name: "INTUISI",
-    tag: "Intip chamber",
-    desc: "Lihat isi chamber saat ini (LIVE atau BLANK). Cooldown 3 giliran.",
+  peek: {
+    name: "PEEK",
+    tag: "Inspect the chamber",
+    desc: "Look at the current shell (LIVE or BLANK). 3-turn cooldown.",
     color: "#7fb4c9",
   },
-  buang: {
-    name: "BUANG",
-    tag: "Eject shell",
-    desc: "Buang shell di chamber tanpa nembak. Gerakan gratis, cooldown 3 giliran.",
+  eject: {
+    name: "EJECT",
+    tag: "Toss a shell",
+    desc: "Eject the chambered shell without firing. Free action, 3-turn cooldown.",
     color: "#b08968",
   },
-  kopi: {
-    name: "KOPI",
+  coffee: {
+    name: "COFFEE",
     tag: "+1 HP",
-    desc: "Sruput kopi, pulihkan 1 HP (maksimal 4). Bisa dipakai 2x per game.",
+    desc: "Sip some hot coffee, restore 1 HP (up to max). Usable 2x per game.",
     color: "#c98a4b",
   },
-  borgol: {
-    name: "BORGOL",
-    tag: "Bekukan musuh",
-    desc: "Musuh skip 1 giliran berikutnya. Bisa dipakai 1x per game.",
+  cuffs: {
+    name: "CUFFS",
+    tag: "Freeze the enemy",
+    desc: "The enemy skips their next turn. Usable 1x per game.",
     color: "#9b8ec4",
   },
 };
@@ -291,7 +291,7 @@ function handText(
 
 /* ============================ GUNS ============================ */
 
-/** Revolver dari belakang — first person mengarah ke musuh (muzzle besar di tengah). */
+/** Revolver from behind — first person aiming at the enemy (big centered muzzle). */
 export function texGunAimEnemy() {
   return makeCanvas(
     "gun-aim-enemy",
@@ -837,7 +837,7 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       );
       break;
     }
-    case "intuisi": {
+    case "peek": {
       sketchEllipse(ctx, cx, cy, s * 0.34, s * 0.2, rng, { width: W, fill: PAPER });
       sketchCircle(ctx, cx, cy, s * 0.12, rng, { width: W * 0.9, fill: "#1d3a4a" });
       sketchCircle(ctx, cx + s * 0.04, cy - s * 0.04, s * 0.035, rng, { width: W * 0.5, fill: PAPER });
@@ -854,7 +854,7 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       }
       break;
     }
-    case "buang": {
+    case "eject": {
       ctx.fillStyle = RED;
       wobblePath(
         ctx,
@@ -903,7 +903,7 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       );
       break;
     }
-    case "kopi": {
+    case "coffee": {
       ctx.fillStyle = PAPER;
       wobblePath(
         ctx,
@@ -953,7 +953,7 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       );
       break;
     }
-    case "borgol": {
+    case "cuffs": {
       sketchCircle(ctx, cx - s * 0.2, cy + s * 0.05, s * 0.15, rng, { width: W, fill: PAPER });
       sketchCircle(ctx, cx + s * 0.2, cy + s * 0.05, s * 0.15, rng, { width: W, fill: PAPER });
       sketchCircle(ctx, cx - s * 0.2, cy + s * 0.05, s * 0.07, rng, { width: W * 0.7 });
@@ -1050,7 +1050,7 @@ export type EnemyMood =
   | "aim"
   | "scared";
 
-/** PAKDE — musuh doodle (bust). */
+/** THE DEALER — doodle enemy (bust). */
 export function texEnemy(mood: EnemyMood) {
   return makeCanvas(
     `enemy-${mood}`,
@@ -1916,7 +1916,7 @@ export function texTableTop() {
         color: "rgba(20,13,8,0.4)",
         jitter: 6,
       });
-      handText(ctx, "hidup?", 560, 760, 52, "rgba(20,13,8,0.5)", -0.15, '"Patrick Hand", cursive');
+      handText(ctx, "alive?", 560, 760, 52, "rgba(20,13,8,0.5)", -0.15, '"Patrick Hand", cursive');
       sketchCircle(ctx, 300, 300, 34, rng, { width: 5, color: "rgba(20,13,8,0.45)", jitter: 7 });
     },
     137,
@@ -1971,7 +1971,7 @@ export function texBottle() {
       ctx.fillStyle = PAPER;
       ctx.fillRect(cx - 52, 330, 104, 84);
       sketchStroke(ctx, [[cx - 52, 330], [cx + 52, 330], [cx + 52, 414], [cx - 52, 414]], rng, { width: 5, jitter: 2, close: true });
-      handText(ctx, "BERANI?", cx, 372, 30, INK, -0.06, '"Patrick Hand", cursive');
+      handText(ctx, "DARE?", cx, 372, 30, INK, -0.06, '"Patrick Hand", cursive');
       ctx.strokeStyle = "rgba(255,255,255,0.25)";
       ctx.lineWidth = 8;
       ctx.beginPath();
@@ -2027,7 +2027,7 @@ export function texShellBox() {
       ctx.fill();
       sketchStroke(ctx, [[44, 88], [276, 82], [270, 40], [50, 44]], rng, { width: 6, jitter: 3, close: true });
       handText(ctx, "6 CHAMBER", cx, 140, 34, PAPER, -0.03);
-      handText(ctx, "HATI-HATI", cx, 182, 28, "#f3d9c2", 0.04, '"Patrick Hand", cursive');
+      handText(ctx, "EASY NOW", cx, 182, 28, "#f3d9c2", 0.04, '"Patrick Hand", cursive');
     },
     145,
   );
@@ -2056,7 +2056,7 @@ export function texBoombox() {
       sketchStroke(ctx, [[70, 58], [100, 10], [220, 8], [250, 54]], rng, { width: 7, jitter: 3 });
       sketchStroke(ctx, [[286, 60], [314, -6]], rng, { width: 5, jitter: 2 });
       sketchCircle(ctx, 314, -6, 7, rng, { width: 4 });
-      handText(ctx, "MUSIK MENCEM", cx, 192, 24, "rgba(246,241,227,0.75)", 0, '"Patrick Hand", cursive');
+      handText(ctx, "MOOD MUSIC", cx, 192, 24, "rgba(246,241,227,0.75)", 0, '"Patrick Hand", cursive');
     },
     147,
   );
@@ -2107,8 +2107,8 @@ export function texPoster(seed: number, title: string) {
       for (let i = -2; i <= 2; i++) {
         sketchLine(ctx, w / 2 + i * 20, 390, w / 2 + i * 20, 416, rng, { width: 4, jitter: 1 });
       }
-      handText(ctx, "jangan takut", w / 2, 520, 40, "#4a4036", 0.03, '"Patrick Hand", cursive');
-      handText(ctx, "takut itu mewah", w / 2, 570, 40, "#4a4036", -0.02, '"Patrick Hand", cursive');
+      handText(ctx, "don't be afraid", w / 2, 520, 40, "#4a4036", 0.03, '"Patrick Hand", cursive');
+      handText(ctx, "fear is a luxury", w / 2, 570, 40, "#4a4036", -0.02, '"Patrick Hand", cursive');
       ctx.fillStyle = "rgba(120,90,40,0.18)";
       ctx.beginPath();
       ctx.ellipse(140, 600, 60, 30, 0.5, 0, Math.PI * 2);
@@ -2156,7 +2156,7 @@ export function texArrowSign() {
         rng,
         { width: 7, jitter: 4, close: true },
       );
-      handText(ctx, "JANGAN MATI", 200, 126, 52, RED_DARK, -0.02);
+      handText(ctx, "DON'T DIE", 200, 126, 52, RED_DARK, -0.02);
     },
     157,
   );

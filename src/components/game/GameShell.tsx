@@ -1,9 +1,10 @@
 "use client";
 
 /**
- * GameShell — lapisan React untuk HUD ULTIMATE ROULETTE.
- * Mount engine (Three.js) + seluruh overlay doodle: menu, HP, shell counter,
- * skill bar, toast, banner, rules, dan layar menang/kalah.
+ * GameShell — React layer for the ULTIMATE ROULETTE HUD.
+ * Mounts the engine (Three.js) plus all doodle overlays: menu, HP,
+ * shell counter, skill bar, toasts, banner, rules, win/lose screens,
+ * and the low-HP blood vignette.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -16,10 +17,10 @@ type Pop = { id: number; side: string; text: string; tone: string };
 type Splat = { id: number; url: string; left: number; top: number; size: number; rot: number };
 type Stamp = { id: number; idSkill: SkillId };
 
-const DIFFS: { id: "gampang" | "normal" | "gila"; label: string; desc: string }[] = [
-  { id: "gampang", label: "GAMPANG", desc: "HP kamu 5. PAKDE agak lemot." },
-  { id: "normal", label: "NORMAL", desc: "HP 4 vs 4. Adil dan menakutkan." },
-  { id: "gila", label: "GILA", desc: "PAKDE tajam. Persiapan mati." },
+const DIFFS: { id: "easy" | "normal" | "insane"; label: string; desc: string }[] = [
+  { id: "easy", label: "EASY", desc: "You have 5 HP. The Dealer has 1 skill." },
+  { id: "normal", label: "NORMAL", desc: "4 vs 4 HP. The Dealer has 2 skills." },
+  { id: "insane", label: "INSANE", desc: "The Dealer has 3 skills. Prepare to die." },
 ];
 
 export default function GameShell() {
@@ -36,11 +37,11 @@ export default function GameShell() {
   const [reveal, setReveal] = useState<{ shell: "live" | "blank" } | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [diff, setDiff] = useState<"gampang" | "normal" | "gila">("normal");
+  const [diff, setDiff] = useState<"easy" | "normal" | "insane">("normal");
   const [reloadPips, setReloadPips] = useState(0);
   const [flashRed, setFlashRed] = useState(false);
 
-  /* ---------- dataURL aset HUD (setelah mount, client-only) ---------- */
+  /* ---------- HUD asset dataURLs (after mount, client-only) ---------- */
   const assets = useMemo(() => {
     if (!ready) return null;
     return {
@@ -136,7 +137,7 @@ export default function GameShell() {
       engineRef.current?.dispose();
       engineRef.current = null;
     };
-     
+
   }, []);
 
   const toggleMute = useCallback(() => {
@@ -165,39 +166,55 @@ export default function GameShell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-     
-  }, [snap]);
+
+  }, [snap, toggleMute]);
 
   const eng = engineRef.current;
   const isPlayerTurn = snap?.phase === "playerTurn" && snap.turn === "player" && !snap.busy;
   const phase = snap?.phase ?? "menu";
   const inGame = phase !== "menu";
+  const lowHp = inGame && snap ? snap.hpPlayer : 0;
 
   /* ---------- render ---------- */
   return (
     <div className="fixed inset-0 overflow-hidden bg-[#0b0a08] select-none">
-      {/* dunia 3D */}
+      {/* 3D world */}
       <div ref={mountRef} className="absolute inset-0" />
 
-      {/* overlay filmis */}
+      {/* cinematic overlays */}
       <div className="pointer-events-none absolute inset-0 vignette-overlay z-10" />
       <div className="pointer-events-none absolute inset-0 grain-overlay z-10" />
       {flashRed && <div className="pointer-events-none absolute inset-0 z-10 bg-[rgba(199,62,46,0.35)]" />}
-      {snap && snap.hpPlayer === 1 && phase !== "menu" && (
-        <div className="pointer-events-none absolute inset-0 z-10 pulse-danger" />
+
+      {/* LOW-HP BLOOD VIGNETTE: starts at 2 HP, thickest at 1 HP */}
+      {snap && lowHp === 2 && (
+        <div className="pointer-events-none absolute inset-0 z-10 blood-vignette" />
       )}
-      {snap && snap.voodooPlayer > 0 && (
+      {snap && lowHp === 1 && (
+        <>
+          <div className="pointer-events-none absolute inset-0 z-10 blood-vignette heavy" />
+          <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
+            <span className="blood-drip drip-1" />
+            <span className="blood-drip drip-2" />
+            <span className="blood-drip drip-3" />
+            <span className="blood-drip drip-4" />
+          </div>
+          <div className="pointer-events-none absolute inset-0 z-10 pulse-danger" />
+        </>
+      )}
+
+      {snap && snap.voodooPlayer > 0 && phase !== "menu" && (
         <div
           className="pointer-events-none absolute inset-0 z-10"
           style={{ boxShadow: "inset 0 0 120px rgba(94,156,91,0.45)" }}
         />
       )}
 
-      {/* darah di layar */}
+      {/* blood on screen */}
       <div className="pointer-events-none absolute inset-0 z-20 overflow-hidden">
         {assets &&
           splats.map((s) => (
-             
+
             <img
               key={s.id}
               src={s.url}
@@ -230,20 +247,20 @@ export default function GameShell() {
         ))}
       </div>
 
-      {/* ================= HUD IN-GAME ================= */}
+      {/* ================= IN-GAME HUD ================= */}
       {inGame && assets && snap && (
         <>
-          {/* papan shell counter */}
+          {/* shell counter board */}
           <div className="absolute left-1/2 top-3 z-30 -translate-x-1/2">
             <div className="doodle-box px-4 py-1.5 flex items-center gap-3">
               <div className="flex items-center gap-1">
-                { }
+
                 <img src={assets.pipLive} alt="live" className="h-7 w-7" />
                 <span className="font-marker text-xl text-[#8f2418]">x{snap.live}</span>
               </div>
               <div className="h-6 w-0.5 bg-[#221a12]/30" />
               <div className="flex items-center gap-1">
-                { }
+
                 <img src={assets.pipBlank} alt="blank" className="h-7 w-7" />
                 <span className="font-marker text-xl text-[#57697c]">x{snap.blank}</span>
               </div>
@@ -261,54 +278,68 @@ export default function GameShell() {
             )}
           </div>
 
-          {/* kiri atas: ronde + tombol */}
+          {/* top left: round + buttons */}
           <div className="absolute left-2 top-2 z-30 flex flex-col gap-1.5 sm:left-3 sm:top-3 sm:gap-2">
             <div className="doodle-box doodle-dark px-2 py-0.5 font-marker text-xs rotate-[-1.5deg] sm:px-3 sm:py-1 sm:text-sm">
-              RONDE {snap.round}
+              ROUND {snap.round}
             </div>
             <div className="flex gap-1.5 sm:gap-2">
               <button
                 className="doodle-btn px-2 py-0.5 font-hand-sc text-xs sm:px-2.5 sm:py-1 sm:text-sm"
                 onClick={() => setShowHelp(true)}
-                aria-label="Cara main"
+                aria-label="How to play"
               >
-                ? CARA
+                ? RULES
               </button>
-              <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs sm:px-2.5 sm:py-1 sm:text-sm" onClick={toggleMute} aria-label="Suara">
-                {muted ? "SUARA OFF" : "SUARA ON"}
+              <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs sm:px-2.5 sm:py-1 sm:text-sm" onClick={toggleMute} aria-label="Sound">
+                {muted ? "SOUND OFF" : "SOUND ON"}
               </button>
             </div>
           </div>
 
-          {/* kanan atas: PAKDE */}
+          {/* top right: THE DEALER */}
           <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-1">
             <div className="doodle-box px-3 py-1 rotate-[1.5deg]">
-              <span className="font-marker text-lg text-[#8f2418]">PAKDE</span>
+              <span className="font-marker text-lg text-[#8f2418]">THE DEALER</span>
               {snap.voodooEnemy > 0 && (
-                 
+
                 <img src={assets.voodoo} alt="voodoo" className="ml-2 inline h-6 w-6 wiggle align-middle" />
               )}
               {snap.enemyCuffed && (
-                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">diborgol</span>
+                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">cuffed</span>
               )}
             </div>
+            {snap.enemySkills.length > 0 && (
+              <div className="doodle-box flex items-center gap-1 px-2 py-0.5 rotate-[1deg]">
+                <span className="font-hand-sc text-[10px] text-[#4a4036]">SKILLS</span>
+                {snap.enemySkills.map((s) => (
+                  <img
+                    key={s.id}
+                    src={s.icon}
+                    alt={s.id}
+                    title={SKILL_META[s.id].name}
+                    className="h-6 w-6"
+                  />
+                ))}
+              </div>
+            )}
             <div className="flex gap-1">
               {Array.from({ length: snap.maxHp }).map((_, i) => (
-                 
+
                 <img key={i} src={i < snap.hpEnemy ? assets.heartFull : assets.heartEmpty} alt="hp" className="h-8 w-8" />
               ))}
             </div>
           </div>
 
-          {/* pemain: kiri atas di mobile, kiri bawah di desktop */}
+          {/* player: top-left on mobile, bottom-left on desktop */}
           <div className="absolute left-2 top-[88px] z-30 flex flex-col gap-1 sm:left-3 sm:top-auto sm:bottom-3">
             <div className="doodle-box w-fit px-2 py-0.5 rotate-[-1.5deg] sm:px-3 sm:py-1">
-              <span className="font-marker text-sm sm:text-lg">KAMU</span>
+              <span className="font-marker text-sm sm:text-lg">YOU</span>
               {snap.voodooPlayer > 0 && (
                 <span className="ml-2 font-hand-sc text-sm text-[#5e9c5b]">voodoo {snap.voodooPlayer}</span>
               )}
               {snap.playerCuffed && (
-                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">diborgol</span>
+                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">cuffed</span>
               )}
             </div>
             <div className="flex gap-0.5 sm:gap-1">
@@ -318,16 +349,16 @@ export default function GameShell() {
             </div>
           </div>
 
-          {/* indikator giliran */}
+          {/* turn indicator */}
           <div className="pointer-events-none absolute left-1/2 top-[74px] z-20 -translate-x-1/2 sm:top-16">
             {snap.turn === "player" && (
               <div className="doodle-box px-4 py-0.5 font-marker text-[#8f2418] rotate-[-2deg] float-y">
-                GILIRANMU
+                YOUR TURN
               </div>
             )}
             {snap.turn === "enemy" && (
               <div className="doodle-box doodle-dark px-4 py-0.5 font-marker rotate-[2deg] float-y">
-                GILIRAN PAKDE...
+                THE DEALER&apos;S TURN...
               </div>
             )}
           </div>
@@ -336,7 +367,7 @@ export default function GameShell() {
           {snap.mustShoot && snap.turn === "player" && (
             <div className="pointer-events-none absolute left-1/2 top-28 z-30 -translate-x-1/2">
               <div className="doodle-box doodle-red px-4 py-1 font-marker text-xl blink-soft rotate-[-3deg]">
-                WAJIB TEMBAK!
+                YOU MUST SHOOT!
               </div>
             </div>
           )}
@@ -390,25 +421,25 @@ export default function GameShell() {
               ))}
           </div>
 
-          {/* tombol tembak */}
+          {/* shoot buttons */}
           <div className="absolute bottom-3 right-2 z-30 flex flex-row gap-2 sm:right-3 sm:flex-col">
             <button
               className={`doodle-btn doodle-red px-3 py-2.5 font-marker text-sm sm:px-5 sm:text-lg ${isPlayerTurn ? "" : "opacity-50"}`}
               disabled={!isPlayerTurn}
               onClick={() => void eng?.playerShoot("enemy")}
             >
-              TEMBAK PAKDE [E]
+              SHOOT DEALER [E]
             </button>
             <button
               className={`doodle-btn px-3 py-2.5 font-marker text-sm sm:px-5 sm:text-lg ${isPlayerTurn ? "" : "opacity-50"}`}
               disabled={!isPlayerTurn}
               onClick={() => void eng?.playerShoot("player")}
             >
-              TEMBAK DIRI [Q]
+              SHOOT SELF [Q]
             </button>
           </div>
 
-          {/* toast kiri */}
+          {/* toasts left */}
           <div className="pointer-events-none absolute left-3 top-28 z-30 flex w-64 flex-col gap-1.5">
             {toasts.map((t) => (
               <div
@@ -430,13 +461,13 @@ export default function GameShell() {
         </>
       )}
 
-      {/* stamp skill didapat */}
+      {/* skill-get stamp */}
       <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
         {assets &&
           stamps.map((s) => (
             <div key={s.id} className="stamp-in absolute flex flex-col items-center">
               <div className="doodle-box flex items-center gap-3 px-8 py-4 rotate-[-3deg]">
-                { }
+
                 <img src={snap?.skills.find((x) => x.id === s.idSkill)?.icon} alt={s.idSkill} className="h-16 w-16" />
                 <div>
                   <div className="font-marker text-3xl text-[#8f2418]">{SKILL_META[s.idSkill].name}!</div>
@@ -447,11 +478,11 @@ export default function GameShell() {
           ))}
       </div>
 
-      {/* reveal shell (intuisi) */}
+      {/* shell reveal (peek) */}
       <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
         {assets && reveal && (
           <div className="pop-in flex flex-col items-center gap-2">
-            { }
+
             <img
               src={reveal.shell === "live" ? assets.pipLive : assets.pipBlank}
               alt={reveal.shell}
@@ -469,7 +500,7 @@ export default function GameShell() {
         )}
       </div>
 
-      {/* banner tengah */}
+      {/* center banner */}
       <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
         {banner && (
           <div className="stamp-in flex flex-col items-center gap-2">
@@ -491,7 +522,7 @@ export default function GameShell() {
               </div>
               <div className="font-marker text-6xl leading-tight rotate-[1deg]">ROULETTE</div>
               <div className="mt-1 font-hand text-xl text-[#4a4036]">
-                Russian roulette 2.5D. Satu revolver. Enam chamber. Dadu penentu nasib.
+                2.5D Russian roulette. One revolver. Six chambers. Dice that decide your fate.
               </div>
             </div>
 
@@ -522,14 +553,14 @@ export default function GameShell() {
                   void eng?.startGame(diff);
                 }}
               >
-                MAJU KE MEJA
+                SIT AT THE TABLE
               </button>
               <button className="doodle-btn px-4 py-3 font-hand-sc text-lg" onClick={() => setShowHelp(true)}>
-                CARA MAIN
+                HOW TO PLAY
               </button>
             </div>
             <div className="mt-3 text-center font-hand text-sm text-[#4a4036]">
-              Q = tembak diri &middot; E = tembak PAKDE &middot; 1-6 = skill &middot; M = mute
+              Q = shoot self &middot; E = shoot the Dealer &middot; 1-6 = skills &middot; M = mute
             </div>
           </div>
         </div>
@@ -542,21 +573,21 @@ export default function GameShell() {
             <div className="text-center">
               {phase === "victory" ? (
                 <>
-                  <div className="font-marker text-5xl text-[#3f6b3d] rotate-[1deg]">KAMU HIDUP!</div>
+                  <div className="font-marker text-5xl text-[#3f6b3d] rotate-[1deg]">YOU SURVIVED!</div>
                   <div className="mt-2 font-hand text-xl">
-                    PAKDE tumbang di ronde {snap.round}. Ruangan ini resmi milikmu.
+                    The Dealer fell in round {snap.round}. This room is officially yours.
                   </div>
                 </>
               ) : (
                 <>
                   <div className="font-marker text-6xl text-[#8f2418] rotate-[-1.5deg]">GAME OVER</div>
                   <div className="mt-2 font-hand text-xl">
-                    Peluru itu buat kamu. Bertahan sampai ronde {snap.round}.
+                    That bullet was for you. You lasted until round {snap.round}.
                   </div>
                 </>
               )}
               <div className="mt-3 font-hand text-lg text-[#4a4036]">
-                HP akhir: kamu {snap.hpPlayer}/{snap.maxHp} &middot; PAKDE {snap.hpEnemy}/{snap.maxHp}
+                Final HP: you {snap.hpPlayer}/{snap.maxHp} &middot; Dealer {snap.hpEnemy}/{snap.maxHp}
               </div>
             </div>
             <div className="mt-5 flex justify-center gap-3">
@@ -564,7 +595,7 @@ export default function GameShell() {
                 className="doodle-btn doodle-red px-8 py-2.5 font-marker text-xl"
                 onClick={() => void eng?.startGame(snap.difficulty)}
               >
-                MAIN LAGI
+                PLAY AGAIN
               </button>
               <button className="doodle-btn px-6 py-2.5 font-marker text-xl" onClick={() => eng?.backToMenu()}>
                 MENU
@@ -585,28 +616,34 @@ export default function GameShell() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between">
-              <div className="font-marker text-3xl text-[#8f2418]">CARA MAIN</div>
+              <div className="font-marker text-3xl text-[#8f2418]">HOW TO PLAY</div>
               <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setShowHelp(false)}>
                 X
               </button>
             </div>
             <div className="mt-3 space-y-2 font-hand text-lg leading-snug">
               <p>
-                Di meja ada revolver 6-chamber. Tiap ronde diisi campuran shell{" "}
-                <b className="text-[#8f2418]">LIVE</b> (merah, sakit) dan <b className="text-[#57697c]">BLANK</b>{" "}
-                (biru, kosong). Jumlahnya jujur di papan atas, tapi urutannya acak.
+                On the table sits a 6-chamber revolver. Each round it is loaded with a mix of{" "}
+                <b className="text-[#8f2418]">LIVE</b> (red, hurts) and <b className="text-[#57697c]">BLANK</b>{" "}
+                (blue, empty) shells. The counts are honest on the board up top — the order is random.
               </p>
               <p>
-                Di giliranmu, pakai skill dulu kalau mau (gratis, gak pindah giliran), lalu pilih:{" "}
-                <b>TEMBAK DIRI</b> — kalau blank, kamu tetap lanjut menembak; kalau live, kamu kena dan giliran
-                pindah. <b>TEMBAK PAKDE</b> — kalau live dia kena, giliran pindah. HP habis = tamat.
+                On your turn use a skill first if you want (free, doesn&apos;t pass the turn), then choose:{" "}
+                <b>SHOOT SELF</b> — if it&apos;s a blank you automatically fire ONE free shot at the Dealer;
+                if it&apos;s live, you take the hit and the turn passes. <b>SHOOT DEALER</b> — if it&apos;s live
+                he takes the hit and the turn passes. Out of HP = over.
               </p>
               <p>
-                Chamber habis? Reload + dadu bonus memberi skill baru. PAKDE juga punya skill dan dadunya
-                sendiri. Jangan remehkan dia.
+                The opening dice grants you <b>2 skills</b> — that&apos;s all you get for the whole match.
+                The Dealer holds <b>1 skill on EASY, 2 on NORMAL, 3 on INSANE</b> (check his cards under his
+                name). Don&apos;t underestimate him.
+              </p>
+              <p className="text-[#8f2418]">
+                At 2 HP a blood vignette creeps in and your heartbeat returns. Below 3 HP, shooting yourself
+                takes a long, cruel 0.7 seconds to pull — and the bullet leaves the barrel 0.2 seconds late.
               </p>
             </div>
-            <div className="mt-4 font-marker text-2xl">6 SKILL</div>
+            <div className="mt-4 font-marker text-2xl">6 SKILLS</div>
             <div className="mt-2 space-y-2">
               {(Object.keys(SKILL_META) as SkillId[]).map((id) => (
                 <div key={id} className="flex gap-3 border-2 border-[#221a12]/20 rounded-[14px_4px_16px_6px] bg-[#efe7d2] p-2.5">
@@ -621,8 +658,8 @@ export default function GameShell() {
               ))}
             </div>
             <div className="mt-4 font-hand text-base text-[#4a4036]">
-              Tips: INTUISI dulu sebelum memutuskan. Reroll kalau chamber terasa terlalu berbahaya. Voodoo paling
-              kejam dipasang saat PAKDE sedang berani.
+              Tip: PEEK before you decide. Reroll when the chamber feels too dangerous. Voodoo is at its
+              meanest when the Dealer looks brave — every live bullet he fires at you crawls back into him.
             </div>
           </div>
         </div>

@@ -26,7 +26,7 @@ const handSC = localFont({
 export const metadata: Metadata = {
   title: "ULTIMATE ROULETTE — 2.5D Doodle Russian Roulette",
   description:
-    "Game Russian roulette first-person 2.5D bergaya doodle. Dadu skill, revolver, dan satu ruangan penuh ketegangan.",
+    "A first-person 2.5D doodle Russian roulette game. Fate dice, a revolver, and one room full of tension.",
 };
 
 export const viewport: Viewport = {
@@ -43,7 +43,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="id" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <body
         className={`${marker.variable} ${hand.variable} ${handSC.variable} antialiased`}
       >
