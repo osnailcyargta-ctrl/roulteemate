@@ -492,3 +492,73 @@ canvas {
     0 0 18px rgba(217, 164, 65, 0.5),
     4px 5px 0 rgba(0, 0, 0, 0.55);
 }
+
+/* ==================== MAIN MENU ==================== */
+
+/* the game title: swings gently like a sign on a nail, with a candle flicker */
+@keyframes title-swing {
+  0%, 100% { transform: rotate(-1.6deg); }
+  50% { transform: rotate(1.2deg); }
+}
+@keyframes title-flicker {
+  0%, 100% { text-shadow: 3px 3px 0 rgba(0, 0, 0, 0.55), 0 0 14px rgba(217, 164, 65, 0.18); }
+  42% { text-shadow: 3px 3px 0 rgba(0, 0, 0, 0.55), 0 0 22px rgba(217, 164, 65, 0.4); }
+  47% { text-shadow: 3px 3px 0 rgba(0, 0, 0, 0.55), 0 0 8px rgba(217, 164, 65, 0.12); }
+  52% { text-shadow: 3px 3px 0 rgba(0, 0, 0, 0.55), 0 0 24px rgba(217, 164, 65, 0.45); }
+}
+.menu-title {
+  animation:
+    title-swing 5.2s ease-in-out infinite,
+    title-flicker 3.1s linear infinite;
+  transform-origin: top left;
+}
+.menu-title > div:first-child {
+  animation: pop-in 0.55s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+.menu-title-mate {
+  color: #d9a441;
+}
+@keyframes tagline-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0) rotate(-1.5deg); }
+}
+.menu-tagline {
+  animation: tagline-in 0.7s ease 0.45s both;
+  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.5);
+}
+
+/* the 3 menu buttons stagger in from the bottom left */
+.menu-btn {
+  animation: pop-in 0.5s cubic-bezier(0.2, 1.4, 0.4, 1) backwards;
+  box-shadow: 3px 4px 0 rgba(0, 0, 0, 0.55);
+}
+
+/* ==================== POPUP POLISH ==================== */
+
+/* toasts: slide in from the left with a springy overshoot */
+@keyframes toast-in {
+  0% { transform: translateX(-28px) rotate(-2deg) scale(0.92); opacity: 0; }
+  62% { transform: translateX(5px) rotate(0.6deg) scale(1.03); opacity: 1; }
+  100% { transform: translateX(0) rotate(0deg) scale(1); opacity: 1; }
+}
+.toast-in {
+  animation: toast-in 0.42s cubic-bezier(0.2, 1.3, 0.4, 1) both;
+}
+/* and glide back out when they expire */
+@keyframes toast-out {
+  0% { transform: translateX(0) rotate(0deg); opacity: 1; }
+  100% { transform: translateX(-34px) rotate(-2.5deg); opacity: 0; }
+}
+.toast-out {
+  animation: toast-out 0.5s ease both;
+}
+
+/* settings sub-options unfold under their parent row */
+@keyframes expand-in {
+  from { transform: translateY(-6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.expand-in {
+  animation: expand-in 0.28s cubic-bezier(0.2, 1.2, 0.4, 1) both;
+  transform-origin: top;
+}

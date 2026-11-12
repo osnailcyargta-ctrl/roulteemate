@@ -1084,6 +1084,112 @@ export function texSkillIcon(id: SkillId) {
   );
 }
 
+/* ============================ DIFFICULTY ICONS ============================ */
+
+/** One hand-drawn icon per difficulty: a smiling shell (EASY),
+ *  a neutral die (NORMAL) and a red-eyed skull (INSANE). */
+export function texDiffIcon(id: "easy" | "normal" | "insane") {
+  return makeCanvas(
+    `diff-${id}`,
+    256,
+    256,
+    (ctx, w, h, rng) => {
+      const cx = w / 2;
+      if (id === "easy") {
+        // a happy brass shell with a big grin and two little hearts
+        ctx.fillStyle = BRASS;
+        wobblePath(ctx, [[cx - 52, 96], [cx - 40, 62], [cx + 40, 62], [cx + 52, 96], [cx + 52, 196], [cx - 52, 196]], rng, 4, true);
+        ctx.fill();
+        sketchStroke(ctx, [[cx - 52, 96], [cx - 40, 62], [cx + 40, 62], [cx + 52, 96], [cx + 52, 196], [cx - 52, 196]], rng, {
+          width: 9,
+          jitter: 3,
+          close: true,
+        });
+        ctx.fillStyle = "#e9dfae";
+        ctx.fillRect(cx - 46, 170, 92, 26);
+        sketchStroke(ctx, [[cx - 46, 170], [cx + 46, 170]], rng, { width: 6, jitter: 2 });
+        sketchStroke(ctx, [[cx - 46, 196], [cx + 46, 196]], rng, { width: 6, jitter: 2 });
+        // eyes + grin
+        sketchCircle(ctx, cx - 20, 116, 7, rng, { width: 5, fill: INK });
+        sketchCircle(ctx, cx + 20, 116, 7, rng, { width: 5, fill: INK });
+        sketchStroke(ctx, [[cx - 22, 138], [cx - 10, 150], [cx + 2, 152], [cx + 14, 148], [cx + 24, 136]], rng, { width: 6, jitter: 2 });
+        // rosy cheeks + hearts
+        sketchCircle(ctx, cx - 38, 134, 9, rng, { width: 0, fill: "rgba(199,62,46,0.35)" });
+        sketchCircle(ctx, cx + 38, 134, 9, rng, { width: 0, fill: "rgba(199,62,46,0.35)" });
+        for (const [hx, hy, s] of [[cx - 66, 70, 1], [cx + 66, 84, 0.8]] as [number, number, number][]) {
+          sketchStroke(
+            ctx,
+            [
+              [hx, hy + 14 * s],
+              [hx - 14 * s, hy - 2 * s],
+              [hx - 4 * s, hy - 12 * s],
+              [hx, hy - 4 * s],
+              [hx + 4 * s, hy - 12 * s],
+              [hx + 14 * s, hy - 2 * s],
+              [hx, hy + 14 * s],
+            ],
+            rng,
+            { width: 5, jitter: 1.5, color: "#3f6b3d", close: true },
+          );
+        }
+      } else if (id === "normal") {
+        // a fair die — three pips, dead straight face
+        ctx.fillStyle = PAPER;
+        wobblePath(ctx, [[70, 58], [190, 50], [200, 190], [58, 198]], rng, 5, true);
+        ctx.fill();
+        sketchStroke(ctx, [[70, 58], [190, 50], [200, 190], [58, 198]], rng, { width: 10, jitter: 4, close: true });
+        for (const [px, py] of [[96, 92], [160, 138], [106, 172]] as [number, number][]) {
+          sketchCircle(ctx, px, py, 13, rng, { width: 6, fill: INK });
+        }
+        // two equal arrows above: fate is balanced
+        sketchLine(ctx, 78, 34, 110, 34, rng, { width: 6 });
+        sketchStroke(ctx, [[110, 34], [100, 26]], rng, { width: 5, jitter: 1.5 });
+        sketchStroke(ctx, [[110, 34], [100, 42]], rng, { width: 5, jitter: 1.5 });
+        sketchLine(ctx, 178, 34, 146, 34, rng, { width: 6 });
+        sketchStroke(ctx, [[146, 34], [156, 26]], rng, { width: 5, jitter: 1.5 });
+        sketchStroke(ctx, [[146, 34], [156, 42]], rng, { width: 5, jitter: 1.5 });
+      } else {
+        // the INSANE skull — red eyes, gritted teeth
+        // crossed shells behind
+        for (const dir of [-1, 1]) {
+          ctx.save();
+          ctx.translate(cx, 150);
+          ctx.rotate(dir * 0.7);
+          ctx.fillStyle = dir < 0 ? BLANK_BLUE : RED;
+          wobblePath(ctx, [[-16, -84], [16, -84], [16, 60], [-16, 60]], rng, 3, true);
+          ctx.fill();
+          sketchStroke(ctx, [[-16, -84], [16, -84], [16, 60], [-16, 60]], rng, { width: 6, jitter: 2, close: true });
+          ctx.restore();
+        }
+        // skull dome
+        ctx.fillStyle = "#efe7d2";
+        sketchEllipse(ctx, cx, 118, 62, 66, rng, { width: 9, fill: "#efe7d2" });
+        // jaw
+        ctx.fillStyle = "#efe7d2";
+        wobblePath(ctx, [[cx - 34, 156], [cx + 34, 156], [cx + 26, 196], [cx - 26, 196]], rng, 3, true);
+        ctx.fill();
+        sketchStroke(ctx, [[cx - 34, 156], [cx + 34, 156], [cx + 26, 196], [cx - 26, 196]], rng, { width: 7, jitter: 2, close: true });
+        // angry red eyes
+        for (const sx of [-1, 1]) {
+          sketchEllipse(ctx, cx + sx * 26, 116, 16, 13, rng, { width: 6, fill: "#8f2418", rot: sx * 0.25 });
+          sketchLine(ctx, cx + sx * 12, 96, cx + sx * 40, 104, rng, { width: 6, color: INK });
+        }
+        // nose + teeth
+        sketchEllipse(ctx, cx, 140, 7, 6, rng, { width: 4, fill: INK });
+        for (const tx of [-18, -6, 6, 18]) {
+          sketchLine(ctx, cx + tx, 158, cx + tx, 194, rng, { width: 4, jitter: 1.5 });
+        }
+        // little crazy sparks
+        for (const [sx, sy] of [[-74, 60], [78, 52], [70, 210], [-72, 206]] as [number, number][]) {
+          sketchLine(ctx, sx - 7, sy + 6, sx + 7, sy - 6, rng, { width: 5, color: "#c73e2e" });
+          sketchLine(ctx, sx - 2, sy - 6, sx + 5, sy + 7, rng, { width: 4, color: "#c73e2e" });
+        }
+      }
+    },
+    id === "easy" ? 71 : id === "normal" ? 72 : 73,
+  );
+}
+
 /** Satu sisi dadu: ikon skill + nama. */
 export function texDieFace(id: SkillId) {
   return makeCanvas(

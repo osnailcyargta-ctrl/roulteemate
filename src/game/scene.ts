@@ -27,10 +27,6 @@ import {
   texFloor,
   texCeiling,
   texTableTop,
-  texBottle,
-  texCards,
-  texShellBox,
-  texBoombox,
   texPoster,
   texArrowSign,
   texPriceTag,
@@ -209,7 +205,18 @@ export class RouletteScene {
   private shopItems = new Map<SkillId, ShopItem>();
   private shopHitboxes: THREE.Mesh[] = [];
   private shopAnims: { id: SkillId; item: ShopItem; t0: number }[] = [];
+  /** Props leaving the table with style (bell rings → everything flies to THE DEALER). */
+  private vanishAnims: {
+    obj: THREE.Object3D;
+    t0: number;
+    from: THREE.Vector3;
+    rot: THREE.Euler;
+    spin: boolean;
+    disposable: boolean;
+  }[] = [];
   private shopTexCache = new Map<string, THREE.Texture>();
+  /** true while the shop props are mid-vanish (blocks idle animations). */
+  private shopVanishing = false;
 
   /* spent-shell trail: every fired shell lands on the table's front edge
      so both sides can physically recount the round at any moment */
@@ -228,9 +235,20 @@ export class RouletteScene {
     "player" | "enemy",
     { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; born: number; attached: boolean }
   >();
-  private coffeeCup!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>;
-  private coffeeHome = new THREE.Vector3(-0.88, 0.99, 0.26);
+  /* COFFEE: a real mug per side of the table — yours and THE DEALER's.
+     COFFEE lifts the drinker's own mug for a genuine sip. */
+  private coffeeCups!: Record<"player" | "enemy", THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>>;
+  private coffeeHomes: Record<"player" | "enemy", THREE.Vector3> = {
+    player: new THREE.Vector3(-0.88, 0.99, 0.26),
+    enemy: new THREE.Vector3(0.72, 0.99, -0.74),
+  };
   private coffeeBusy = false;
+  /* CUFFS: the steel bracelet lies on the RIGHT side of the table,
+     mid-depth — it is picked up for real before the interrogation. */
+  private cuffProp!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
+  private cuffPropHome = new THREE.Vector3(0.98, 1.07, -0.22);
+  private cuffPropGone = false;
+  private cuffPropPopT = 0;
   private dollyTarget = new THREE.Vector3(0, 0, 0);
   private gunSpinT = 0;
   private gunPeeking = false;
@@ -305,9 +323,12 @@ export class RouletteScene {
 
   private buildRoom() {
     const floorTex = ctex(texFloor(), [2, 2]);
+    // everything in the room is FULLY MATTE: real-world diffuse light only,
+    // nothing bounces a highlight back into the camera. The glossy surfaces
+    // are reserved for the table, the coffee mugs, the bell and the cuffs.
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(11, 11),
-      new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.92 }),
+      new THREE.MeshStandardMaterial({ map: floorTex, roughness: 1, metalness: 0 }),
     );
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
@@ -316,7 +337,7 @@ export class RouletteScene {
     const ceilTex = ctex(texCeiling(), [2, 2]);
     const ceil = new THREE.Mesh(
       new THREE.PlaneGeometry(11, 11),
-      new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 1 }),
+      new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 1, metalness: 0 }),
     );
     ceil.rotation.x = Math.PI / 2;
     ceil.position.y = 3.5;
@@ -325,7 +346,7 @@ export class RouletteScene {
     const mkWall = (tex: HTMLCanvasElement, w: number, h: number) =>
       new THREE.Mesh(
         new THREE.PlaneGeometry(w, h),
-        new THREE.MeshStandardMaterial({ map: ctex(tex), roughness: 0.95 }),
+        new THREE.MeshStandardMaterial({ map: ctex(tex), roughness: 1, metalness: 0 }),
       );
 
     const back = mkWall(texWall(5, "HA HA HA"), 11, 3.5);
@@ -376,22 +397,8 @@ export class RouletteScene {
     sign.rotation.z = 0.06;
     this.scene.add(sign);
 
-    // crate + boombox di pojok kiri
-    const crate = new THREE.Mesh(
-      new THREE.BoxGeometry(0.55, 0.55, 0.55),
-      new THREE.MeshStandardMaterial({ color: 0x4a3a26, roughness: 0.95 }),
-    );
-    crate.position.set(-3.6, 0.275, -2.7);
-    crate.rotation.y = 0.4;
-    crate.castShadow = true;
-    this.scene.add(crate);
-    const boombox = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.62, 0.5),
-      doodleMat(ctex(texBoombox()), { lit: true }),
-    );
-    boombox.position.set(-3.6, 0.85, -2.7);
-    boombox.rotation.y = 0.35;
-    this.scene.add(boombox);
+    // (corner crate + boombox were removed — the room is deliberately bare:
+    // only the table, its props and THE DEALER carry the scene now)
   }
 
   private buildLights() {
@@ -405,14 +412,19 @@ export class RouletteScene {
 
     const wire = new THREE.Mesh(
       new THREE.CylinderGeometry(0.012, 0.012, 0.62, 6),
-      new THREE.MeshStandardMaterial({ color: 0x14100c }),
+      new THREE.MeshStandardMaterial({ color: 0x14100c, roughness: 1, metalness: 0 }),
     );
     wire.position.y = -0.31;
     this.lampPivot.add(wire);
 
     const shade = new THREE.Mesh(
       new THREE.ConeGeometry(0.34, 0.3, 24, 1, true),
-      new THREE.MeshStandardMaterial({ color: 0x233324, roughness: 0.7, side: THREE.DoubleSide }),
+      new THREE.MeshStandardMaterial({
+        color: 0x233324,
+        roughness: 1,
+        metalness: 0,
+        side: THREE.DoubleSide,
+      }),
     );
     shade.position.y = -0.68;
     shade.castShadow = true;
@@ -448,16 +460,23 @@ export class RouletteScene {
   }
 
   private buildTable() {
+    // the tabletop is one of the few GLOSSY surfaces: the lamp reads as a
+    // real specular sheen sliding across the wood (light reflects back)
     const top = new THREE.Mesh(
       new THREE.BoxGeometry(2.7, 0.09, 1.35),
-      new THREE.MeshStandardMaterial({ map: ctex(texTableTop()), roughness: 0.85 }),
+      new THREE.MeshStandardMaterial({ map: ctex(texTableTop()), roughness: 0.3, metalness: 0.06 }),
     );
     top.position.set(0, 0.86, -0.25);
     top.castShadow = true;
     top.receiveShadow = true;
     this.scene.add(top);
 
-    const legMat = new THREE.MeshStandardMaterial({ color: 0x2e2117, roughness: 0.95 });
+    // legs stay fully matte — real-world diffuse, no highlight toward the camera
+    const legMat = new THREE.MeshStandardMaterial({
+      color: 0x2e2117,
+      roughness: 1,
+      metalness: 0,
+    });
     for (const [lx, lz] of [
       [-1.2, -0.75],
       [1.2, -0.75],
@@ -470,31 +489,9 @@ export class RouletteScene {
       this.scene.add(leg);
     }
 
-    // props doodle di meja (billboard 2D)
-    // (the old table gun doodle was removed — the bell owns the left side now)
-    const box = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.34, 0.27),
-      doodleMat(ctex(texShellBox()), { lit: true }),
-    );
-    box.position.set(0.85, 1.05, -0.42);
-    box.rotation.y = -0.25;
-    this.scene.add(box);
-
-    const cards = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.26, 0.26),
-      doodleMat(ctex(texCards()), { lit: true }),
-    );
-    cards.position.set(-0.55, 0.95, 0.3);
-    cards.rotation.x = -0.42;
-    this.scene.add(cards);
-
-    const bottle = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.2, 0.4),
-      doodleMat(ctex(texBottle()), { lit: true }),
-    );
-    bottle.position.set(-1.05, 1.13, -0.6);
-    bottle.rotation.y = 0.5;
-    this.scene.add(bottle);
+    // (all decorative table clutter was removed — the table now only ever
+    // carries what gameplay puts on it: coffee mugs, the bell, the cuffs,
+    // the shop mat with its cards and the spent-shell trail)
   }
 
   private buildEnemy() {
@@ -585,19 +582,56 @@ export class RouletteScene {
 
   /* ---------------- physical skill props (real VFX) ---------------- */
 
+  /** A glossy doodle-prop material: lit, bright even in shadow, and with a
+   *  real specular glint — reserved for the four reflective props
+   *  (table / coffee / bell / cuffs). */
+  private glossyDoodleMat(tex: THREE.Texture, shine = 0.28): THREE.MeshStandardMaterial {
+    return new THREE.MeshStandardMaterial({
+      map: tex,
+      transparent: true,
+      alphaTest: 0.02,
+      side: THREE.DoubleSide,
+      emissive: new THREE.Color(0x8a8378),
+      emissiveMap: tex,
+      emissiveIntensity: 0.62,
+      roughness: shine,
+      metalness: 0.35,
+    });
+  }
+
   private buildSkillProps() {
-    // steaming coffee mug on the table — COFFEE lifts it up for a real sip
-    this.coffeeCup = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.15, 0.19),
-      doodleMat(ctex(texCoffeeCup()), { lit: true }) as THREE.MeshLambertMaterial,
+    // TWO steaming coffee mugs — one per side of the table.
+    // COFFEE lifts the drinker's own mug for a real sip.
+    const mkCup = (home: THREE.Vector3, tiltY: number) => {
+      const cup = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.15, 0.19),
+        this.glossyDoodleMat(ctex(texCoffeeCup()), 0.22),
+      );
+      cup.position.copy(home);
+      cup.rotation.y = tiltY;
+      cup.renderOrder = 6;
+      cup.castShadow = true;
+      // the mug must read bright even where the spotlight barely reaches
+      cup.material.emissiveIntensity = 1.25;
+      this.scene.add(cup);
+      return cup;
+    };
+    this.coffeeCups = {
+      player: mkCup(this.coffeeHomes.player, 0.14), // your side, front-left
+      enemy: mkCup(this.coffeeHomes.enemy, -0.2), // THE DEALER's side, back-right
+    };
+
+    // the handcuffs lie on the table — right side, mid-depth — until
+    // someone really picks them up (CUFFS) and snaps them onto wrists
+    this.cuffProp = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.5, 0.33),
+      this.glossyDoodleMat(ctex(texCuffsProp()), 0.26),
     );
-    this.coffeeCup.position.copy(this.coffeeHome);
-    this.coffeeCup.rotation.y = 0.14;
-    this.coffeeCup.renderOrder = 6;
-    this.coffeeCup.castShadow = true;
-    // the mug must read bright even where the spotlight barely reaches
-    (this.coffeeCup.material as THREE.MeshLambertMaterial).emissiveIntensity = 1.25;
-    this.scene.add(this.coffeeCup);
+    this.cuffProp.position.copy(this.cuffPropHome);
+    this.cuffProp.rotation.y = 0.3;
+    this.cuffProp.renderOrder = 6;
+    this.cuffProp.castShadow = true;
+    this.scene.add(this.cuffProp);
 
     // handcuffs that snap onto THE DEALER's wrists
     this.cuffsMesh = new THREE.Mesh(
@@ -625,17 +659,101 @@ export class RouletteScene {
     this.dollyTarget.set(0, 0, 0);
   }
 
-  /** Snap the handcuffs onto the DEALER (or take them off). */
+  /** Snap the handcuffs onto the DEALER (or take them off).
+   *  Off: the bracelet pops back onto its table spot with a dust puff. */
   dealerCuffed(show: boolean) {
-    if (show === this.cuffsShown) return;
+    if (show === this.cuffsShown) {
+      // still keep the table-prop state consistent on hard resets
+      if (!show && this.cuffPropGone && !this.cuffProp.visible) this.cuffPropReturn(true);
+      return;
+    }
     this.cuffsShown = show;
     this.cuffsMesh.visible = show;
     if (show) {
       this.cuffsPopT = 1;
       const at = this.cuffsMesh.position.clone();
-      this.sparkBurst(at, 8);
+      this.sparkBurst(at, 10);
       this.ringBurst(at, 0.55);
+      this.addTrauma(0.3);
+      this.setAberration(1.4);
+      setTimeout(() => this.setAberration(0), 300);
+    } else if (this.cuffPropGone) {
+      this.cuffPropReturn(false);
     }
+  }
+
+  /** The cuff bracelet pops back onto its home spot on the table. */
+  private cuffPropReturn(instant: boolean) {
+    this.cuffPropGone = false;
+    this.cuffProp.visible = true;
+    if (instant) {
+      this.cuffProp.position.copy(this.cuffPropHome);
+      this.cuffProp.scale.setScalar(1);
+      this.cuffPropPopT = 0;
+      return;
+    }
+    this.dustPuff(this.cuffPropHome.clone(), 5);
+    this.ringBurst(this.cuffPropHome.clone(), 0.35);
+    this.cuffPropPopT = 1; // easeOutBack pop, driven in render()
+  }
+
+  /** CUFFS step 1 — pick the bracelet up off the table into your hands. */
+  cuffPickupFX(): Promise<void> {
+    if (this.cuffPropGone) return Promise.resolve();
+    this.cuffPropGone = true;
+    const prop = this.cuffProp;
+    const from = prop.position.clone();
+    const cam = this.camera.getWorldPosition(new THREE.Vector3());
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const to = cam.addScaledVector(dir, 0.55).add(new THREE.Vector3(0.24, -0.16, 0));
+    const start = performance.now();
+    return new Promise<void>((resolve) => {
+      const step = () => {
+        const t = Math.min(1, (performance.now() - start) / 620);
+        const e = 1 - Math.pow(1 - t, 1.7);
+        prop.position.lerpVectors(from, to, e);
+        prop.position.y += Math.sin(t * Math.PI) * 0.24;
+        prop.rotation.z = Math.sin(t * Math.PI * 2.2) * 0.5 * (1 - t);
+        prop.lookAt(this.camera.getWorldPosition(new THREE.Vector3()));
+        prop.rotateY(0.25);
+        prop.scale.setScalar(1 + t * 1.3);
+        if (t < 1) requestAnimationFrame(step);
+        else {
+          prop.visible = false;
+          this.ringBurst(to, 0.3);
+          resolve();
+        }
+      };
+      requestAnimationFrame(step);
+    });
+  }
+
+  /** The DEALER scoops the bracelet off the table (he is cuffing YOU). */
+  cuffGrabFX(): Promise<void> {
+    if (this.cuffPropGone) return Promise.resolve();
+    this.cuffPropGone = true;
+    const prop = this.cuffProp;
+    const from = prop.position.clone();
+    const to = this.enemyWorldPos().add(new THREE.Vector3(0.18, 0.18, 0.42));
+    const start = performance.now();
+    return new Promise<void>((resolve) => {
+      const step = () => {
+        const t = Math.min(1, (performance.now() - start) / 480);
+        const e = 1 - Math.pow(1 - t, 2);
+        prop.position.lerpVectors(from, to, e);
+        prop.position.y += Math.sin(t * Math.PI) * 0.2;
+        prop.rotation.z = Math.sin(t * Math.PI * 2) * 0.6;
+        prop.lookAt(this.camera.getWorldPosition(new THREE.Vector3()));
+        prop.scale.setScalar(1 - t * 0.35);
+        if (t < 1) requestAnimationFrame(step);
+        else {
+          prop.visible = false;
+          this.sparkBurst(to, 5);
+          resolve();
+        }
+      };
+      requestAnimationFrame(step);
+    });
   }
 
   /** The voodoo doll rises: for the player it dangles before the camera,
@@ -702,13 +820,14 @@ export class RouletteScene {
     }
   }
 
-  /** COFFEE: the mug rises from the table, tilts for two real gulps in
-   *  front of the drinker, then settles back on its saucer. */
+  /** COFFEE: the drinker's OWN mug rises from their side of the table,
+   *  tilts for two real gulps in front of them, then settles back on the
+   *  table. You drink yours, THE DEALER drinks his. */
   coffeeDrinkFX(who: "player" | "enemy"): Promise<void> {
     if (this.coffeeBusy) return Promise.resolve();
     this.coffeeBusy = true;
-    const cup = this.coffeeCup;
-    const from = this.coffeeHome.clone();
+    const cup = this.coffeeCups[who];
+    const from = this.coffeeHomes[who].clone();
     const cam = this.camera.getWorldPosition(new THREE.Vector3());
     const dir = this.camera.getWorldDirection(new THREE.Vector3());
     const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
@@ -962,25 +1081,66 @@ export class RouletteScene {
     });
   }
 
-  /** Remove every shop prop from the table. */
+  /** Remove every shop prop from the table — WITH a show: the cards leap
+   *  into THE DEALER's waiting hands one by one (spin, shrink, fade), the
+   *  bell, the note and the felt mat follow, and a farewell dust puff
+   *  closes the stall. */
   hideShopItems() {
-    if (!this.shopItems.size && !this.shopMat.visible && !this.shopBell?.visible) return;
-    for (const [, it] of this.shopItems) {
-      this.scene.remove(it.group);
-      it.group.traverse((o) => {
-        if (o instanceof THREE.Mesh) {
-          o.geometry.dispose();
-          (o.material as THREE.Material).dispose();
-        }
+    if (!this.shopItems.size && !this.shopMat.visible && !this.shopBell?.visible && !this.bellProps.visible)
+      return;
+    const now = performance.now();
+    let delay = 0;
+    for (const [id, it] of this.shopItems) {
+      this.vanishAnims.push({
+        obj: it.group,
+        t0: now + delay,
+        from: it.group.position.clone(),
+        rot: it.group.rotation.clone(),
+        spin: true,
+        disposable: true,
       });
+      this.shopItems.delete(id);
+      delay += 95;
     }
-    this.shopItems.clear();
     this.shopHitboxes = [];
     this.shopAnims = [];
-    this.shopMat.visible = false;
-    if (this.shopBell) this.shopBell.visible = false;
-    this.bellProps.visible = false;
+    if (this.shopBell?.visible) {
+      this.vanishAnims.push({
+        obj: this.shopBell,
+        t0: now + delay,
+        from: this.shopBell.position.clone(),
+        rot: this.shopBell.rotation.clone(),
+        spin: true,
+        disposable: false,
+      });
+      delay += 120;
+    }
+    if (this.bellProps.visible) {
+      this.vanishAnims.push({
+        obj: this.bellProps,
+        t0: now + delay,
+        from: this.bellProps.position.clone(),
+        rot: this.bellProps.rotation.clone(),
+        spin: false,
+        disposable: false,
+      });
+      delay += 70;
+    }
+    if (this.shopMat.visible) {
+      this.vanishAnims.push({
+        obj: this.shopMat,
+        t0: now + delay,
+        from: this.shopMat.position.clone(),
+        rot: this.shopMat.rotation.clone(),
+        spin: false,
+        disposable: false,
+      });
+    }
     this.bellHover = false;
+    this.bellRingT = 0;
+    this.shopVanishing = true;
+    // one farewell dust puff where the stall stood
+    this.dustPuff(new THREE.Vector3(0.18, 0.97, 0.08), 7);
   }
 
   /** Raycast the table props. */
@@ -1141,6 +1301,31 @@ export class RouletteScene {
 
   setLampBoost(v: number) {
     this.lampBoost = v;
+  }
+
+  /* ---------------- graphics quality (SETTINGS) ---------------- */
+
+  /** LOW drops shadows + bloom and renders at 0.75x; MEDIUM balances;
+   *  HIGH is the full cinematic pipeline. */
+  setQuality(q: "low" | "medium" | "high") {
+    if (!this.renderer) return;
+    const el = this.renderer.domElement.parentElement;
+    const w = el?.clientWidth ?? window.innerWidth;
+    const h = el?.clientHeight ?? window.innerHeight;
+    const dpr = q === "low" ? 0.75 : q === "medium" ? 1.2 : Math.min(window.devicePixelRatio, 1.75);
+    this.renderer.setPixelRatio(dpr);
+    this.renderer.setSize(w, h);
+    this.composer.setPixelRatio(dpr);
+    this.composer.setSize(w, h);
+    const shadows = q !== "low";
+    if (this.renderer.shadowMap.enabled !== shadows) {
+      this.renderer.shadowMap.enabled = shadows;
+      this.spot.castShadow = shadows;
+      this.scene.traverse((o) => {
+        if (o instanceof THREE.Mesh && o.material) (o.material as THREE.Material).needsUpdate = true;
+      });
+    }
+    this.bloomPass.enabled = q !== "low";
   }
 
   private spawn(
@@ -1346,14 +1531,14 @@ export class RouletteScene {
     this.gunRecoil = 1;
   }
 
-  /** PEEK: the revolver swings up for inspection, cylinder swung open. */
+  /** PEEK: the revolver swings up CLOSE to your eyes, cylinder swung open. */
   gunPeek(show: boolean) {
     this.gunPeeking = show;
     if (show) {
       this.gunMesh.visible = true;
       this.gunMesh.material.map = this.gunAimTex.open;
-      this.gunTarget.set(0.34, -0.2, -0.66);
-      this.gunMesh.scale.setScalar(0.95);
+      this.gunTarget.set(0.12, -0.1, -0.48); // right up against the lens
+      this.gunMesh.scale.setScalar(1.08);
     } else {
       this.gunTarget.set(0, -0.52, -0.8);
       this.gunMesh.scale.setScalar(1);
@@ -1563,7 +1748,55 @@ export class RouletteScene {
         }
       }
     }
-    if (this.shopBell) {
+    // shop vanish: the props leap into THE DEALER's hands, spin, shrink, fade
+    if (this.vanishAnims.length) {
+      for (let i = this.vanishAnims.length - 1; i >= 0; i--) {
+        const v = this.vanishAnims[i];
+        const k = (nowMs - v.t0) / 620;
+        if (k < 0) continue;
+        if (k >= 1) {
+          if (v.disposable) {
+            this.scene.remove(v.obj);
+            v.obj.traverse((o) => {
+              if (o instanceof THREE.Mesh) {
+                o.geometry.dispose();
+                (o.material as THREE.Material).dispose();
+              }
+            });
+          } else {
+            // persistent props (bell / mat / coaster set) rest until the next break
+            v.obj.visible = false;
+            v.obj.position.copy(v.from);
+            v.obj.rotation.copy(v.rot);
+            v.obj.scale.setScalar(1);
+            v.obj.traverse((o) => {
+              const m = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+              if (m && "opacity" in m) m.opacity = 1;
+            });
+          }
+          this.vanishAnims.splice(i, 1);
+          continue;
+        }
+        const e = k * k;
+        v.obj.position.set(
+          v.from.x + (0.1 - v.from.x) * e,
+          v.from.y + Math.sin(Math.min(1, k) * Math.PI) * 0.42 + e * 0.5,
+          v.from.z + (-1.3 - v.from.z) * e,
+        );
+        v.obj.scale.setScalar(Math.max(0.02, 1 - k * 0.95));
+        if (v.spin) v.obj.rotation.y += dt0 * 9;
+        v.obj.traverse((o) => {
+          const m = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+          if (m && "opacity" in m) {
+            m.transparent = true;
+            m.opacity = 1 - k;
+          }
+        });
+      }
+    } else if (this.shopVanishing) {
+      this.shopVanishing = false;
+    }
+    if (this.shopBell && !this.shopVanishing) {
       const b = this.shopBell;
       this.bellHoverK += ((this.bellHover ? 1 : 0) - this.bellHoverK) * Math.min(1, dt0 * 10);
       b.position.y = 0.918 + this.bellHoverK * 0.05;
@@ -1575,7 +1808,8 @@ export class RouletteScene {
       }
     }
 
-    // skill props: cuffs snap-pop, voodoo dolls dangling, coffee idle bob
+    // skill props: cuffs snap-pop, cuff-bracelet idle shimmer, voodoo dolls
+    // dangling, coffee mugs idly breathing on their sides of the table
     if (this.cuffsMesh.visible) {
       const cq = this.camera.getWorldQuaternion(new THREE.Quaternion());
       this.cuffsMesh.quaternion.copy(cq);
@@ -1588,6 +1822,17 @@ export class RouletteScene {
         this.cuffsMesh.scale.setScalar(1);
         this.cuffsMesh.position.y = this.enemyBasePos.y - 0.34 + Math.sin(t * 2.4) * 0.012;
         this.cuffsMesh.rotateZ(Math.sin(t * 1.7) * 0.035);
+      }
+    }
+    // the cuff bracelet on the table: gentle bob, and a pop when it returns
+    if (this.cuffProp.visible) {
+      this.cuffProp.position.y = this.cuffPropHome.y + Math.sin(t * 1.9) * 0.006;
+      this.cuffProp.rotation.z = Math.sin(t * 1.3) * 0.02;
+      if (this.cuffPropPopT > 0) {
+        this.cuffPropPopT = Math.max(0, this.cuffPropPopT - dt0 * 2.4);
+        const p = 1 - this.cuffPropPopT;
+        const e = 1 + 2.7 * Math.pow(p - 1, 3) + 1.7 * Math.pow(p - 1, 2);
+        this.cuffProp.scale.setScalar(Math.max(0.01, e));
       }
     }
     for (const [, d] of this.voodooDolls) {
@@ -1605,7 +1850,10 @@ export class RouletteScene {
       }
     }
     if (!this.coffeeBusy) {
-      this.coffeeCup.position.y = this.coffeeHome.y + Math.sin(t * 1.8) * 0.004;
+      for (const side of ["player", "enemy"] as const) {
+        const cup = this.coffeeCups[side];
+        cup.position.y = this.coffeeHomes[side].y + Math.sin(t * 1.8 + (side === "enemy" ? 2.1 : 0)) * 0.004;
+      }
     }
 
     // spent-shell trail: land, billboard toward the camera

@@ -702,6 +702,9 @@ export class GameEngine {
       this.scene.flash(0.65);
       this.scene.setDesat(0.2);
       setTimeout(() => this.scene.setDesat(0), 700);
+      // golden fire everywhere around you
+      this.scene.sparkBurst(this.scene.muzzleWorldPos(), 16);
+      this.scene.ringBurst(this.scene.muzzleWorldPos(), 1.1);
       this.registerGhost("phoenix");
       this.scene.enemySetMood("scared");
       this.scene.enemySay([pick("phoenix")], 2.6);
@@ -836,7 +839,8 @@ export class GameEngine {
       case "peek": {
         gameAudio.scanDing();
         if (isPlayer) {
-          this.scene.gunPeek(true); // the revolver swings up close to your eyes
+          this.scene.gunPeek(true); // the revolver swings up CLOSE to your eyes
+          this.scene.ringBurst(this.scene.muzzleWorldPos(), 0.5); // scanner ring over the barrel
           this.onEvent({ type: "shellReveal", shell: oc.revealed ?? null });
           this.toast(oc.revealed ? `PEEK: this shell is ${oc.revealed.toUpperCase()}!` : "PEEK: chamber empty?", "info");
           await sleep(1600);
@@ -876,19 +880,25 @@ export class GameEngine {
       case "cuffs": {
         gameAudio.cuffs();
         if (isPlayer) {
-          // interrogation push-in: the camera marches right up to the DEALER
+          // 1) really GRAB the steel bracelet off the table first
+          this.toast("You pick up the steel cuffs off the table...", "info");
+          await this.scene.cuffPickupFX();
+          await sleep(160);
+          // 2) interrogation push-in: the camera marches right up to the DEALER
           this.scene.dollyToDealer();
           this.scene.enemySetMood("scared");
-          await sleep(700);
-          this.scene.dealerCuffed(true); // SNAP — real cuffs on his wrists
           this.scene.enemySay([pick("cuffed")], 2.2);
+          await sleep(800);
+          // 3) SNAP — the cuffs lock around his wrists
+          this.scene.dealerCuffed(true); // sparks + ring + snap
           this.toast("THE DEALER IS CUFFED! He skips his next turn.", "good");
           await sleep(1000);
           this.scene.dollyHome();
           await sleep(450);
         } else {
-          this.toast("The DEALER cuffs you!", "bad");
-          await this.scene.cuffsAtCameraFX(); // the cuffs fly at YOUR wrists
+          this.toast("The DEALER grabs the cuffs — and locks YOUR wrists!", "bad");
+          await this.scene.cuffGrabFX(); // he scoops the bracelet off the table
+          await this.scene.cuffsAtCameraFX(); // ...and flings it at YOUR hands
         }
         break;
       }
@@ -976,6 +986,11 @@ export class GameEngine {
 
   skillIconOf(id: SkillId) {
     return dataURL(`icon-${id}`, texSkillIcon(id));
+  }
+
+  /** SETTINGS: graphics preset passthrough. */
+  setSceneQuality(q: "low" | "medium" | "high") {
+    this.scene.setQuality(q);
   }
 
   /* ---------------- ghosts (spent trials fading away) ---------------- */
