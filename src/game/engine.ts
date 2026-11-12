@@ -516,6 +516,25 @@ export class GameEngine {
     await this.playSkillFx("player", id, oc);
     this.notify();
     this.checkHealthFx();
+
+    // EJECT on the LAST shell empties the cylinder — nothing left to fire,
+    // so the round ends RIGHT HERE: shop break, reload, pass the turn.
+    if (this.logic.isEmpty) {
+      this.toast("CHAMBER EMPTY — the round is over!", "info");
+      await sleep(900);
+      await this.maybeShopAndReload();
+      const next = this.passTurn();
+      this.notify();
+      if (next === "player") {
+        this.toast("THE DEALER IS CUFFED! Your turn again.", "good");
+        await sleep(700);
+        await this.playerTurnStart();
+      } else {
+        await this.enemyTurnStart();
+      }
+      return;
+    }
+
     await sleep(450);
     this.busy = false;
     this.notify();
@@ -647,7 +666,17 @@ export class GameEngine {
 
     if (out.voodooReroll) {
       gameAudio.blankClick();
-      this.toast("VOODOO: blank rerolled — a FRESH shell enters the chamber! Now FIRE at the enemy!", "voodoo");
+      if (shooterIsPlayer) {
+        this.toast("VOODOO: blank rerolled — a FRESH shell enters the chamber! Now FIRE at the enemy!", "voodoo");
+      } else {
+        // the DEALER just grew the magazine — make it impossible to miss:
+        this.onEvent({
+          type: "banner",
+          title: "FRESH SHELL LOADED",
+          sub: "VOODOO rerolled the DEALER's blank — one MORE shell just entered the chamber. The count has changed!",
+        });
+        this.toast("VOODOO: the DEALER's blank rerolled — a FRESH shell enters! He must fire at YOU!", "voodoo");
+      }
       await sleep(700);
       gameAudio.spinCylinder();
       this.scene.addTrauma(0.25);
