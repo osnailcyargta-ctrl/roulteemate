@@ -13,7 +13,7 @@
  * The enemy never reads the cylinder; it tracks what it has observed and
  * (on lower difficulties) misremembers from time to time.
  *
- * HP: EASY 6 vs 6 · NORMAL you 5 vs the DEALER's 6 · INSANE you 4 vs his 7.
+ * HP: EASY you 6 vs 5 · NORMAL 5 vs 5 · INSANE you 4 vs his 5.
  *
  * SKILLS (player starts with exactly 2 from the opening dice and can buy
  * 1-use SHOP TRIALS up to 4 held skills; the enemy owns 1 on EASY, 2 on
@@ -148,12 +148,13 @@ export class RouletteLogic {
   }
 
   freshState(difficulty: Difficulty): GameState {
+    // The DEALER always sits at 5 HP — easy to hurt, hard to outdraw.
     const maxHp: Record<Side, number> =
       difficulty === "easy"
-        ? { player: 6, enemy: 6 }
+        ? { player: 6, enemy: 5 }
         : difficulty === "normal"
-          ? { player: 5, enemy: 6 } // the Dealer always sits at 6
-          : { player: 4, enemy: 7 }; // INSANE: the Dealer out-lives you by far
+          ? { player: 5, enemy: 5 }
+          : { player: 4, enemy: 5 }; // INSANE: fewer hearts, same dealer
     return {
       phase: "dice",
       round: 0,

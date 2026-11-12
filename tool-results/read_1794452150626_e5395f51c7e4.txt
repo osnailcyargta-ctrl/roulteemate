@@ -1,0 +1,1089 @@
+     1→/**
+     2→ * engine.ts — orchestrator of ULTIMATE ROULETTE.
+     3→ * Connects logic (rules), scene (Three.js), audio and the React HUD.
+     4→ * Contains: the opening dice intro (2 skills for the player, 1/2/3 for the
+     5→ * enemy by difficulty), between-round reloads, player/AI turn flow and the
+     6→ * full VFX timeline (shakes, blood, flash, slow-mo, low-HP dread...).
+     7→ */
+     8→
+     9→import * as THREE from "three";
+    10→import { RouletteScene } from "./scene";
+    11→import {
+    12→  RouletteLogic,
+    13→  EnemyAI,
+    14→  enemySkillCount,
+    15→  type AIDecision,
+    16→  type Difficulty,
+    17→  type ShotOutcome,
+    18→  type Side,
+    19→  type SkillOutcome,
+    20→  type ShellType,
+    21→} from "./logic";
+    22→import { SKILL_IDS, SKILL_META, ALL_SKILL_IDS, texDieFace, texSkillIcon, dataURL, type SkillId } from "./doodle";
+    23→import { gameAudio } from "./audio";
+    24→import { pick } from "./taunts";
+    25→
+    26→const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    27→const rnd = (a: number, b: number) => a + Math.random() * (b - a);
+    28→
+    29→export interface HudSkillSlot {
+    30→  id: SkillId;
+    31→  owned: boolean;
+    32→  charges: number;
+    33→  cooldown: number;
+    34→  usable: boolean;
+    35→  icon: string;
+    36→  trial: boolean; // shop trial (1 use)
+    37→  ghostTurns: number; // > 0 = used, currently fading away
+    38→}
+    39→
+    40→export interface HudSnapshot {
+    41→  phase: "menu" | "dice" | "reloading" | "shop" | "playerTurn" | "enemyTurn" | "gameover" | "victory";
+    42→  round: number;
+    43→  hpPlayer: number;
+    44→  hpEnemy: number;
+    45→  maxHpPlayer: number;
+    46→  maxHpEnemy: number;
+    47→  money: number;
+    48→  live: number;
+    49→  blank: number;
+    50→  countdown: number; // turns left before the live/blank board fades
+    51→  countsPublic: boolean;
+    52→  turn: Side | null;
+    53→  skills: HudSkillSlot[];
+    54→  enemySkills: { id: SkillId; icon: string }[];
+    55→  known: ShellType | null;
+    56→  voodooPlayer: number;
+    57→  voodooEnemy: number;
+    58→  mustShoot: boolean;
+    59→  enemyCuffed: boolean;
+    60→  playerCuffed: boolean;
+    61→  busy: boolean;
+    62→  difficulty: Difficulty;
+    63→  hasGame: boolean;
+    64→  /** The physical items on the table right now (shop phase). */
+    65→  shopOffers: ShopOfferView[];
+    66→}
+    67→
+    68→export type HudEvent =
+    69→  | { type: "toast"; text: string; tone?: "info" | "good" | "bad" | "voodoo" }
+    70→  | { type: "banner"; title: string; sub?: string }
+    71→  | { type: "skillGet"; id: SkillId }
+    72→  | { type: "shellReveal"; shell: ShellType | null }
+    73→  | { type: "shellRevealQueue"; shells: (ShellType | null)[] }
+    74→  | { type: "dmgPop"; side: Side; text: string; tone?: "hit" | "blank" | "reflect" }
+    75→  | { type: "screenSplat" }
+    76→  | { type: "skillFlash"; id: SkillId }
+    77→  | { type: "reloadStep"; loaded: number; total: number }
+    78→  | { type: "shopTip"; id: SkillId | "bell" | null; xPct: number; yPct: number };
+    79→
+    80→const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.95 };
+    81→
+    82→/* ---------------- SHOP ---------------- */
+    83→
+    84→/** One physical item lying on the table during a shop break. */
+    85→export interface ShopOffer {
+    86→  id: SkillId;
+    87→  price: number;
+    88→  legendary: boolean; // INSANE-only legends
+    89→  sold: boolean;
+    90→}
+    91→
+    92→export interface ShopOfferView extends ShopOffer {
+    93→  disabled: boolean;
+    94→  reason: string | null;
+    95→}
+    96→
+    97→/** Trial prices. Voodoo is NOT for sale — a reflection is too easy to buy.
+    98→ *  The two legends are only stocked on INSANE. */
+    99→const SHOP_PRICES: Partial<Record<SkillId, number>> = {
+   100→  peek: 120,
+   101→  eject: 150,
+   102→  coffee: 130,
+   103→  reroll: 160,
+   104→  cuffs: 220,
+   105→  phoenix: 650,
+   106→  thirdEye: 550,
+   107→};
+   108→const LEGENDARY: SkillId[] = ["phoenix", "thirdEye"];
+   109→const START_MONEY = 200;
+   110→export const MAX_SKILLS = 4;
+   111→
+   112→function shuffled<T>(arr: T[]): T[] {
+   113→  const a = [...arr];
+   114→  for (let i = a.length - 1; i > 0; i--) {
+   115→    const j = Math.floor(Math.random() * (i + 1));
+   116→    [a[i], a[j]] = [a[j], a[i]];
+   117→  }
+   118→  return a;
+   119→}
+   120→
+   121→export class GameEngine {
+   122→  scene = new RouletteScene();
+   123→  logic: RouletteLogic = new RouletteLogic("normal");
+   124→  ai = new EnemyAI(this.logic, 0.8);
+   125→  onHud: (s: HudSnapshot) => void = () => {};
+   126→  onEvent: (e: HudEvent) => void = () => {};
+   127→  busy = false;
+   128→  /** The player's cash for the current match. */
+   129→  money = 0;
+   130→  /** The 3 random items currently lying on the table (shop breaks only). */
+   131→  private shopOffers: ShopOffer[] = [];
+   132→  private hoverId: SkillId | "bell" | null = null;
+   133→  /** Trial skills that were spent and are now fading away (2 turns). */
+   134→  private ghosts: { id: SkillId; turns: number }[] = [];
+   135→  private shopResolve: (() => void) | null = null;
+   136→  private tStart = 0;
+   137→  private tRoundStart = 0;
+   138→  private tEnd = 0;
+   139→  private running = false;
+   140→  private container: HTMLElement | null = null;
+   141→  private lowHpTaunted = false;
+   142→
+   143→  mount(container: HTMLElement) {
+   144→    this.container = container;
+   145→    this.scene.init(container);
+   146→    container.addEventListener("mousemove", (e) => {
+   147→      const r = container.getBoundingClientRect();
+   148→      this.scene.setLook(((e.clientX - r.left) / r.width - 0.5) * 2, ((e.clientY - r.top) / r.height - 0.5) * 2);
+   149→      this.onShopPointerMove(e);
+   150→    });
+   151→    container.addEventListener("click", (e) => this.onShopClick(e));
+   152→    this.running = true;
+   153→    const loop = (now: number) => {
+   154→      if (!this.running) return;
+   155→      this.scene.render(now);
+   156→      requestAnimationFrame(loop);
+   157→    };
+   158→    requestAnimationFrame(loop);
+   159→    this.logic.setPhase("menu");
+   160→    this.notify();
+   161→  }
+   162→
+   163→  dispose() {
+   164→    this.running = false;
+   165→    this.scene.dispose();
+   166→    gameAudio.stopAmbient();
+   167→    gameAudio.stopHeartbeat();
+   168→  }
+   169→
+   170→  /* ---------------- HUD ---------------- */
+   171→
+   172→  snapshot(): HudSnapshot {
+   173→    const st = this.logic.state;
+   174→    return {
+   175→      phase: st.phase,
+   176→      round: st.round,
+   177→      hpPlayer: st.hp.player,
+   178→      hpEnemy: st.hp.enemy,
+   179→      maxHpPlayer: st.maxHp.player,
+   180→      maxHpEnemy: st.maxHp.enemy,
+   181→      money: this.money,
+   182→      live: this.logic.liveRemaining,
+   183→      blank: this.logic.blankRemaining,
+   184→      countdown: st.countdown,
+   185→      countsPublic: this.logic.countsPublic,
+   186→      turn: st.phase === "playerTurn" ? "player" : st.phase === "enemyTurn" ? "enemy" : null,
+   187→      skills: ALL_SKILL_IDS.map((id) => {
+   188→        const sk = st.skills[id];
+   189→        return {
+   190→          id,
+   191→          owned: sk.owned,
+   192→          charges: sk.charges,
+   193→          cooldown: sk.cooldown,
+   194→          usable: this.logic.canUseSkill("player", id) && !this.busy,
+   195→          icon: dataURL(`icon-${id}`, texSkillIcon(id)),
+   196→          trial: !!sk.trial,
+   197→          ghostTurns: this.ghosts.find((g) => g.id === id)?.turns ?? 0,
+   198→        };
+   199→      }),
+   200→      enemySkills: SKILL_IDS.filter((id) => st.enemySkills[id].owned).map((id) => ({
+   201→        id,
+   202→        icon: dataURL(`icon-${id}`, texSkillIcon(id)),
+   203→      })),
+   204→      known: this.logic.playerKnown,
+   205→      voodooPlayer: st.voodooTurns.player,
+   206→      voodooEnemy: st.voodooTurns.enemy,
+   207→      mustShoot: st.mustShoot,
+   208→      enemyCuffed: st.enemySkipTurns > 0,
+   209→      playerCuffed: st.playerSkipTurns > 0,
+   210→      busy: this.busy,
+   211→      difficulty: st.difficulty,
+   212→      hasGame: st.round > 0 || st.phase !== "menu",
+   213→      shopOffers: this.shopOffers.map((o) => this.offerView(o)),
+   214→    };
+   215→  }
+   216→
+   217→  /** Live buyability of one offer (slots & cash can change any moment). */
+   218→  private offerView(o: ShopOffer): ShopOfferView {
+   219→    const st = this.logic.state;
+   220→    let disabled = false;
+   221→    let reason: string | null = null;
+   222→    if (o.sold) {
+   223→      reason = "SOLD";
+   224→    } else if (this.activeSkillCount() >= MAX_SKILLS) {
+   225→      disabled = true;
+   226→      reason = `SLOTS FULL (${MAX_SKILLS})`;
+   227→    } else if (this.money < o.price) {
+   228→      disabled = true;
+   229→      reason = "TOO POOR";
+   230→    }
+   231→    void st;
+   232→    return { ...o, disabled, reason };
+   233→  }
+   234→
+   235→  notify() {
+   236→    this.onHud(this.snapshot());
+   237→  }
+   238→
+   239→  private toast(text: string, tone: "info" | "good" | "bad" | "voodoo" = "info") {
+   240→    this.onEvent({ type: "toast", text, tone });
+   241→  }
+   242→
+   243→  /** Low-HP tension: blood vignette hooks + heartbeat + red pulse. */
+   244→  private checkHealthFx() {
+   245→    const hp = this.logic.state.hp.player;
+   246→    if (hp === 1) {
+   247→      gameAudio.startHeartbeat(true);
+   248→      this.scene.setRedPulse(0.32);
+   249→      if (!this.lowHpTaunted && this.logic.state.hp.enemy > 0) {
+   250→        this.lowHpTaunted = true;
+   251→        this.toast("YOUR HEART POUNDS... 1 HP LEFT!", "bad");
+   252→      }
+   253→    } else if (hp === 2) {
+   254→      gameAudio.startHeartbeat(false);
+   255→      this.scene.setRedPulse(0.12);
+   256→      this.lowHpTaunted = false;
+   257→    } else {
+   258→      gameAudio.stopHeartbeat();
+   259→      this.scene.setRedPulse(0);
+   260→      this.lowHpTaunted = false;
+   261→    }
+   262→  }
+   263→
+   264→  /* ---------------- main flow ---------------- */
+   265→
+   266→  /** Playtime in the current round and in the whole match (ms). */
+   267→  getTimes() {
+   268→    const now = this.tEnd || (this.tStart > 0 ? performance.now() : 0);
+   269→    return {
+   270→      roundMs: Math.max(0, now - this.tRoundStart),
+   271→      totalMs: Math.max(0, now - this.tStart),
+   272→    };
+   273→  }
+   274→
+   275→  async startGame(diff: Difficulty) {
+   276→    gameAudio.ensure();
+   277→    gameAudio.startAmbient();
+   278→    this.lowHpTaunted = false;
+   279→    this.money = START_MONEY;
+   280→    this.ghosts = [];
+   281→    this.shopResolve = null;
+   282→    this.tStart = performance.now();
+   283→    this.tRoundStart = this.tStart;
+   284→    this.tEnd = 0;
+   285→    this.logic = new RouletteLogic(diff);
+   286→    this.ai = new EnemyAI(this.logic, SMART[diff]);
+   287→    this.notify();
+   288→    this.toast(`Starting cash: $${START_MONEY} — the table stocks goods between rounds.`, "info");
+   289→
+   290→    await sleep(300);
+   291→    await this.diceIntro();
+   292→    await this.reloadSequence();
+   293→    await this.playerTurnStart();
+   294→  }
+   295→
+   296→  backToMenu() {
+   297→    gameAudio.stopHeartbeat();
+   298→    this.scene.setRedPulse(0);
+   299→    this.scene.setDesat(0);
+   300→    this.scene.setTimeScale(1);
+   301→    this.scene.gunAim(null);
+   302→    this.scene.enemySetMood("idle1");
+   303→    this.scene.hideShopItems();
+   304→    this.logic = new RouletteLogic(this.logic.state.difficulty);
+   305→    this.logic.setPhase("menu");
+   306→    this.busy = false;
+   307→    this.money = 0;
+   308→    this.ghosts = [];
+   309→    this.shopOffers = [];
+   310→    this.setShopHover(null);
+   311→    this.shopResolve = null;
+   312→    this.tStart = 0;
+   313→    this.tEnd = 0;
+   314→    this.notify();
+   315→  }
+   316→
+   317→  /** Dice intro: 2 rolls for the player (their only skills for the match),
+   318→   *  then the enemy silently receives 1/2/3 skills depending on difficulty. */
+   319→  private async diceIntro() {
+   320→    const diff = this.logic.state.difficulty;
+   321→    this.logic.setPhase("dice");
+   322→    this.notify();
+   323→    await sleep(400);
+   324→    this.scene.enemySetMood("grin");
+   325→    this.scene.enemySay(["Dice first.", "Your fate is decided here."], 2.8);
+   326→    gameAudio.gasp();
+   327→
+   328→    const granted = shuffled(SKILL_IDS).slice(0, 2);
+   329→
+   330→    this.scene.diceVisible(true);
+   331→    for (const id of granted) {
+   332→      gameAudio.diceShake();
+   333→      await sleep(360);
+   334→      await this.diceTumble(id);
+   335→      this.logic.grantSkill("player", id);
+   336→      gameAudio.stamp();
+   337→      this.onEvent({ type: "skillGet", id });
+   338→      this.notify();
+   339→      await sleep(820);
+   340→    }
+   341→    this.scene.diceVisible(false);
+   342→
+   343→    // the enemy quietly takes its skills
+   344→    const n = enemySkillCount(diff);
+   345→    for (const id of shuffled(SKILL_IDS).slice(0, n)) this.logic.grantSkill("enemy", id);
+   346→
+   347→    this.scene.enemySetMood("laugh");
+   348→    gameAudio.laugh();
+   349→    this.scene.enemySay([pick("gameStart")], 2.4);
+   350→    await sleep(1200);
+   351→  }
+   352→
+   353→  /** One dice tumble animation in front of the camera. */
+   354→  private diceTumble(finalId: SkillId): Promise<void> {
+   355→    const { main, ghosts } = this.scene.diceMeshes();
+   356→    let lastSwitch = 0;
+   357→    let cycle = Math.floor(Math.random() * SKILL_IDS.length);
+   358→    const setFace = (id: SkillId) => this.scene.diceSetFace(id, texDieFace(id));
+   359→    const dur = 1400;
+   360→    const start = performance.now();
+   361→    gameAudio.diceRoll(); // physical tumbling knocks while the die spins
+   362→    return new Promise<void>((resolve) => {
+   363→      const step = () => {
+   364→        const t = Math.min(1, (performance.now() - start) / dur);
+   365→        main.rotation.z = Math.pow(1 - t, 1.4) * 10;
+   366→        const bounce = Math.abs(Math.sin(t * Math.PI * 3.4)) * (1 - t) * 0.3;
+   367→        main.position.y = -0.02 + bounce;
+   368→        main.scale.setScalar(0.7 + t * 0.3);
+   369→        if (t > 0.7) {
+   370→          if (main.userData.face !== finalId) {
+   371→            setFace(finalId);
+   372→            main.userData.face = finalId;
+   373→          }
+   374→        } else if (performance.now() - lastSwitch > 40 + t * t * 240) {
+   375→          lastSwitch = performance.now();
+   376→          cycle = (cycle + 1) % SKILL_IDS.length;
+   377→          setFace(SKILL_IDS[cycle]);
+   378→          main.userData.face = SKILL_IDS[cycle];
+   379→        }
+   380→        ghosts.forEach((g, i) => {
+   381→          g.rotation.z = main.rotation.z - 0.05 * (i + 1);
+   382→          g.position.y = main.position.y + 0.012 * (i + 1);
+   383→          g.material.opacity = (0.13 / (i + 1)) * (1 - t * 0.4);
+   384→          g.material.map = main.material.map;
+   385→        });
+   386→        if (t < 1) {
+   387→          requestAnimationFrame(step);
+   388→        } else {
+   389→          gameAudio.diceLand();
+   390→          this.scene.flash(0.3);
+   391→          // squash & settle
+   392→          const s0 = performance.now();
+   393→          const squash = () => {
+   394→            const k = Math.min(1, (performance.now() - s0) / 220);
+   395→            main.scale.set(1 + Math.sin(k * Math.PI) * 0.12, 1 - Math.sin(k * Math.PI) * 0.18, 1);
+   396→            main.rotation.z = (1 - k) * 0.08;
+   397→            if (k < 1) requestAnimationFrame(squash);
+   398→            else resolve();
+   399→          };
+   400→          squash();
+   401→        }
+   402→      };
+   403→      step();
+   404→    });
+   405→  }
+   406→
+   407→  /** Between-round reload: gun opens, shells drop in, cylinder spins. */
+   408→  private async reloadSequence() {
+   409→    this.logic.state.round += 1;
+   410→    this.logic.loadCylinder();
+   411→    this.tRoundStart = performance.now();
+   412→    this.logic.setPhase("reloading");
+   413→    this.notify();
+   414→    this.busy = true;
+   415→
+   416→    this.scene.setLampBoost(0.4);
+   417→    await sleep(380);
+   418→    this.scene.gunAim("enemy", true);
+   419→    this.scene.gunOpenCylinder(true);
+   420→    gameAudio.reloadOpen();
+   421→    await sleep(620);
+   422→
+   423→    const total = 6;
+   424→    for (let i = 0; i < total; i++) {
+   425→      gameAudio.reloadLoad(i);
+   426→      this.onEvent({ type: "reloadStep", loaded: i + 1, total });
+   427→      await sleep(190);
+   428→    }
+   429→    gameAudio.spinCylinder();
+   430→    await sleep(560);
+   431→    this.scene.gunOpenCylinder(false);
+   432→    gameAudio.reloadClose();
+   433→    this.scene.setLampBoost(1);
+   434→    this.scene.flash(0.28);
+   435→    await sleep(420);
+   436→    this.scene.gunAim(null);
+   437→
+   438→    const live = this.logic.liveRemaining;
+   439→    const blank = this.logic.blankRemaining;
+   440→    this.onEvent({
+   441→      type: "banner",
+   442→      title: `ROUND ${this.logic.state.round}`,
+   443→      sub: `LIVE ${live} — BLANK ${blank}`,
+   444→    });
+   445→    gameAudio.hammerCock();
+   446→    await sleep(1400);
+   447→    this.busy = false;
+   448→  }
+   449→
+   450→  /* ---------------- player turn ---------------- */
+   451→
+   452→  private async playerTurnStart() {
+   453→    if (this.logic.state.hp.enemy <= 0 || this.logic.state.hp.player <= 0) return;
+   454→    const wasPublic = this.logic.state.countdown > 0;
+   455→    this.logic.setPhase("playerTurn");
+   456→    this.logic.startTurnTick();
+   457→    if (wasPublic && this.logic.state.countdown <= 0 && this.logic.state.cylinder.length > 0) {
+   458→      this.toast("THE BOARD FADED — memorize your shells!", "bad");
+   459→      gameAudio.ghostFade();
+   460→    }
+   461→    this.busy = false;
+   462→    this.notify();
+   463→  }
+   464→
+   465→  async playerShoot(target: Side) {
+   466→    const st = this.logic.state;
+   467→    if (this.busy || st.phase !== "playerTurn" || st.turn !== "player") return;
+   468→    if (st.cylinder.length === 0) return;
+   469→    this.busy = true;
+   470→    this.notify();
+   471→
+   472→    // LOW-HP TENSION: below 3 HP a self-shot gets 0.7s of pure dread first.
+   473→    const tension = target === "player" && st.hp.player < 3;
+   474→
+   475→    this.scene.gunAim(target === "player" ? "self" : "enemy");
+   476→    gameAudio.hammerCock();
+   477→    gameAudio.riser(tension ? 1.5 : 0.55);
+   478→    await sleep(800);
+   479→    if (tension) {
+   480→      // 0.7s: the trigger finger trembles... 240 + 240 + 220
+   481→      this.scene.addTrauma(0.14);
+   482→      await sleep(240);
+   483→      this.scene.addTrauma(0.18);
+   484→      await sleep(240);
+   485→      this.scene.addTrauma(0.22);
+   486→      await sleep(220);
+   487→    }
+   488→
+   489→    const res = await this.shootSequence("player", target, tension);
+   490→    this.scene.gunAim(null);
+   491→    await this.afterShot("player", res);
+   492→  }
+   493→
+   494→  async playerUseSkill(id: SkillId) {
+   495→    const st = this.logic.state;
+   496→    if (this.busy || st.phase !== "playerTurn" || st.turn !== "player") return;
+   497→    if (!this.logic.canUseSkill("player", id)) return;
+   498→    this.busy = true;
+   499→    this.notify();
+   500→
+   501→    const oc = this.logic.useSkill("player", id);
+   502→    if (!oc.ok) {
+   503→      this.busy = false;
+   504→      this.notify();
+   505→      return;
+   506→    }
+   507→    // a spent TRIAL starts its 2-turn fade away
+   508→    const sk = st.skills[id];
+   509→    if (sk.trial && sk.charges <= 0) this.registerGhost(id);
+   510→    this.onEvent({ type: "skillFlash", id });
+   511→    await this.playSkillFx("player", id, oc);
+   512→    this.notify();
+   513→    this.checkHealthFx();
+   514→    await sleep(450);
+   515→    this.busy = false;
+   516→    this.notify();
+   517→  }
+   518→
+   519→  /* ---------------- enemy turn ---------------- */
+   520→
+   521→  private async enemyTurnStart() {
+   522→    const st = this.logic.state;
+   523→    if (st.hp.enemy <= 0 || st.hp.player <= 0) return;
+   524→    st.phase = "enemyTurn";
+   525→    const wasPublic = st.countdown > 0;
+   526→    this.logic.startTurnTick();
+   527→    if (wasPublic && st.countdown <= 0 && st.cylinder.length > 0) {
+   528→      this.toast("THE BOARD FADED — memorize your shells!", "bad");
+   529→      gameAudio.ghostFade();
+   530→    }
+   531→    if (this.logic.lastSlip) {
+   532→      // the Dealer lost count — and says so out loud
+   533→      this.scene.enemySay([pick("aiForget")], 2.2);
+   534→    }
+   535→    this.busy = true;
+   536→    this.notify();
+   537→
+   538→    this.scene.enemySetMood("idle2");
+   539→    this.scene.enemySay([pick("enemyTurn")], 2.2);
+   540→    await sleep(rnd(1000, 1700));
+   541→
+   542→    let skillsUsed = 0;
+   543→    let guard = 0;
+   544→    let decision: AIDecision | null = null;
+   545→    // AI loop: burn skills first, then shoot
+   546→    for (;;) {
+   547→      if (st.hp.enemy <= 0 || st.hp.player <= 0) return;
+   548→      if (this.logic.isEmpty || guard++ > 24) break;
+   549→      const d = this.ai.decide();
+   550→      if (d.kind === "skill" && d.skill && skillsUsed < 3) {
+   551→        const oc = this.logic.useSkill("enemy", d.skill);
+   552→        if (!oc.ok) continue;
+   553→        skillsUsed++;
+   554→        await this.playSkillFx("enemy", d.skill, oc);
+   555→        this.notify();
+   556→        await sleep(rnd(500, 850));
+   557→        continue;
+   558→      }
+   559→      decision = d;
+   560→      break;
+   561→    }
+   562→
+   563→    if (decision && decision.kind === "shoot" && decision.target && !this.logic.isEmpty) {
+   564→      this.scene.enemySetMood("aim");
+   565→      gameAudio.riser(1.0);
+   566→      await sleep(rnd(850, 1400));
+   567→      const res = await this.shootSequence("enemy", decision.target);
+   568→      this.scene.enemySetMood("idle1");
+   569→      if (res === "dead") {
+   570→        await this.endGame();
+   571→        return;
+   572→      }
+   573→    }
+   574→
+   575→    if (this.logic.isEmpty) {
+   576→      await this.maybeShopAndReload();
+   577→    }
+   578→    const next = this.passTurn();
+   579→    this.notify();
+   580→    if (next === "player") {
+   581→      await this.playerTurnStart();
+   582→    } else {
+   583→      // the player is cuffed
+   584→      this.toast("You're cuffed! The DEALER goes again.", "bad");
+   585→      await sleep(800);
+   586→      await this.enemyTurnStart();
+   587→    }
+   588→  }
+   589→
+   590→  /* ---------------- shot resolution ---------------- */
+   591→
+   592→  /** Fire one shot and resolve EVERYTHING that follows it:
+   593→   *  the voodoo curse (fresh shell + forced shot) and the global
+   594→   *  self-blank rule (one automatic free shot at the opponent). */
+   595→  private async shootSequence(shooter: Side, target: Side, tensionSelf = false, forced = false): Promise<"pass" | "dead"> {
+   596→    const out = this.logic.shoot(shooter, target, forced);
+   597→    const res = await this.resolveShot(out, tensionSelf);
+   598→    if (res === "dead") return "dead";
+   599→
+   600→    const opp: Side = shooter === "player" ? "enemy" : "player";
+   601→
+   602→    if (out.voodooReroll) {
+   603→      // VOODOO CURSE: blank was rerolled — the shooter MUST fire once more,
+   604→      // and the gun swings toward the opponent.
+   605→      this.notify();
+   606→      await sleep(300);
+   607→      const out2 = this.logic.shoot(shooter, opp, true);
+   608→      const res2 = await this.resolveShot(out2, false);
+   609→      if (res2 === "dead") return "dead";
+   610→    } else if (out.bonusShot && !this.logic.isEmpty) {
+   611→      // GLOBAL RULE: shot yourself with a blank -> ONE automatic shot at the enemy.
+   612→      this.notify();
+   613→      if (shooter === "player") {
+   614→        this.toast("BLANK! Free shot at the DEALER!", "good");
+   615→        this.scene.gunAim("enemy");
+   616→        gameAudio.hammerCock();
+   617→        await sleep(750);
+   618→      } else {
+   619→        this.scene.enemySetMood("aim");
+   620→        this.toast("DEALER blanks himself — free shot at you!", "bad");
+   621→        await sleep(750);
+   622→      }
+   623→      const out2 = this.logic.shoot(shooter, opp);
+   624→      const res2 = await this.resolveShot(out2, false);
+   625→      if (res2 === "dead") return "dead";
+   626→    }
+   627→    return "pass";
+   628→  }
+   629→
+   630→  /** Animation + effects for ONE trigger pull (both sides). */
+   631→  private async resolveShot(out: ShotOutcome, tensionSelf = false): Promise<"pass" | "dead"> {
+   632→    const shooterIsPlayer = out.shooter === "player";
+   633→
+   634→    if (out.voodooReroll) {
+   635→      gameAudio.blankClick();
+   636→      this.toast("VOODOO: blank rerolled! Now FIRE at the enemy!", "voodoo");
+   637→      await sleep(700);
+   638→      gameAudio.spinCylinder();
+   639→      this.scene.addTrauma(0.25);
+   640→      await sleep(900);
+   641→      this.notify();
+   642→      return "pass";
+   643→    }
+   644→
+   645→    // CASH: every hit you land on the DEALER pays (reflections pay extra).
+   646→    if (out.damageTo === "enemy") {
+   647→      const gain = out.reflected ? 150 : 100;
+   648→      this.money += gain;
+   649→      this.toast(`+$${gain}${out.reflected ? " (reflected!)" : ""}`, "good");
+   650→    }
+   651→
+   652→    if (out.phoenixSaved) {
+   653→      // the killing blow burned the charm instead
+   654→      gameAudio.phoenix();
+   655→      this.scene.flash(0.65);
+   656→      this.scene.setDesat(0.2);
+   657→      setTimeout(() => this.scene.setDesat(0), 700);
+   658→      this.registerGhost("phoenix");
+   659→      this.scene.enemySetMood("scared");
+   660→      this.scene.enemySay([pick("phoenix")], 2.6);
+   661→      this.onEvent({ type: "banner", title: "PHOENIX!", sub: "You refuse to die — the charm burns for you." });
+   662→      await sleep(1200);
+   663→    }
+   664→
+   665→    if (out.shell === "live") {
+   666→      gameAudio.gunshot();
+   667→      if (shooterIsPlayer) {
+   668→        this.scene.muzzleFlash();
+   669→        this.scene.gunKick();
+   670→      } else {
+   671→        this.scene.addTrauma(0.5);
+   672→        this.scene.flash(0.4);
+   673→      }
+   674→      // bullet-exit delay: at low HP a self-shot lingers 0.2s longer
+   675→      await sleep(tensionSelf ? 340 : 140);
+   676→
+   677→      if (out.reflected) {
+   678→        // voodoo reflected the pain back to the shooter
+   679→        gameAudio.voodooReflect();
+   680→        this.scene.flash(0.55);
+   681→        this.onEvent({ type: "dmgPop", side: out.damageTo!, text: "REFLECTED!", tone: "reflect" });
+   682→        if (out.damageTo === "enemy") {
+   683→          this.scene.bloodBurst("enemy");
+   684→          this.scene.enemySetMood("hit");
+   685→          this.scene.enemySay([pick("reflect")], 2.2);
+   686→        } else {
+   687→          this.scene.bloodBurst("player");
+   688→          this.onEvent({ type: "screenSplat" });
+   689→        }
+   690→      } else if (out.damageTo === "player") {
+   691→        gameAudio.hitPlayer();
+   692→        this.scene.addTrauma(0.85);
+   693→        this.scene.setAberration(2.4);
+   694→        setTimeout(() => this.scene.setAberration(0), 380);
+   695→        this.onEvent({ type: "screenSplat" });
+   696→        this.scene.bloodBurst("player");
+   697→        if (!shooterIsPlayer) {
+   698→          this.scene.enemySetMood("laugh");
+   699→          this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
+   700→        } else {
+   701→          this.scene.enemySetMood("laugh");
+   702→          this.scene.enemySay([pick("playerHitSelf")], 2.4);
+   703→          this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
+   704→        }
+   705→      } else if (out.damageTo === "enemy") {
+   706→        gameAudio.hitEnemy();
+   707→        this.scene.addTrauma(0.4);
+   708→        this.scene.bloodBurst("enemy", !!out.death);
+   709→        this.scene.enemySetMood("hit");
+   710→        this.onEvent({ type: "dmgPop", side: "enemy", text: "-1 HP", tone: "hit" });
+   711→        await sleep(650);
+   712→        if (out.death !== "enemy") {
+   713→          this.scene.enemySetMood("grin");
+   714→          this.scene.enemySay([pick("playerHitsEnemy")], 2.2);
+   715→        }
+   716→      }
+   717→      await sleep(520);
+   718→    } else {
+   719→      // blank
+   720→      gameAudio.blankClick();
+   721→      if (shooterIsPlayer) {
+   722→        this.scene.dustPuffAtCamera();
+   723→      } else {
+   724→        this.scene.enemySetMood("scared");
+   725→      }
+   726→      this.onEvent({ type: "dmgPop", side: out.target, text: "CLICK! blank", tone: "blank" });
+   727→      const who =
+   728→        !shooterIsPlayer && out.target === "enemy"
+   729→          ? pick("enemyBlankSelf")
+   730→          : shooterIsPlayer && out.target === "player"
+   731→            ? pick("playerBlankSelf")
+   732→            : pick("playerShootsBlank");
+   733→      if (!shooterIsPlayer) {
+   734→        this.scene.enemySay([who], 2);
+   735→      }
+   736→      await sleep(500);
+   737→    }
+   738→
+   739→    if (out.death) return "dead";
+   740→    this.notify();
+   741→    this.checkHealthFx();
+   742→    return "pass";
+   743→  }
+   744→
+   745→  /** After a shot sequence: check death / shop / reload / pass the turn. */
+   746→  private async afterShot(shooter: Side, res: "pass" | "dead") {
+   747→    if (res === "dead") {
+   748→      await this.endGame();
+   749→      return;
+   750→    }
+   751→    if (this.logic.isEmpty) {
+   752→      await this.maybeShopAndReload();
+   753→    }
+   754→    const next = this.passTurn();
+   755→    this.notify();
+   756→    if (next === "player" && shooter === "player") {
+   757→      // the enemy was cuffed, we go again
+   758→      this.toast("THE DEALER IS CUFFED! Your turn again.", "good");
+   759→      await sleep(700);
+   760→      await this.playerTurnStart();
+   761→    } else if (next === "player") {
+   762→      await this.playerTurnStart();
+   763→    } else {
+   764→      await this.enemyTurnStart();
+   765→    }
+   766→  }
+   767→
+   768→  /* ---------------- skill FX ---------------- */
+   769→
+   770→  private async playSkillFx(side: Side, id: SkillId, oc: SkillOutcome) {
+   771→    const isPlayer = side === "player";
+   772→    this.onEvent({ type: "skillFlash", id });
+   773→    switch (id) {
+   774→      case "reroll": {
+   775→        gameAudio.rerollTick();
+   776→        gameAudio.spinCylinder();
+   777→        this.scene.addTrauma(0.2);
+   778→        if (isPlayer) this.toast("Chamber REROLLED! Now you MUST shoot.", "info");
+   779→        else this.scene.enemySay([pick("useReroll")], 2);
+   780→        await sleep(900);
+   781→        break;
+   782→      }
+   783→      case "peek": {
+   784→        gameAudio.scanDing();
+   785→        if (isPlayer) {
+   786→          this.onEvent({ type: "shellReveal", shell: oc.revealed ?? null });
+   787→          this.toast(oc.revealed ? `PEEK: this shell is ${oc.revealed.toUpperCase()}!` : "PEEK: chamber empty?", "info");
+   788→        } else {
+   789→          this.scene.enemySay([pick("scan")], 2);
+   790→        }
+   791→        await sleep(1300);
+   792→        break;
+   793→      }
+   794→      case "eject": {
+   795→        gameAudio.ejectShell();
+   796→        const from = isPlayer ? this.scene.muzzleWorldPos() : this.scene.enemyWorldPos().add(new THREE.Vector3(0, 0.3, 0));
+   797→        const to = isPlayer
+   798→          ? this.scene.muzzleWorldPos().add(new THREE.Vector3(0.7, -0.4, 0.2))
+   799→          : this.scene.enemyWorldPos().add(new THREE.Vector3(0.8, -0.6, 0.4));
+   800→        this.scene.flyShell(oc.ejected ?? "blank", from, to, 0.55);
+   801→        if (isPlayer) this.toast("Shell tossed out unfired.", "info");
+   802→        else this.scene.enemySay([pick("useEject")], 2);
+   803→        await sleep(600);
+   804→        break;
+   805→      }
+   806→      case "coffee": {
+   807→        gameAudio.heal();
+   808→        if (isPlayer) this.toast("Sip... +1 HP. That hits the spot.", "good");
+   809→        else this.scene.enemySay([pick("useCoffee")], 2);
+   810→        await sleep(800);
+   811→        break;
+   812→      }
+   813→      case "cuffs": {
+   814→        gameAudio.cuffs();
+   815→        if (isPlayer) {
+   816→          this.scene.enemySetMood("scared");
+   817→          this.scene.enemySay([pick("cuffed")], 2.2);
+   818→          this.toast("THE DEALER IS CUFFED! He skips his next turn.", "good");
+   819→        } else {
+   820→          this.toast("The DEALER cuffs you!", "bad");
+   821→        }
+   822→        await sleep(900);
+   823→        break;
+   824→      }
+   825→      case "voodoo": {
+   826→        gameAudio.voodooCast();
+   827→        this.scene.flash(0.3);
+   828→        this.scene.setDesat(0.15);
+   829→        setTimeout(() => this.scene.setDesat(0), 600);
+   830→        if (isPlayer) {
+   831→          this.toast("VOODOO ACTIVE (2 turns): every live hit on you is REFLECTED!", "voodoo");
+   832→          this.scene.enemySetMood("scared");
+   833→          this.scene.enemySay([pick("playerVoodooCast")], 2.4);
+   834→        } else {
+   835→          this.toast("The DEALER cast VOODOO! Think twice before shooting him.", "bad");
+   836→          this.scene.enemySay([pick("voodoo")], 2.2);
+   837→        }
+   838→        await sleep(1100);
+   839→        break;
+   840→      }
+   841→      case "thirdEye": {
+   842→        gameAudio.scanDing();
+   843→        this.scene.flash(0.25);
+   844→        const q = oc.queue ?? [];
+   845→        this.onEvent({ type: "shellRevealQueue", shells: q });
+   846→        this.scene.enemySetMood("scared");
+   847→        this.scene.enemySay([pick("thirdEye")], 2.4);
+   848→        this.toast(
+   849→          q.length
+   850→            ? `THIRD EYE: the next ${q.length} shell${q.length > 1 ? "s" : ""} lie bare!`
+   851→            : "THIRD EYE: chamber empty?",
+   852→          "voodoo",
+   853→        );
+   854→        await sleep(1800);
+   855→        break;
+   856→      }
+   857→    }
+   858→    this.notify();
+   859→  }
+   860→
+   861→  /* ---------------- game over ---------------- */
+   862→
+   863→  private async endGame() {
+   864→    const st = this.logic.state;
+   865→    const deadSide: Side = st.hp.enemy <= 0 ? "enemy" : "player";
+   866→    this.tEnd = performance.now();
+   867→    gameAudio.stopHeartbeat();
+   868→    this.scene.setRedPulse(0);
+   869→
+   870→    if (deadSide === "enemy") {
+   871→      st.phase = "victory";
+   872→      this.scene.setTimeScale(0.3, true);
+   873→      this.scene.addTrauma(0.7);
+   874→      this.scene.bloodBurst("enemy", true);
+   875→      this.scene.enemySetMood("dead");
+   876→      this.scene.setDesat(0.35);
+   877→      gameAudio.win();
+   878→      this.notify();
+   879→      await sleep(1600);
+   880→      this.scene.setTimeScale(1);
+   881→      this.scene.setDesat(0);
+   882→      this.onEvent({ type: "banner", title: "YOU SURVIVED", sub: "The DEALER falls. This room is yours now." });
+   883→    } else {
+   884→      st.phase = "gameover";
+   885→      this.scene.setTimeScale(0.22, true);
+   886→      this.scene.addTrauma(1);
+   887→      this.scene.bloodBurst("player", true);
+   888→      this.onEvent({ type: "screenSplat" });
+   889→      this.scene.setDesat(0.5);
+   890→      gameAudio.lose();
+   891→      this.scene.enemySetMood("laugh");
+   892→      this.scene.enemySay(["I told you...", "don't play with death."], 4);
+   893→      this.notify();
+   894→      await sleep(1800);
+   895→      this.scene.setTimeScale(1);
+   896→      this.scene.setDesat(0);
+   897→    }
+   898→    gameAudio.stopAmbient();
+   899→    this.notify();
+   900→  }
+   901→
+   902→  /* ---------------- util used by scene events ---------------- */
+   903→
+   904→  skillIconOf(id: SkillId) {
+   905→    return dataURL(`icon-${id}`, texSkillIcon(id));
+   906→  }
+   907→
+   908→  /* ---------------- ghosts (spent trials fading away) ---------------- */
+   909→
+   910→  /** A spent trial charm starts its 2-turn fade. */
+   911→  private registerGhost(id: SkillId) {
+   912→    const g = this.ghosts.find((x) => x.id === id);
+   913→    if (g) g.turns = 2;
+   914→    else this.ghosts.push({ id, turns: 2 });
+   915→    gameAudio.ghostFade();
+   916→  }
+   917→
+   918→  /** Every passed turn dissolves the ghosts a little more. */
+   919→  private tickGhosts() {
+   920→    if (!this.ghosts.length) return;
+   921→    for (const g of this.ghosts) g.turns -= 1;
+   922→    const done = this.ghosts.filter((g) => g.turns <= 0).map((g) => g.id);
+   923→    for (const id of done) {
+   924→      const sk = this.logic.state.skills[id];
+   925→      sk.owned = false;
+   926→      sk.trial = false;
+   927→      this.toast(`${SKILL_META[id].name} faded away.`, "info");
+   928→    }
+   929→    this.ghosts = this.ghosts.filter((g) => g.turns > 0);
+   930→  }
+   931→
+   932→  /** endTurnAndPass + ghost fade bookkeeping. */
+   933→  private passTurn(): Side {
+   934→    const next = this.logic.endTurnAndPass();
+   935→    this.tickGhosts();
+   936→    return next;
+   937→  }
+   938→
+   939→  /* ---------------- shop ---------------- */
+   940→
+   941→  /** How many skill slots are in active use (ghosts don't count). */
+   942→  activeSkillCount() {
+   943→    const st = this.logic.state;
+   944→    return ALL_SKILL_IDS.filter((id) => {
+   945→      const sk = st.skills[id];
+   946→      return sk.owned && !(sk.trial && sk.charges <= 0);
+   947→    }).length;
+   948→  }
+   949→
+   950→  /** Roll the 3 random items lying on the table this visit.
+   951→   *  Legends only on INSANE, voodoo is never sold, owned skills restocked out. */
+   952→  private rollOffers(): ShopOffer[] {
+   953→    const st = this.logic.state;
+   954→    const pool = (Object.keys(SHOP_PRICES) as SkillId[]).filter((id) => {
+   955→      if (LEGENDARY.includes(id) && st.difficulty !== "insane") return false;
+   956→      return !st.skills[id].owned;
+   957→    });
+   958→    return shuffled(pool)
+   959→      .slice(0, 3)
+   960→      .map((id) => ({ id, price: SHOP_PRICES[id]!, legendary: LEGENDARY.includes(id), sold: false }));
+   961→  }
+   962→
+   963→  /** Open the shop between rounds and wait for the bell to be rung. */
+   964→  private async openShop() {
+   965→    const st = this.logic.state;
+   966→    this.money += 75; // survival bonus
+   967→    this.toast("ROUND SURVIVED: +$75", "good");
+   968→    this.shopOffers = this.rollOffers();
+   969→    st.phase = "shop";
+   970→    this.busy = true;
+   971→    gameAudio.shopOpen();
+   972→    this.scene.enemySay([pick("shop")], 2.6);
+   973→    this.scene.showShopItems(this.shopOffers.filter((o) => !o.sold));
+   974→    this.onEvent({
+   975→      type: "banner",
+   976→      title: "SHOP BREAK",
+   977→      sub: "Hover the items on the table — click to buy. Ring the bell to reload.",
+   978→    });
+   979→    this.notify();
+   980→    await new Promise<void>((res) => {
+   981→      this.shopResolve = res;
+   982→    });
+   983→    this.busy = false;
+   984→  }
+   985→
+   986→  /** Between rounds: shop first (if the cylinder ran dry), then reload. */
+   987→  private async maybeShopAndReload() {
+   988→    if (this.logic.isEmpty) {
+   989→      await this.openShop();
+   990→    }
+   991→    await this.reloadSequence();
+   992→  }
+   993→
+   994→  buyTrial(id: SkillId) {
+   995→    if (this.logic.state.phase !== "shop") return;
+   996→    const offer = this.shopOffers.find((o) => o.id === id);
+   997→    if (!offer || offer.sold) return;
+   998→    const view = this.offerView(offer);
+   999→    if (view.disabled) {
+  1000→      gameAudio.dryFire();
+  1001→      const poor = view.reason === "TOO POOR";
+  1002→      this.toast(
+  1003→        poor ? `Not enough cash — $${offer.price} needed.` : "Hands full — 4 skills max!",
+  1004→        "bad",
+  1005→      );
+  1006→      this.scene.enemySay([pick(poor ? "shopPoor" : "shopFull")], 2.4);
+  1007→      return;
+  1008→    }
+  1009→    this.money -= offer.price;
+  1010→    offer.sold = true;
+  1011→    this.logic.grantTrial("player", id);
+  1012→    gameAudio.buy();
+  1013→    this.scene.sellShopItem(id);
+  1014→    this.setShopHover(null);
+  1015→    this.onEvent({ type: "skillGet", id });
+  1016→    this.toast(`TRIAL ${SKILL_META[id].name} bought — one use, then it fades!`, "good");
+  1017→    this.scene.enemySay([pick("shopBuy")], 2.2);
+  1018→    this.notify();
+  1019→  }
+  1020→
+  1021→  closeShop() {
+  1022→    if (this.logic.state.phase !== "shop") return;
+  1023→    gameAudio.click();
+  1024→    this.scene.hideShopItems();
+  1025→    this.setShopHover(null);
+  1026→    const r = this.shopResolve;
+  1027→    this.shopResolve = null;
+  1028→    r?.();
+  1029→  }
+  1030→
+  1031→  /** Ring the little bell: end the break, reload, fight. */
+  1032→  private async ringBell() {
+  1033→    if (this.logic.state.phase !== "shop") return;
+  1034→    gameAudio.scanDing();
+  1035→    this.scene.ringBellAnim();
+  1036→    this.scene.enemySay([pick("bellRing")], 2);
+  1037→    await sleep(750);
+  1038→    this.closeShop();
+  1039→  }
+  1040→
+  1041→  /* ---------------- shop pointer (hover + click on the 3D table) ---------------- */
+  1042→
+  1043→  private shopNdc(e: MouseEvent): THREE.Vector2 | null {
+  1044→    const c = this.container;
+  1045→    if (!c) return null;
+  1046→    const r = c.getBoundingClientRect();
+  1047→    return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  1048→  }
+  1049→
+  1050→  private onShopPointerMove(e: MouseEvent) {
+  1051→    if (this.logic.state.phase !== "shop") {
+  1052→      if (this.hoverId !== null) this.setShopHover(null);
+  1053→      if (this.container) this.container.style.cursor = "default";
+  1054→      return;
+  1055→    }
+  1056→    const ndc = this.shopNdc(e);
+  1057→    if (!ndc) return;
+  1058→    const hit = this.scene.pickShop(ndc);
+  1059→    const id = hit ? (hit.type === "bell" ? "bell" : hit.id) : null;
+  1060→    if (id !== this.hoverId) {
+  1061→      this.setShopHover(id);
+  1062→      if (id) gameAudio.hover();
+  1063→    }
+  1064→    if (this.container) this.container.style.cursor = id ? "pointer" : "default";
+  1065→  }
+  1066→
+  1067→  private onShopClick(e: MouseEvent) {
+  1068→    if (this.logic.state.phase !== "shop") return;
+  1069→    const ndc = this.shopNdc(e);
+  1070→    if (!ndc) return;
+  1071→    const hit = this.scene.pickShop(ndc);
+  1072→    if (!hit) return;
+  1073→    if (hit.type === "bell") void this.ringBell();
+  1074→    else this.buyTrial(hit.id);
+  1075→  }
+  1076→
+  1077→  /** Hover changed: tip the 3D item and anchor the HTML tooltip above it. */
+  1078→  setShopHover(id: SkillId | "bell" | null) {
+  1079→    this.hoverId = id;
+  1080→    this.scene.setShopHover(id);
+  1081→    if (id === null) {
+  1082→      this.onEvent({ type: "shopTip", id: null, xPct: 0, yPct: 0 });
+  1083→      return;
+  1084→    }
+  1085→    const anchor = this.scene.shopAnchor(id);
+  1086→    if (anchor) this.onEvent({ type: "shopTip", id, xPct: anchor.xPct, yPct: anchor.yPct });
+  1087→  }
+  1088→}
+  1089→

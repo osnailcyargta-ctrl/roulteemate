@@ -67,7 +67,7 @@ export interface HudSnapshot {
 
 export type HudEvent =
   | { type: "toast"; text: string; tone?: "info" | "good" | "bad" | "voodoo" }
-  | { type: "banner"; title: string; sub?: string }
+  | { type: "banner"; title: string; sub?: string; long?: boolean }
   | { type: "skillGet"; id: SkillId }
   | { type: "shellReveal"; shell: ShellType | null }
   | { type: "shellRevealQueue"; shells: (ShellType | null)[] }
@@ -284,6 +284,7 @@ export class GameEngine {
     this.tEnd = 0;
     this.logic = new RouletteLogic(diff);
     this.ai = new EnemyAI(this.logic, SMART[diff]);
+    this.scene.clearSpentShells();
     this.notify();
     this.toast(`Starting cash: $${START_MONEY} — the table stocks goods between rounds.`, "info");
 
@@ -301,6 +302,7 @@ export class GameEngine {
     this.scene.gunAim(null);
     this.scene.enemySetMood("idle1");
     this.scene.hideShopItems();
+    this.scene.clearSpentShells();
     this.logic = new RouletteLogic(this.logic.state.difficulty);
     this.logic.setPhase("menu");
     this.busy = false;
@@ -413,6 +415,8 @@ export class GameEngine {
     this.notify();
     this.busy = true;
 
+    // the Dealer sweeps the last round's casings off the table
+    this.scene.clearSpentShells();
     this.scene.setLampBoost(0.4);
     await sleep(380);
     this.scene.gunAim("enemy", true);
@@ -440,7 +444,8 @@ export class GameEngine {
     this.onEvent({
       type: "banner",
       title: `ROUND ${this.logic.state.round}`,
-      sub: `LIVE ${live} — BLANK ${blank}`,
+      sub: `LIVE ${live} — BLANK ${blank} — every fired shell lands on the table edge`,
+      long: true,
     });
     gameAudio.hammerCock();
     await sleep(1400);
@@ -631,9 +636,18 @@ export class GameEngine {
   private async resolveShot(out: ShotOutcome, tensionSelf = false): Promise<"pass" | "dead"> {
     const shooterIsPlayer = out.shooter === "player";
 
+    // PHYSICAL RECOUNT: the spent shell lands on the table's front edge,
+    // in firing order — the round's history stays visible and checkable.
+    this.scene.spawnSpentShell(
+      out.shell,
+      shooterIsPlayer
+        ? this.scene.muzzleWorldPos()
+        : this.scene.enemyWorldPos().add(new THREE.Vector3(0.35, 0.42, 0.3)),
+    );
+
     if (out.voodooReroll) {
       gameAudio.blankClick();
-      this.toast("VOODOO: blank rerolled! Now FIRE at the enemy!", "voodoo");
+      this.toast("VOODOO: blank rerolled — a FRESH shell enters the chamber! Now FIRE at the enemy!", "voodoo");
       await sleep(700);
       gameAudio.spinCylinder();
       this.scene.addTrauma(0.25);
@@ -775,8 +789,12 @@ export class GameEngine {
         gameAudio.rerollTick();
         gameAudio.spinCylinder();
         this.scene.addTrauma(0.2);
-        if (isPlayer) this.toast("Chamber REROLLED! Now you MUST shoot.", "info");
-        else this.scene.enemySay([pick("useReroll")], 2);
+        if (isPlayer) {
+          this.toast("Chamber REROLLED — the live/blank count may have shifted! Now you MUST shoot.", "info");
+        } else {
+          this.toast("THE DEALER REROLLS the chamber — the live/blank count may have shifted!", "bad");
+          this.scene.enemySay([pick("useReroll")], 2);
+        }
         await sleep(900);
         break;
       }
@@ -974,7 +992,8 @@ export class GameEngine {
     this.onEvent({
       type: "banner",
       title: "SHOP BREAK",
-      sub: "Hover the items on the table — click to buy. Ring the bell to reload.",
+      sub: "Hover the items to buy. Ring the golden bell on the LEFT to start the next round.",
+      long: true,
     });
     this.notify();
     await new Promise<void>((res) => {

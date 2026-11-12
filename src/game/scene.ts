@@ -13,7 +13,6 @@ import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import {
   texGunAimEnemy,
   texGunAimSelf,
-  texGunTable,
   texGunOpen,
   texShell,
   texEnemy,
@@ -35,6 +34,7 @@ import {
   texPoster,
   texArrowSign,
   texPriceTag,
+  texBellNote,
   texSkillIcon,
   type SkillId,
   type EnemyMood,
@@ -201,11 +201,17 @@ export class RouletteScene {
   /* physical shop */
   private shopMat!: THREE.Mesh;
   private shopBell: THREE.Group | null = null;
+  private bellProps!: THREE.Group; // coaster + "RING ME" note around the bell
   private bellHit!: THREE.Mesh;
   private shopItems = new Map<SkillId, ShopItem>();
   private shopHitboxes: THREE.Mesh[] = [];
   private shopAnims: { id: SkillId; item: ShopItem; t0: number }[] = [];
   private shopTexCache = new Map<string, THREE.Texture>();
+
+  /* spent-shell trail: every fired shell lands on the table's front edge
+     so both sides can physically recount the round at any moment */
+  private trailMeshes: THREE.Mesh[] = [];
+  private trailSweeps: { mesh: THREE.Mesh; t0: number; from: THREE.Vector3 }[] = [];
   private raycaster = new THREE.Raycaster();
   private bellHover = false;
   private bellHoverK = 0;
@@ -446,14 +452,7 @@ export class RouletteScene {
     }
 
     // props doodle di meja (billboard 2D)
-    const gun = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.58, 0.39),
-      doodleMat(ctex(texGunTable()), { lit: true }),
-    );
-    gun.position.set(-0.82, 1.1, -0.18);
-    gun.rotation.y = 0.32;
-    this.scene.add(gun);
-
+    // (the old table gun doodle was removed — the bell owns the left side now)
     const box = new THREE.Mesh(
       new THREE.PlaneGeometry(0.34, 0.27),
       doodleMat(ctex(texShellBox()), { lit: true }),
@@ -579,7 +578,9 @@ export class RouletteScene {
     this.shopMat.visible = false;
     this.scene.add(this.shopMat);
 
-    // the little gold bell — ring it to end the break
+    // the little gold bell — ring it to end the break.
+    // It sits on the LEFT edge of the table (the old right corner was
+    // half out of frame and players never found it).
     const bell = new THREE.Group();
     const gold = new THREE.MeshStandardMaterial({
       color: 0xd9a441,
@@ -598,17 +599,38 @@ export class RouletteScene {
     const knob = new THREE.Mesh(new THREE.SphereGeometry(0.015, 10, 8), gold);
     knob.position.y = 0.082;
     bell.add(knob);
-    bell.position.set(1.04, 0.918, 0.14);
+    bell.position.set(-0.82, 0.918, 0.06);
     bell.visible = false;
     this.scene.add(bell);
     this.shopBell = bell;
 
+    // static props around the bell: a felt coaster + a handwritten note
+    this.bellProps = new THREE.Group();
+    const coaster = new THREE.Mesh(
+      new THREE.CircleGeometry(0.17, 28),
+      new THREE.MeshStandardMaterial({ color: 0x33241c, roughness: 0.97 }),
+    );
+    coaster.rotation.x = -Math.PI / 2;
+    coaster.position.set(-0.82, 0.9078, 0.06);
+    coaster.receiveShadow = true;
+    this.bellProps.add(coaster);
+    const note = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.24, 0.16),
+      doodleMat(ctex(texBellNote()), { lit: true }),
+    );
+    note.position.set(-1.06, 0.985, 0.1);
+    note.rotation.y = 0.42;
+    note.rotation.z = -0.08;
+    this.bellProps.add(note);
+    this.bellProps.visible = false;
+    this.scene.add(this.bellProps);
+
     // invisible but raycastable bell hit area
     this.bellHit = new THREE.Mesh(
-      new THREE.BoxGeometry(0.32, 0.3, 0.32),
+      new THREE.BoxGeometry(0.4, 0.34, 0.4),
       new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
     );
-    this.bellHit.position.set(1.04, 0.98, 0.14);
+    this.bellHit.position.set(-0.86, 0.99, 0.06);
     this.bellHit.userData.shop = "bell";
     this.scene.add(this.bellHit);
   }
@@ -627,6 +649,7 @@ export class RouletteScene {
     this.hideShopItems();
     this.shopMat.visible = true;
     if (this.shopBell) this.shopBell.visible = true;
+    this.bellProps.visible = true;
     offers.forEach((o, i) => {
       const group = new THREE.Group();
       const base = new THREE.Vector3(-0.22 + i * 0.42, 0.908, 0.02);
@@ -720,6 +743,7 @@ export class RouletteScene {
     this.shopAnims = [];
     this.shopMat.visible = false;
     if (this.shopBell) this.shopBell.visible = false;
+    this.bellProps.visible = false;
     this.bellHover = false;
   }
 
@@ -763,6 +787,82 @@ export class RouletteScene {
     this.bellRingT = 1;
     const at = this.shopBell?.position.clone().add(new THREE.Vector3(0, 0.08, 0));
     if (at) this.sparkBurst(at, 6);
+  }
+
+  /* ---------------- spent-shell trail (physical recount) ---------------- */
+
+  /** Every fired shell lands on the table's front edge, in firing order.
+   *  Red = live, blue = blank — the round's history stays readable. */
+  spawnSpentShell(kind: "live" | "blank", from?: THREE.Vector3) {
+    if (this.trailMeshes.length >= 6) return;
+    const i = this.trailMeshes.length;
+    const to = new THREE.Vector3(-0.28 + i * 0.108, 0.912, 0.335 + (Math.random() - 0.5) * 0.03);
+    const start = from?.clone() ?? new THREE.Vector3(0, 1.25, 0.35);
+    const mat = new THREE.MeshBasicMaterial({
+      map: this.shellTex[kind],
+      transparent: true,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.13, 0.13), mat);
+    mesh.renderOrder = 6;
+    mesh.position.copy(start);
+    mesh.scale.setScalar(0.45);
+    mesh.userData = { t0: performance.now(), from: start, to, tilt: (Math.random() - 0.5) * 0.85, landed: false };
+    this.scene.add(mesh);
+    this.trailMeshes.push(mesh);
+  }
+
+  /** The dealer sweeps the casings away when the gun gets reloaded. */
+  clearSpentShells() {
+    if (!this.trailMeshes.length) return;
+    const now = performance.now();
+    for (const m of this.trailMeshes) {
+      this.trailSweeps.push({ mesh: m, t0: now + Math.random() * 130, from: m.position.clone() });
+    }
+    this.trailMeshes = [];
+  }
+
+  private updateTrail(nowMs: number, dt0: number) {
+    const camQ = this.camera.getWorldQuaternion(new THREE.Quaternion());
+    // landing arcs
+    for (const m of this.trailMeshes) {
+      const u = m.userData as { t0: number; from: THREE.Vector3; to: THREE.Vector3; tilt: number; landed: boolean };
+      const t = Math.min(1, (nowMs - u.t0) / 460);
+      if (t < 1) {
+        const e = 1 - Math.pow(1 - t, 2);
+        m.position.lerpVectors(u.from, u.to, e);
+        m.position.y += Math.sin(t * Math.PI) * 0.42;
+        m.scale.setScalar(0.45 + 0.55 * e);
+      } else if (!u.landed) {
+        u.landed = true;
+        m.position.copy(u.to);
+        m.scale.setScalar(1);
+      }
+      m.quaternion.copy(camQ);
+      m.rotateZ(u.tilt + Math.sin(nowMs / 900 + u.t0) * 0.012);
+    }
+    // sweeps (fade + fly toward the dealer)
+    for (let i = this.trailSweeps.length - 1; i >= 0; i--) {
+      const s = this.trailSweeps[i];
+      const t = (nowMs - s.t0) / 420;
+      if (t < 0) continue;
+      const mat = s.mesh.material as THREE.MeshBasicMaterial;
+      if (t >= 1) {
+        this.scene.remove(s.mesh);
+        s.mesh.geometry.dispose();
+        mat.dispose();
+        this.trailSweeps.splice(i, 1);
+        continue;
+      }
+      s.mesh.position.y = s.from.y + t * t * 0.55;
+      s.mesh.position.x = s.from.x * (1 - t) + t * 0.1;
+      s.mesh.position.z = s.from.z * (1 - t) + t * -0.9;
+      s.mesh.scale.setScalar(1 - t * 0.4);
+      mat.opacity = 1 - t;
+      s.mesh.quaternion.copy(camQ);
+      s.mesh.rotateZ(t * 2.2);
+    }
+    void dt0;
   }
 
   /* ---------------- helpers ---------------- */
@@ -1200,6 +1300,9 @@ export class RouletteScene {
         b.rotation.z = Math.sin(t * 1.2) * 0.02;
       }
     }
+
+    // spent-shell trail: land, billboard toward the camera
+    this.updateTrail(nowMs, dt0);
 
     this.onFrame?.(dt, t);
     this.composer.render();

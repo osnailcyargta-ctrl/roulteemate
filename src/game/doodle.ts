@@ -2166,6 +2166,40 @@ export function texPriceTag(price: number, gold = false) {
   );
 }
 
+/** Handwritten "RING ME!" note leaning next to the shop bell. */
+export function texBellNote() {
+  return makeCanvas(
+    "bellnote",
+    256,
+    176,
+    (ctx, w, h, rng) => {
+      ctx.save();
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate(0.07);
+      // paper scrap
+      ctx.fillStyle = PAPER;
+      wobblePath(ctx, [[-104, -66], [100, -72], [112, 60], [-96, 70]], rng, 3, true);
+      ctx.fill();
+      sketchStroke(ctx, [[-104, -66], [100, -72], [112, 60], [-96, 70]], rng, {
+        width: 6,
+        jitter: 3,
+        close: true,
+      });
+      handText(ctx, "RING ME!", -6, -14, 44, INK, -0.04);
+      handText(ctx, "= next round", 4, 34, 24, "#8f2418", 0.03, '"Patrick Hand", cursive');
+      // little bell doodle
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(74, -30, 14, Math.PI, 0);
+      ctx.lineTo(92, -18);
+      ctx.stroke();
+      ctx.restore();
+    },
+    78,
+  );
+}
+
 export function texBoombox() {
   return makeCanvas(
     "boombox",
