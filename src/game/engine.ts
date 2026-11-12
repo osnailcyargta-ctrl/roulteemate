@@ -14,14 +14,28 @@ import {
   enemySkillCount,
   type AIDecision,
   type Difficulty,
+  type Mode,
   type ShotOutcome,
   type Side,
   type SkillOutcome,
   type ShellType,
 } from "./logic";
-import { SKILL_IDS, SKILL_META, ALL_SKILL_IDS, texDieFace, texSkillIcon, dataURL, type SkillId } from "./doodle";
+import {
+  SKILL_IDS,
+  SKILL_META,
+  ALL_SKILL_IDS,
+  RARITY,
+  texDieFace,
+  texSkillIcon,
+  dataURL,
+  type Rarity,
+  type SkillId,
+} from "./doodle";
 import { gameAudio } from "./audio";
 import { pick } from "./taunts";
+import { t } from "./i18n";
+import { MUT_DEFAULTS, type MutConfig } from "./mutator";
+import { ScriptRuntime, parseScript, type Program, type ScriptEvent } from "./script";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
@@ -40,6 +54,8 @@ export interface HudSkillSlot {
 export interface HudSnapshot {
   phase: "menu" | "dice" | "reloading" | "shop" | "playerTurn" | "enemyTurn" | "gameover" | "victory";
   round: number;
+  mode: Mode;
+  score: number; // ENDLESS: the DEALER's score counter (replaces his HP)
   hpPlayer: number;
   hpEnemy: number;
   maxHpPlayer: number;
@@ -75,7 +91,9 @@ export type HudEvent =
   | { type: "screenSplat" }
   | { type: "skillFlash"; id: SkillId }
   | { type: "reloadStep"; loaded: number; total: number }
-  | { type: "shopTip"; id: SkillId | "bell" | null; xPct: number; yPct: number };
+  | { type: "shopTip"; id: SkillId | "bell" | null; xPct: number; yPct: number }
+  | { type: "coinFlip"; win: boolean }
+  | { type: "rewindFx" };
 
 const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.95 };
 
@@ -85,7 +103,8 @@ const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.9
 export interface ShopOffer {
   id: SkillId;
   price: number;
-  legendary: boolean; // INSANE-only legends
+  rarity: Rarity; // base | epic | legend — drives the tag colors
+  legendary: boolean; // kept for the gold shine (legend only)
   sold: boolean;
 }
 
@@ -95,17 +114,18 @@ export interface ShopOfferView extends ShopOffer {
 }
 
 /** Trial prices. Voodoo is NOT for sale — a reflection is too easy to buy.
- *  The two legends are only stocked on INSANE. */
+ *  EPIC cards (REWIND, GAMBLE) sit in the middle tier, the two legends top it. */
 const SHOP_PRICES: Partial<Record<SkillId, number>> = {
   peek: 120,
   eject: 150,
   coffee: 130,
   reroll: 160,
   cuffs: 220,
+  rewind: 280,
+  gamble: 240,
   phoenix: 650,
   thirdEye: 550,
 };
-const LEGENDARY: SkillId[] = ["phoenix", "thirdEye"];
 const START_MONEY = 200;
 export const MAX_SKILLS = 4;
 
@@ -127,6 +147,12 @@ export class GameEngine {
   busy = false;
   /** The player's cash for the current match. */
   money = 0;
+  /** The current game mode (standard rounds, or ENDLESS score hunting). */
+  mode: Mode = "standard";
+  /** The active MUTATORS config, when the player enabled them. */
+  mut: MutConfig | null = null;
+  /** The custom-effect runtime (C-like scripts), when rules were provided. */
+  script: ScriptRuntime | null = null;
   /** The 3 random items currently lying on the table (shop breaks only). */
   private shopOffers: ShopOffer[] = [];
   private hoverId: SkillId | "bell" | null = null;
@@ -174,6 +200,8 @@ export class GameEngine {
     return {
       phase: st.phase,
       round: st.round,
+      mode: st.mode,
+      score: st.score,
       hpPlayer: st.hp.player,
       hpEnemy: st.hp.enemy,
       maxHpPlayer: st.maxHp.player,
@@ -263,16 +291,43 @@ export class GameEngine {
 
   /* ---------------- main flow ---------------- */
 
-  /** Playtime in the current round and in the whole match (ms). */
-  getTimes() {
-    const now = this.tEnd || (this.tStart > 0 ? performance.now() : 0);
-    return {
-      roundMs: Math.max(0, now - this.tRoundStart),
-      totalMs: Math.max(0, now - this.tStart),
-    };
+  /** Which cards are legally available on THIS table?
+   *  EPIC needs NORMAL or above; LEGEND needs INSANE / ENDLESS AND the
+   *  allow-legend switch. The mutator card pool gates everything further. */
+  private poolFor(diff: Difficulty, mode: Mode): SkillId[] {
+    const mut = this.mut;
+    let pool = ALL_SKILL_IDS;
+    if (mut) pool = pool.filter((id) => mut.pool.includes(id));
+    const epicOk = diff !== "easy";
+    const legendOk = (diff === "insane" || mode === "endless") && (mut ? mut.allowLegend : true);
+    return pool.filter((id) => {
+      const r = RARITY[id];
+      if (r === "epic") return epicOk;
+      if (r === "legend") return legendOk;
+      return true;
+    });
   }
 
-  async startGame(diff: Difficulty) {
+  /** The dice pool: legends are NEVER rolled (shop only). */
+  private dicePool(): SkillId[] {
+    return this.poolFor(
+      this.logic.state.difficulty,
+      this.logic.state.mode,
+    ).filter((id) => RARITY[id] !== "legend");
+  }
+
+  /** Draw n skills from the pool; duplicates allowed stack charges instead. */
+  private drawSkills(side: Side, pool: SkillId[], n: number) {
+    const allowDup = this.mut?.allowDup ?? false;
+    const bag = allowDup ? pool : pool.filter((id) => !this.logic.state[side === "player" ? "skills" : "enemySkills"][id].owned);
+    const src = bag.length ? bag : pool;
+    for (let k = 0; k < n; k++) {
+      const id = src[Math.floor(Math.random() * src.length)];
+      this.logic.grantSkill(side, id);
+    }
+  }
+
+  async startGame(diff: Difficulty | "endless", mut?: MutConfig) {
     gameAudio.ensure();
     gameAudio.startAmbient();
     this.lowHpTaunted = false;
@@ -282,20 +337,156 @@ export class GameEngine {
     this.tStart = performance.now();
     this.tRoundStart = this.tStart;
     this.tEnd = 0;
-    this.logic = new RouletteLogic(diff);
-    this.ai = new EnemyAI(this.logic, SMART[diff]);
+    // ENDLESS counts as INSANE: same sharp brain, legends allowed in the shop.
+    const mode: Mode = diff === "endless" ? "endless" : "standard";
+    const baseDiff: Difficulty = diff === "endless" ? "insane" : diff;
+    this.mode = mode;
+    this.mut = mut ?? null;
+    if (mut) {
+      const filled: MutConfig = { ...MUT_DEFAULTS, ...mut };
+      this.mut = filled;
+      this.logic = new RouletteLogic(baseDiff, mode, {
+        hpPlayer: filled.hpPlayer,
+        hpEnemy: filled.hpEnemy,
+      });
+    } else {
+      this.logic = new RouletteLogic(baseDiff, mode);
+    }
+    this.ai = new EnemyAI(this.logic, SMART[this.mut?.ai ?? baseDiff]);
+    this.setupScripts();
     this.scene.clearSpentShells();
     this.scene.dealerCuffed(false);
     this.scene.dollyHome();
     this.scene.voodooEndFX("player");
     this.scene.voodooEndFX("enemy");
     this.notify();
-    this.toast(`Starting cash: $${START_MONEY} — the table stocks goods between rounds.`, "info");
+    if (mode === "endless") {
+      this.toast(t("endlessIntro"), "info");
+    } else {
+      this.toast(t("startCash", { m: START_MONEY }), "info");
+    }
 
     await sleep(300);
     await this.diceIntro();
     await this.reloadSequence();
     await this.playerTurnStart();
+  }
+
+  /** Compile the mutator's custom-effect scripts and wire their hooks. */
+  private setupScripts() {
+    const rules = this.mut?.rules ?? [];
+    this.script = null;
+    if (!rules.length) return;
+    let program: Program | null = null;
+    const errors: string[] = [];
+    for (const src of rules) {
+      const res = parseScript(src);
+      errors.push(...res.errors);
+      if (res.errors.length) continue;
+      if (!program) program = { setup: [], handlers: [] };
+      program.setup.push(...res.program.setup);
+      program.handlers.push(...res.program.handlers);
+    }
+    for (const e of errors.slice(0, 4)) this.toast(`[rule] ${e}`, "bad");
+    if (!program) return;
+    const rt = new ScriptRuntime(program, {
+      runSkill: (id, target) => this.forceSkillFx(id, target),
+      heal: (side, n) => {
+        const did = this.logic.healSide(side, n);
+        if (did) this.onEvent({ type: "dmgPop", side, text: `+${n} HP`, tone: "reflect" });
+      },
+      damage: (side, n) => {
+        const dead = this.logic.damageSide(side, n);
+        if (side === "enemy") {
+          this.scene.bloodBurst("enemy");
+          if (this.logic.state.mode === "endless") this.onEvent({ type: "dmgPop", side, text: `SCORE +${n}`, tone: "hit" });
+          else this.onEvent({ type: "dmgPop", side, text: `-${n} HP`, tone: "hit" });
+        } else {
+          this.onEvent({ type: "screenSplat" });
+          this.scene.addTrauma(0.4);
+          if (!dead) this.onEvent({ type: "dmgPop", side, text: `-${n} HP`, tone: "hit" });
+        }
+      },
+      say: (text) => this.toast(text, "info"),
+    });
+    rt.stateRef = () => ({ hp: this.logic.state.hp, score: this.logic.state.score, round: this.logic.state.round });
+    this.script = rt;
+    rt.setup();
+    if (this.logic.state.hp.player <= 0) {
+      // a setup rule killed the player before the first round — mercy: undo it
+      this.logic.state.hp.player = 1;
+      this.toast("[custom rules] the setup killed you already... you start at 1 HP instead.", "bad");
+    }
+  }
+
+  /** Fire a custom-rule event (best-effort; scripts may never crash the game). */
+  private fireScript(event: ScriptEvent, ctx: { skill?: SkillId; side?: Side } = {}) {
+    try {
+      this.script?.fire(event, ctx);
+    } catch {
+      /* a broken rule must never break the game */
+    }
+  }
+
+  /** A script FORCED a skill's effect — apply it with a matching mini-FX. */
+  private async forceSkillFx(id: SkillId | "all", target: Side) {
+    const real: SkillId =
+      id === "all"
+        ? (ALL_SKILL_IDS[Math.floor(Math.random() * ALL_SKILL_IDS.length)] as SkillId)
+        : id;
+    this.logic.forceSkill(real, target);
+    this.onEvent({ type: "skillFlash", id: real });
+    const label = SKILL_META[real].name;
+    switch (real) {
+      case "cuffs":
+        gameAudio.cuffs();
+        if (target === "enemy") {
+          this.scene.dealerCuffed(true);
+          this.toast(`CUSTOM RULE: ${label} — the DEALER is cuffed!`, "good");
+        } else {
+          this.toast(`CUSTOM RULE: ${label} — YOUR wrists are locked!`, "bad");
+        }
+        break;
+      case "coffee":
+        gameAudio.heal();
+        void this.scene.coffeeDrinkFX(target);
+        this.toast(`CUSTOM RULE: ${label} — ${target === "player" ? "you" : "the DEALER"} take a sip.`, target === "player" ? "good" : "bad");
+        break;
+      case "reroll":
+        gameAudio.spinCylinder();
+        this.scene.addTrauma(0.2);
+        this.toast(`CUSTOM RULE: ${label} — the chamber spins!`, "info");
+        break;
+      case "voodoo":
+        gameAudio.voodooCast();
+        this.scene.voodooCastFX(target);
+        this.toast(`CUSTOM RULE: ${label} curse on ${target === "player" ? "YOU" : "the DEALER"}!`, "voodoo");
+        break;
+      case "peek":
+        gameAudio.scanDing();
+        this.toast(`CUSTOM RULE: ${label} — ${target === "player" ? "you" : "the DEALER"} inspect the chamber.`, "info");
+        break;
+      case "eject":
+        gameAudio.ejectShell();
+        this.toast(`CUSTOM RULE: ${label} — a shell is tossed!`, "info");
+        break;
+      case "gamble":
+        this.onEvent({ type: "coinFlip", win: Math.random() < 0.5 });
+        this.toast(`CUSTOM RULE: ${label} — a coin flips!`, "info");
+        break;
+      default:
+        this.toast(`CUSTOM RULE: ${label} fires!`, "info");
+    }
+    this.notify();
+  }
+
+  /** Playtime in the current round and in the whole match (ms). */
+  getTimes() {
+    const now = this.tEnd || (this.tStart > 0 ? performance.now() : 0);
+    return {
+      roundMs: Math.max(0, now - this.tRoundStart),
+      totalMs: Math.max(0, now - this.tStart),
+    };
   }
 
   backToMenu() {
@@ -311,12 +502,14 @@ export class GameEngine {
     this.scene.dollyHome();
     this.scene.voodooEndFX("player");
     this.scene.voodooEndFX("enemy");
-    this.logic = new RouletteLogic(this.logic.state.difficulty);
+    this.logic = new RouletteLogic(this.logic.state.difficulty, this.mode);
     this.logic.setPhase("menu");
     this.busy = false;
     this.money = 0;
     this.ghosts = [];
     this.shopOffers = [];
+    this.mut = null;
+    this.script = null;
     this.setShopHover(null);
     this.shopResolve = null;
     this.tStart = 0;
@@ -324,8 +517,9 @@ export class GameEngine {
     this.notify();
   }
 
-  /** Dice intro: 2 rolls for the player (their only skills for the match),
-   *  then the enemy silently receives 1/2/3 skills depending on difficulty. */
+  /** Dice intro: the dice hands out the player's skills (2 by default,
+   *  mutators may change the count and the pool), then the enemy quietly
+   *  receives its own (1/2/3 by difficulty, mutators may override). */
   private async diceIntro() {
     const diff = this.logic.state.difficulty;
     this.logic.setPhase("dice");
@@ -335,7 +529,12 @@ export class GameEngine {
     this.scene.enemySay(["Dice first.", "Your fate is decided here."], 2.8);
     gameAudio.gasp();
 
-    const granted = shuffled(SKILL_IDS).slice(0, 2);
+    const pool = this.dicePool();
+    const nPlayer = Math.max(0, Math.min(6, this.mut?.skillsPlayer ?? 2));
+    const granted: SkillId[] = [];
+    for (let k = 0; k < nPlayer; k++) {
+      granted.push(pool[Math.floor(Math.random() * pool.length)]);
+    }
 
     this.scene.diceVisible(true);
     for (const id of granted) {
@@ -350,9 +549,9 @@ export class GameEngine {
     }
     this.scene.diceVisible(false);
 
-    // the enemy quietly takes its skills
-    const n = enemySkillCount(diff);
-    for (const id of shuffled(SKILL_IDS).slice(0, n)) this.logic.grantSkill("enemy", id);
+    // the enemy quietly takes its skills (base + epic pool, never legends)
+    const nEnemy = Math.max(0, Math.min(6, this.mut?.skillsEnemy ?? enemySkillCount(diff)));
+    this.drawSkills("enemy", pool, nEnemy);
 
     this.scene.enemySetMood("laugh");
     gameAudio.laugh();
@@ -457,18 +656,24 @@ export class GameEngine {
     });
     gameAudio.hammerCock();
     await sleep(1400);
+    this.fireScript("round");
     this.busy = false;
   }
 
   /* ---------------- player turn ---------------- */
 
   private async playerTurnStart() {
-    if (this.logic.state.hp.enemy <= 0 || this.logic.state.hp.player <= 0) return;
+    // a custom rule may have finished somebody off between turns
+    if (this.logic.state.hp.enemy <= 0 || this.logic.state.hp.player <= 0) {
+      await this.endGame();
+      return;
+    }
     const wasPublic = this.logic.state.countdown > 0;
     this.logic.setPhase("playerTurn");
     this.logic.startTurnTick();
+    this.fireScript("turn", { side: "player" });
     if (wasPublic && this.logic.state.countdown <= 0 && this.logic.state.cylinder.length > 0) {
-      this.toast("THE BOARD FADED — memorize your shells!", "bad");
+      this.toast(t("boardFaded"), "bad");
       gameAudio.ghostFade();
     }
     this.busy = false;
@@ -523,19 +728,28 @@ export class GameEngine {
     if (sk.trial && sk.charges <= 0) this.registerGhost(id);
     this.onEvent({ type: "skillFlash", id });
     await this.playSkillFx("player", id, oc);
+    this.fireScript("skill:all", { skill: id, side: "player" });
+    this.fireScript(`skill:${id}` as ScriptEvent, { skill: id, side: "player" });
     this.notify();
     this.checkHealthFx();
+
+    // GAMBLE tails at 1 HP: the coin can kill its own flipper
+    if (oc.died || st.hp.player <= 0) {
+      await sleep(600);
+      await this.endGame();
+      return;
+    }
 
     // EJECT on the LAST shell empties the cylinder — nothing left to fire,
     // so the round ends RIGHT HERE: shop break, reload, pass the turn.
     if (this.logic.isEmpty) {
-      this.toast("CHAMBER EMPTY — the round is over!", "info");
+      this.toast(t("chamberEmpty"), "info");
       await sleep(900);
       await this.maybeShopAndReload();
       const next = this.passTurn();
       this.notify();
       if (next === "player") {
-        this.toast("THE DEALER IS CUFFED! Your turn again.", "good");
+        this.toast(t("dealerCuffedAgain"), "good");
         await sleep(700);
         await this.playerTurnStart();
       } else {
@@ -553,12 +767,16 @@ export class GameEngine {
 
   private async enemyTurnStart() {
     const st = this.logic.state;
-    if (st.hp.enemy <= 0 || st.hp.player <= 0) return;
+    if (st.hp.enemy <= 0 || st.hp.player <= 0) {
+      await this.endGame();
+      return;
+    }
     st.phase = "enemyTurn";
     const wasPublic = st.countdown > 0;
     this.logic.startTurnTick();
+    this.fireScript("turn", { side: "enemy" });
     if (wasPublic && st.countdown <= 0 && st.cylinder.length > 0) {
-      this.toast("THE BOARD FADED — memorize your shells!", "bad");
+      this.toast(t("boardFaded"), "bad");
       gameAudio.ghostFade();
     }
     if (this.logic.lastSlip) {
@@ -585,6 +803,8 @@ export class GameEngine {
         if (!oc.ok) continue;
         skillsUsed++;
         await this.playSkillFx("enemy", d.skill, oc);
+        this.fireScript("skill:all", { skill: d.skill, side: "enemy" });
+        this.fireScript(`skill:${d.skill}` as ScriptEvent, { skill: d.skill, side: "enemy" });
         this.notify();
         await sleep(rnd(500, 850));
         continue;
@@ -614,7 +834,7 @@ export class GameEngine {
       await this.playerTurnStart();
     } else {
       // the player is cuffed
-      this.toast("You're cuffed! The DEALER goes again.", "bad");
+      this.toast(t("youCuffed"), "bad");
       await sleep(800);
       await this.enemyTurnStart();
     }
@@ -690,10 +910,25 @@ export class GameEngine {
     }
 
     // CASH: every hit you land on the DEALER pays (reflections pay extra).
+    // ENDLESS: hits also feed the SCORE counter (+1 each, -1 when he heals).
     if (out.damageTo === "enemy") {
       const gain = out.reflected ? 150 : 100;
       this.money += gain;
-      this.toast(`+$${gain}${out.reflected ? " (reflected!)" : ""}`, "good");
+      if (this.logic.state.lastShot) this.logic.state.lastShot.moneyGain = gain;
+      if (this.logic.state.mode === "endless") {
+        this.onEvent({ type: "dmgPop", side: "enemy", text: out.reflected ? "SCORE +1!" : "+1 SCORE", tone: "reflect" });
+        this.toast(`+$${gain} — SCORE ${this.logic.state.score}${out.reflected ? " (reflected!)" : ""}`, "good");
+      } else {
+        this.toast(`+$${gain}${out.reflected ? " (reflected!)" : ""}`, "good");
+      }
+    }
+
+    // custom rules: every hit / every X take damage
+    this.fireScript("hit", { side: out.shooter });
+    if (out.damageTo) this.fireScript(`damage:${out.damageTo}` as ScriptEvent, { side: out.damageTo });
+    if (this.logic.state.hp.player <= 0) {
+      await sleep(400);
+      return "dead";
     }
 
     if (out.phoenixSaved) {
@@ -805,7 +1040,7 @@ export class GameEngine {
     this.notify();
     if (next === "player" && shooter === "player") {
       // the enemy was cuffed, we go again
-      this.toast("THE DEALER IS CUFFED! Your turn again.", "good");
+      this.toast(t("dealerCuffedAgain"), "good");
       await sleep(700);
       await this.playerTurnStart();
     } else if (next === "player") {
@@ -839,15 +1074,22 @@ export class GameEngine {
       case "peek": {
         gameAudio.scanDing();
         if (isPlayer) {
+          // THE MAGNIFYING GLASS: raised right up to your eyes, hovers over
+          // the chamber, zooms in a little, then sinks back down.
           this.scene.gunPeek(true); // the revolver swings up CLOSE to your eyes
-          this.scene.ringBurst(this.scene.muzzleWorldPos(), 0.5); // scanner ring over the barrel
+          await this.scene.magnifierFX("player");
           this.onEvent({ type: "shellReveal", shell: oc.revealed ?? null });
-          this.toast(oc.revealed ? `PEEK: this shell is ${oc.revealed.toUpperCase()}!` : "PEEK: chamber empty?", "info");
-          await sleep(1600);
+          this.toast(
+            oc.revealed
+              ? `MAGNIFYING GLASS: this shell is ${oc.revealed.toUpperCase()}!`
+              : "MAGNIFYING GLASS: chamber empty?",
+            "info",
+          );
+          await sleep(1500);
           this.scene.gunPeek(false);
         } else {
-          // the DEALER studies the chamber across the table
-          this.scene.ringBurst(this.scene.enemyWorldPos().add(new THREE.Vector3(0, -0.15, 0.55)), 0.7);
+          // the DEALER raises his own little glass over the chamber
+          await this.scene.magnifierFX("enemy");
           this.scene.enemySetMood("idle2");
           this.scene.enemySay([pick("scan")], 2);
           await sleep(1300);
@@ -937,6 +1179,53 @@ export class GameEngine {
         this.scene.gunPeek(false);
         break;
       }
+      case "rewind": {
+        // TIME GOES BACKWARDS — the 2D overlay plays the un-shooting
+        gameAudio.ghostFade();
+        gameAudio.spinCylinder();
+        this.scene.setDesat(0.35);
+        this.scene.addTrauma(0.12);
+        this.onEvent({ type: "rewindFx" });
+        const rw = oc.rewound;
+        if (rw?.moneyGain) {
+          this.money = Math.max(0, this.money - rw.moneyGain); // the cash never happened either
+        }
+        if (isPlayer) {
+          this.toast(
+            rw?.damageTo
+              ? `REWIND! The ${rw.shell.toUpperCase()} shell crawls back into the chamber — as if nothing happened. (-$${rw.moneyGain})`
+              : "REWIND! The shell crawls back into the chamber — that shot never fired.",
+            "voodoo",
+          );
+        } else {
+          this.toast("The DEALER REWINDS time — his last shot never fired!", "bad");
+          this.scene.enemySay([pick("rewind")], 2.2);
+        }
+        await sleep(1500);
+        this.scene.setDesat(0);
+        break;
+      }
+      case "gamble": {
+        // THE COIN — pure 2D doodle animation in the HUD overlay
+        gameAudio.diceShake();
+        await sleep(300);
+        this.onEvent({ type: "coinFlip", win: !!oc.gambleWin });
+        await sleep(1900); // the overlay plays the whole flip + result
+        if (isPlayer) {
+          if (oc.gambleWin) {
+            gameAudio.heal();
+            this.toast("HEADS! +1 HP. The coin likes you today.", "good");
+          } else {
+            gameAudio.hitPlayer();
+            this.scene.addTrauma(0.5);
+            this.toast("TAILS! -1 HP. The coin is a cruel friend.", "bad");
+          }
+        } else {
+          this.toast(oc.gambleWin ? "The DEALER flips HEADS — he gains 1 HP... wait, he has none?" : "The DEALER flips TAILS — bad luck for him!", oc.gambleWin ? "bad" : "good");
+        }
+        await sleep(600);
+        break;
+      }
     }
     this.notify();
   }
@@ -945,12 +1234,13 @@ export class GameEngine {
 
   private async endGame() {
     const st = this.logic.state;
+    const endless = st.mode === "endless";
     const deadSide: Side = st.hp.enemy <= 0 ? "enemy" : "player";
     this.tEnd = performance.now();
     gameAudio.stopHeartbeat();
     this.scene.setRedPulse(0);
 
-    if (deadSide === "enemy") {
+    if (deadSide === "enemy" && !endless) {
       st.phase = "victory";
       this.scene.setTimeScale(0.3, true);
       this.scene.addTrauma(0.7);
@@ -964,6 +1254,7 @@ export class GameEngine {
       this.scene.setDesat(0);
       this.onEvent({ type: "banner", title: "YOU SURVIVED", sub: "The DEALER falls. This room is yours now." });
     } else {
+      // ENDLESS: only the player can end this — the show goes on until YOU fall
       st.phase = "gameover";
       this.scene.setTimeScale(0.22, true);
       this.scene.addTrauma(1);
@@ -972,7 +1263,10 @@ export class GameEngine {
       this.scene.setDesat(0.5);
       gameAudio.lose();
       this.scene.enemySetMood("laugh");
-      this.scene.enemySay(["I told you...", "don't play with death."], 4);
+      this.scene.enemySay(
+        endless ? ["The house always wins, kid.", `SCORE ${st.score}. Enjoy oblivion.`] : ["I told you...", "don't play with death."],
+        4,
+      );
       this.notify();
       await sleep(1800);
       this.scene.setTimeScale(1);
@@ -1039,16 +1333,26 @@ export class GameEngine {
   }
 
   /** Roll the 3 random items lying on the table this visit.
-   *  Legends only on INSANE, voodoo is never sold, owned skills restocked out. */
+   *  Rarity gates: EPIC needs NORMAL+, LEGEND needs INSANE/ENDLESS (+ the
+   *  allow-legend switch). Voodoo is never sold, and owned cards restock
+   *  out unless the mutator allows duplicates. */
   private rollOffers(): ShopOffer[] {
     const st = this.logic.state;
-    const pool = (Object.keys(SHOP_PRICES) as SkillId[]).filter((id) => {
-      if (LEGENDARY.includes(id) && st.difficulty !== "insane") return false;
-      return !st.skills[id].owned;
+    const pool = this.poolFor(st.difficulty, st.mode).filter((id) => {
+      if (!SHOP_PRICES[id]) return false; // voodoo is not for sale
+      const owned = st.skills[id].owned;
+      if (owned && !(this.mut?.allowDup ?? false)) return false;
+      return true;
     });
     return shuffled(pool)
       .slice(0, 3)
-      .map((id) => ({ id, price: SHOP_PRICES[id]!, legendary: LEGENDARY.includes(id), sold: false }));
+      .map((id) => ({
+        id,
+        price: SHOP_PRICES[id]!,
+        rarity: RARITY[id],
+        legendary: RARITY[id] === "legend",
+        sold: false,
+      }));
   }
 
   /** Open the shop between rounds and wait for the bell to be rung. */
@@ -1064,8 +1368,8 @@ export class GameEngine {
     this.scene.showShopItems(this.shopOffers.filter((o) => !o.sold));
     this.onEvent({
       type: "banner",
-      title: "SHOP BREAK",
-      sub: "Hover the items to buy. Ring the golden bell on the LEFT to start the next round.",
+      title: t("shopTitle"),
+      sub: t("shopSub"),
       long: true,
     });
     this.notify();

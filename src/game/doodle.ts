@@ -13,9 +13,11 @@ export type SkillId =
   | "coffee"
   | "cuffs"
   | "phoenix"
-  | "thirdEye";
+  | "thirdEye"
+  | "rewind"
+  | "gamble";
 
-/** Skills the opening DICE can grant (the 2 shop legends are NOT in here). */
+/** Skills the opening DICE can grant (legends are shop-only). */
 export const SKILL_IDS: SkillId[] = [
   "reroll",
   "voodoo",
@@ -26,7 +28,38 @@ export const SKILL_IDS: SkillId[] = [
 ];
 
 /** Every skill in the game (dice pool + shop-only legends). */
-export const ALL_SKILL_IDS: SkillId[] = [...SKILL_IDS, "phoenix", "thirdEye"];
+export const ALL_SKILL_IDS: SkillId[] = [
+  ...SKILL_IDS,
+  "phoenix",
+  "thirdEye",
+  "rewind",
+  "gamble",
+];
+
+/** Card rarity — which tables a card may appear on.
+ *  BASE   : every difficulty
+ *  EPIC   : NORMAL and above (NORMAL / INSANE / ENDLESS) — never EASY
+ *  LEGEND : INSANE and ENDLESS only (and only when legends are allowed) */
+export type Rarity = "base" | "epic" | "legend";
+export const RARITY: Record<SkillId, Rarity> = {
+  reroll: "base",
+  voodoo: "base",
+  peek: "base",
+  eject: "base",
+  coffee: "base",
+  cuffs: "base",
+  phoenix: "legend",
+  thirdEye: "legend",
+  rewind: "epic",
+  gamble: "epic",
+};
+export const EPIC_SKILL_IDS: SkillId[] = ["rewind", "gamble"];
+export const LEGEND_SKILL_IDS: SkillId[] = ["phoenix", "thirdEye"];
+export const RARITY_COLOR: Record<Rarity, string> = {
+  base: "#4a4036",
+  epic: "#8f5bd4",
+  legend: "#d9a441",
+};
 
 export const SKILL_META: Record<
   SkillId,
@@ -45,9 +78,9 @@ export const SKILL_META: Record<
     color: "#5e9c5b",
   },
   peek: {
-    name: "PEEK",
+    name: "MAGNIFYING GLASS",
     tag: "Inspect the chamber",
-    desc: "Look at the current shell (LIVE or BLANK). 3-turn cooldown.",
+    desc: "Raise the magnifying glass and look at the current shell (LIVE or BLANK). 3-turn cooldown.",
     color: "#7fb4c9",
   },
   eject: {
@@ -77,8 +110,20 @@ export const SKILL_META: Record<
   thirdEye: {
     name: "THIRD EYE",
     tag: "See the order",
-    desc: "SHOP TRIAL — INSANE ONLY. 1 use: reveal the NEXT 3 SHELLS in exact order. The knowledge stays true as the shells leave the chamber — until a reroll muddies it.",
+    desc: "SHOP TRIAL — LEGEND. 1 use: reveal the NEXT 3 SHELLS in exact order. The knowledge stays true as the shells leave the chamber — until a reroll muddies it.",
     color: "#5aa7a0",
+  },
+  rewind: {
+    name: "REWIND",
+    tag: "Undo the last shot",
+    desc: "EPIC — 3 uses, 2-turn cooldown. The last shell that left the gun flies BACK into the chamber: the shot never happened (HP damage undone). You remember what it was... and so does the gun.",
+    color: "#8f5bd4",
+  },
+  gamble: {
+    name: "GAMBLE",
+    tag: "Flip the coin",
+    desc: "EPIC — 3 uses, 2-turn cooldown. Flip the doodle coin: HEADS you gain 1 HP, TAILS you LOSE 1 HP. It can even finish you. Pure, stupid, beautiful luck.",
+    color: "#8f5bd4",
   },
 };
 
@@ -856,20 +901,50 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       break;
     }
     case "peek": {
-      sketchEllipse(ctx, cx, cy, s * 0.34, s * 0.2, rng, { width: W, fill: PAPER });
-      sketchCircle(ctx, cx, cy, s * 0.12, rng, { width: W * 0.9, fill: "#1d3a4a" });
-      sketchCircle(ctx, cx + s * 0.04, cy - s * 0.04, s * 0.035, rng, { width: W * 0.5, fill: PAPER });
-      for (const a of [-2.4, -1.9, -1.2, -0.6, -0.2]) {
-        sketchLine(
-          ctx,
-          cx + Math.cos(a) * s * 0.32,
-          cy + Math.sin(a) * s * 0.2,
-          cx + Math.cos(a) * s * 0.42,
-          cy + Math.sin(a) * s * 0.28,
-          rng,
-          { width: W * 0.7, jitter: 1 },
-        );
-      }
+      // the MAGNIFYING GLASS: a big doodle lens + handle, a tiny shell inside
+      const lensR = s * 0.24;
+      const lx = cx - s * 0.07;
+      const ly = cy - s * 0.05;
+      sketchCircle(ctx, lx, ly, lensR, rng, { width: W * 1.1, fill: "#dceef5" });
+      sketchCircle(ctx, lx - lensR * 0.3, ly - lensR * 0.3, lensR * 0.16, rng, {
+        width: W * 0.6,
+        fill: PAPER,
+      });
+      // a tiny shell under the lens — the whole point of the glass
+      ctx.fillStyle = RED;
+      wobblePath(
+        ctx,
+        [
+          [lx + s * 0.02, ly - s * 0.05],
+          [lx + s * 0.14, ly - s * 0.05],
+          [lx + s * 0.14, ly + s * 0.05],
+          [lx + s * 0.02, ly + s * 0.05],
+        ],
+        rng,
+        2,
+        true,
+      );
+      ctx.fill();
+      // handle
+      sketchStroke(
+        ctx,
+        [
+          [lx + lensR * 0.72, ly + lensR * 0.72],
+          [cx + s * 0.3, cy + s * 0.32],
+        ],
+        rng,
+        { width: W * 1.5, jitter: 1, color: "#8a5a13" },
+      );
+      // sparkle
+      sketchStroke(
+        ctx,
+        [
+          [cx - s * 0.34, cy - s * 0.3],
+          [cx - s * 0.26, cy - s * 0.22],
+        ],
+        rng,
+        { width: W * 0.7, jitter: 1, color: "#7fb4c9" },
+      );
       break;
     }
     case "eject": {
@@ -1068,6 +1143,67 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       handText(ctx, "3", cx + s * 0.32, cy + s * 0.34, s * 0.16, "#5aa7a0", -0.1);
       break;
     }
+    case "rewind": {
+      // a doodle cassette tape with two << arrows — time flows backwards
+      ctx.fillStyle = PAPER;
+      wobblePath(
+        ctx,
+        [
+          [cx - s * 0.32, cy - s * 0.16],
+          [cx + s * 0.32, cy - s * 0.16],
+          [cx + s * 0.32, cy + s * 0.16],
+          [cx - s * 0.32, cy + s * 0.16],
+        ],
+        rng,
+        2,
+        true,
+      );
+      ctx.fill();
+      sketchStroke(
+        ctx,
+        [
+          [cx - s * 0.32, cy - s * 0.16],
+          [cx + s * 0.32, cy - s * 0.16],
+          [cx + s * 0.32, cy + s * 0.16],
+          [cx - s * 0.32, cy + s * 0.16],
+        ],
+        rng,
+        { width: W, jitter: 2, close: true },
+      );
+      sketchCircle(ctx, cx - s * 0.14, cy, s * 0.08, rng, { width: W * 0.8 });
+      sketchCircle(ctx, cx + s * 0.14, cy, s * 0.08, rng, { width: W * 0.8 });
+      sketchLine(ctx, cx - s * 0.14, cy, cx + s * 0.14, cy, rng, { width: W * 0.5, jitter: 1 });
+      // the two backward arrows, purple
+      for (const dx of [0, s * 0.13]) {
+        sketchStroke(
+          ctx,
+          [
+            [cx - s * 0.3 + dx, cy - s * 0.28],
+            [cx - s * 0.42 + dx, cy - s * 0.36],
+            [cx - s * 0.3 + dx, cy - s * 0.44],
+          ],
+          rng,
+          { width: W * 0.9, jitter: 1, color: "#8f5bd4" },
+        );
+      }
+      break;
+    }
+    case "gamble": {
+      // a flipping doodle coin — mid-spin with motion arcs
+      sketchCircle(ctx, cx, cy, s * 0.24, rng, { width: W * 1.1, fill: BRASS });
+      sketchCircle(ctx, cx, cy, s * 0.16, rng, { width: W * 0.7, color: "#8a6d1d" });
+      handText(ctx, "?", cx, cy + s * 0.02, s * 0.2, "#5c4708", 0);
+      // motion arcs (it is spinning!)
+      for (const r of [0.32, 0.4]) {
+        const pts: [number, number][] = [];
+        for (let i = 0; i <= 10; i++) {
+          const a = -0.5 + (i / 10) * 2.1;
+          pts.push([cx + Math.cos(a) * s * r, cy + Math.sin(a) * s * r * 0.8]);
+        }
+        sketchStroke(ctx, pts, rng, { width: W * 0.6, jitter: 1, color: "#8f5bd4" });
+      }
+      break;
+    }
   }
 }
 
@@ -1087,8 +1223,9 @@ export function texSkillIcon(id: SkillId) {
 /* ============================ DIFFICULTY ICONS ============================ */
 
 /** One hand-drawn icon per difficulty: a smiling shell (EASY),
- *  a neutral die (NORMAL) and a red-eyed skull (INSANE). */
-export function texDiffIcon(id: "easy" | "normal" | "insane") {
+ *  a neutral die (NORMAL), a red-eyed skull (INSANE) and an
+ *  endless golden loop (ENDLESS). */
+export function texDiffIcon(id: "easy" | "normal" | "insane" | "endless") {
   return makeCanvas(
     `diff-${id}`,
     256,
@@ -1148,6 +1285,30 @@ export function texDiffIcon(id: "easy" | "normal" | "insane") {
         sketchLine(ctx, 178, 34, 146, 34, rng, { width: 6 });
         sketchStroke(ctx, [[146, 34], [156, 26]], rng, { width: 5, jitter: 1.5 });
         sketchStroke(ctx, [[146, 34], [156, 42]], rng, { width: 5, jitter: 1.5 });
+      } else if (id === "endless") {
+        // ENDLESS: a golden infinity loop with a little star inside
+        const pts: [number, number][] = [];
+        for (let i = 0; i <= 60; i++) {
+          const t = (i / 60) * Math.PI * 2;
+          const r = 66 + Math.sin(t * 2) * 8;
+          const a = t;
+          // lemniscate-ish loop drawn freehand
+          const x = cx + Math.sin(a) * r;
+          const y = 128 + Math.sin(a * 2) * 44;
+          pts.push([x, y]);
+        }
+        sketchStroke(ctx, pts, rng, { width: 12, jitter: 3, color: "#d9a441" });
+        // star inside the loop
+        const star: [number, number][] = [];
+        for (let i = 0; i <= 10; i++) {
+          const a = -Math.PI / 2 + (i * Math.PI) / 5;
+          const r = i % 2 === 0 ? 22 : 10;
+          star.push([cx + Math.cos(a) * r, 128 + Math.sin(a) * r]);
+        }
+        sketchStroke(ctx, star, rng, { width: 6, jitter: 1.5, color: "#8f2418", close: true });
+        // little motion dashes
+        sketchLine(ctx, cx - 92, 70, cx - 64, 62, rng, { width: 5, color: "#d9a441" });
+        sketchLine(ctx, cx + 64, 196, cx + 92, 188, rng, { width: 5, color: "#d9a441" });
       } else {
         // the INSANE skull — red eyes, gritted teeth
         // crossed shells behind
@@ -1186,7 +1347,7 @@ export function texDiffIcon(id: "easy" | "normal" | "insane") {
         }
       }
     },
-    id === "easy" ? 71 : id === "normal" ? 72 : 73,
+    id === "easy" ? 71 : id === "normal" ? 72 : id === "endless" ? 74 : 73,
   );
 }
 
@@ -2639,5 +2800,108 @@ export function texCoffeeCup() {
       sketchEllipse(ctx, cx, 282, 52, 10, rng, { width: 3 });
     },
     233,
+  );
+}
+
+/** The GAMBLE coin — brass doodle coin, star on heads, skull on tails. */
+export function texCoin(face: "heads" | "tails") {
+  return makeCanvas(
+    `coin-${face}`,
+    256,
+    256,
+    (ctx, w, h, rng) => {
+      const cx = w / 2;
+      ctx.fillStyle = face === "heads" ? "#d9a441" : "#b3762e";
+      sketchCircle(ctx, cx, cx, 96, rng, { width: 12, fill: face === "heads" ? "#d9a441" : "#b3762e" });
+      sketchCircle(ctx, cx, cx, 74, rng, { width: 6, color: "rgba(34,26,18,0.5)" });
+      if (face === "heads") {
+        // star
+        const star: [number, number][] = [];
+        for (let i = 0; i <= 10; i++) {
+          const a = -Math.PI / 2 + (i * Math.PI) / 5;
+          const r = i % 2 === 0 ? 52 : 22;
+          star.push([cx + Math.cos(a) * r, cx + Math.sin(a) * r]);
+        }
+        sketchStroke(ctx, star, rng, { width: 8, jitter: 2, color: "#5c4708", close: true });
+        handText(ctx, "+1 HP", cx, cx + 108, 30, "#3f6b3d", 0);
+      } else {
+        // sad skull
+        sketchCircle(ctx, cx - 26, cx - 18, 14, rng, { width: 7, fill: "#5c4708" });
+        sketchCircle(ctx, cx + 26, cx - 18, 14, rng, { width: 7, fill: "#5c4708" });
+        sketchLine(ctx, cx - 18, cx + 34, cx - 8, cx + 42, rng, { width: 6, color: "#5c4708" });
+        sketchLine(ctx, cx - 6, cx + 36, cx + 2, cx + 36, rng, { width: 6, color: "#5c4708" });
+        sketchLine(ctx, cx + 8, cx + 42, cx + 18, cx + 34, rng, { width: 6, color: "#5c4708" });
+        handText(ctx, "-1 HP", cx, cx + 108, 30, "#8f2418", 0);
+      }
+    },
+    face === "heads" ? 251 : 252,
+  );
+}
+
+/** The MAGNIFYING GLASS prop — raised in front of the camera by PEEK. */
+export function texMagnifier() {
+  return makeCanvas(
+    "prop-magnifier",
+    512,
+    512,
+    (ctx, w, h, rng) => {
+      const cx = 210;
+      const cy = 210;
+      const r = 130;
+      // glass lens — light blue with a shine
+      ctx.fillStyle = "rgba(214,238,246,0.85)";
+      sketchCircle(ctx, cx, cy, r, rng, { width: 16, fill: "rgba(214,238,246,0.85)" });
+      // shine arcs
+      for (const rr of [70, 92]) {
+        const pts: [number, number][] = [];
+        for (let i = 0; i <= 8; i++) {
+          const a = 3.5 + (i / 8) * 1.0;
+          pts.push([cx + Math.cos(a) * rr, cy + Math.sin(a) * rr]);
+        }
+        sketchStroke(ctx, pts, rng, { width: 7, jitter: 1, color: "rgba(255,255,255,0.9)", passes: 1 });
+      }
+      // rim — brass
+      sketchCircle(ctx, cx, cy, r + 10, rng, { width: 14, color: "#8a5a13" });
+      // handle
+      sketchStroke(
+        ctx,
+        [
+          [cx + r * 0.78, cy + r * 0.78],
+          [cx + r * 0.78 + 130, cy + r * 0.78 + 130],
+          [cx + r * 0.78 + 148, cy + r * 0.78 + 118],
+        ],
+        rng,
+        { width: 26, jitter: 2, color: "#8a5a13" },
+      );
+      // the reflection of a shell in the lens (the point of the glass!)
+      ctx.fillStyle = RED;
+      wobblePath(
+        ctx,
+        [
+          [cx - 52, cy - 26],
+          [cx + 34, cy - 26],
+          [cx + 34, cy + 34],
+          [cx - 52, cy + 34],
+        ],
+        rng,
+        3,
+        true,
+      );
+      ctx.fill();
+      sketchStroke(
+        ctx,
+        [
+          [cx - 52, cy - 26],
+          [cx + 34, cy - 26],
+          [cx + 34, cy + 34],
+          [cx - 52, cy + 34],
+        ],
+        rng,
+        { width: 8, jitter: 2, close: true },
+      );
+      ctx.fillStyle = BRASS;
+      ctx.fillRect(cx - 52, cy + 34, 86, 20);
+    },
+    253,
   );
 }

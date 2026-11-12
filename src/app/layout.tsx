@@ -24,9 +24,9 @@ const handSC = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "ROULETTE-MATE — 2.5D Doodle Russian Roulette",
+  title: "roulteemate — 2.5D Doodle Russian Roulette",
   description:
-    "A first-person 2.5D doodle Russian roulette game. Fate dice, a revolver, and one room full of tension.",
+    "A first-person 2.5D doodle Russian roulette game. Fate dice, a revolver, endless score hunting and fully custom tables.",
 };
 
 export const viewport: Viewport = {

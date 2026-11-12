@@ -34,6 +34,7 @@ import {
   texCuffsProp,
   texCoffeeCup,
   texVoodooDoll,
+  texMagnifier,
   texSkillIcon,
   type SkillId,
   type EnemyMood,
@@ -871,6 +872,82 @@ export class RouletteScene {
           cup.position.copy(from);
           cup.rotation.z = 0;
           this.coffeeBusy = false;
+          resolve();
+        }
+      };
+      requestAnimationFrame(step);
+    });
+  }
+
+  /** The MAGNIFYING GLASS (peek): a doodle glass rises right up to your
+   *  eyes, hovers over the chamber with a little zoom, then sinks away.
+   *  The DEALER raises his own glass over his side of the table. */
+  magnifierFX(who: "player" | "enemy"): Promise<void> {
+    const mat = new THREE.MeshBasicMaterial({
+      map: ctex(texMagnifier()),
+      transparent: true,
+      alphaTest: 0.02,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.62), mat);
+    mesh.renderOrder = 9;
+    const cam = this.camera.getWorldPosition(new THREE.Vector3());
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
+    let from: THREE.Vector3;
+    let to: THREE.Vector3;
+    if (who === "player") {
+      to = cam.clone().addScaledVector(dir, 0.62).addScaledVector(right, 0.1).add(new THREE.Vector3(0, 0.02, 0));
+      from = to.clone().add(new THREE.Vector3(0.16, -0.5, 0.12));
+    } else {
+      to = this.enemyWorldPos().add(new THREE.Vector3(0.05, 0.16, 0.5));
+      from = to.clone().add(new THREE.Vector3(0.2, -0.45, 0.1));
+    }
+    mesh.position.copy(from);
+    mesh.lookAt(cam);
+    this.scene.add(mesh);
+    this.ringBurst(to.clone(), 0.45);
+    const start = performance.now();
+    const DUR = who === "player" ? 2600 : 2200;
+    const holdFrom = 0.22;
+    const holdTo = who === "player" ? 0.74 : 0.66;
+    return new Promise<void>((resolve) => {
+      const step = () => {
+        const t = Math.min(1, (performance.now() - start) / DUR);
+        if (t < holdFrom) {
+          // rising into view
+          const e = 1 - Math.pow(1 - t / holdFrom, 2);
+          mesh.position.lerpVectors(from, to, e);
+          mesh.rotation.z = (1 - e) * 0.35;
+        } else if (t < holdTo) {
+          // hovering study: gentle wobble + two zoom pulses (the GLASS works)
+          const g = (t - holdFrom) / (holdTo - holdFrom);
+          mesh.position.copy(to);
+          mesh.position.y += Math.sin(g * Math.PI * 3) * 0.012;
+          mesh.rotation.z = Math.sin(g * Math.PI * 2.4) * 0.1;
+          const zoom = 1 + Math.max(0, Math.sin(g * Math.PI * 2)) * 0.16;
+          mesh.scale.setScalar(zoom);
+          if (Math.random() < 0.08) {
+            this.spawn(this.sparkTex, to.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, 0)), {
+              size: 0.05,
+              vel: new THREE.Vector3(0, 0.1, 0),
+              life: 0.4,
+            });
+          }
+        } else {
+          // sinking away
+          const e = (t - holdTo) / (1 - holdTo);
+          mesh.position.lerpVectors(to, from, e * e);
+          mesh.rotation.z = Math.sin((1 - e) * Math.PI) * 0.15;
+          mesh.scale.setScalar(1);
+        }
+        mesh.lookAt(this.camera.getWorldPosition(new THREE.Vector3()));
+        mesh.rotateZ(mesh.rotation.z);
+        if (t < 1) requestAnimationFrame(step);
+        else {
+          this.scene.remove(mesh);
+          mat.dispose();
           resolve();
         }
       };

@@ -562,3 +562,79 @@ canvas {
   animation: expand-in 0.28s cubic-bezier(0.2, 1.2, 0.4, 1) both;
   transform-origin: top;
 }
+
+/* ==================== GAMBLE COIN (2D flip) ==================== */
+.coin-wrap {
+  filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.45));
+}
+@keyframes coin-spin {
+  0%   { transform: scaleX(1) rotate(-6deg) translateY(0); }
+  25%  { transform: scaleX(0.08) rotate(0deg) translateY(-34px); }
+  50%  { transform: scaleX(-1) rotate(6deg) translateY(0); }
+  75%  { transform: scaleX(0.08) rotate(0deg) translateY(-34px); }
+  100% { transform: scaleX(1) rotate(-6deg) translateY(0); }
+}
+.coin-spinning {
+  animation: coin-spin 0.62s linear infinite;
+}
+@keyframes coin-land {
+  0%   { transform: scale(1.6) rotate(-10deg); }
+  55%  { transform: scale(0.94) rotate(4deg); }
+  75%  { transform: scale(1.06) rotate(-2deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+.coin-landed {
+  animation: coin-land 0.5s cubic-bezier(0.2, 1.3, 0.4, 1) both;
+}
+
+/* ==================== REWIND (2D un-shot) ==================== */
+@keyframes rewind-arrows-in {
+  0%   { transform: translateX(40px) scale(0.6); opacity: 0; }
+  30%  { transform: translateX(0) scale(1.05); opacity: 1; }
+  85%  { transform: translateX(-10px) scale(1); opacity: 1; }
+  100% { transform: translateX(-30px) scale(0.9); opacity: 0; }
+}
+.rewind-arrows {
+  position: absolute;
+  top: 34%;
+  left: 50%;
+  translate: -50% 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  animation: rewind-arrows-in 1.5s ease both;
+}
+@keyframes rewind-shell-crawl {
+  0%   { left: 88%; top: 55%; transform: rotate(140deg) scale(1.1); opacity: 0; }
+  12%  { opacity: 1; }
+  70%  { left: 52%; top: 47%; transform: rotate(40deg) scale(1); opacity: 1; }
+  100% { left: 50%; top: 46%; transform: rotate(0deg) scale(0.85); opacity: 0; }
+}
+.rewind-shell {
+  position: absolute;
+  height: 64px;
+  width: 64px;
+  animation: rewind-shell-crawl 1.5s ease-in both;
+}
+
+/* ==================== ENDLESS SCORE BOX ==================== */
+.score-box {
+  animation: pop-in 0.4s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+@keyframes score-bump {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.14) rotate(1deg); }
+  100% { transform: scale(1); }
+}
+.score-box:has(+ *) { animation: score-bump 0.35s ease; }
+
+/* ==================== MUTATOR POPUP ==================== */
+.doodle-box input[type="number"] {
+  border: none;
+  outline: none;
+  background: transparent;
+}
+.doodle-box textarea::placeholder {
+  color: rgba(34, 26, 18, 0.45);
+}

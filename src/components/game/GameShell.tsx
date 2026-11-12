@@ -1,19 +1,24 @@
 "use client";
 
 /**
- * GameShell — React layer for ROULETTE-MATE.
+ * GameShell — React layer for ROULTEEMATE.
  * Mounts the engine (Three.js) plus all doodle overlays: the animated
- * main menu (title top-left, 3 buttons bottom-left), settings, HP,
- * shell counter, skill bar, toasts, banner, rules, win/lose screens,
- * and the low-HP blood vignette.
+ * main menu (title top-left, 3 buttons bottom-left), settings (incl.
+ * language & mutators), the CUSTOM TABLE popup, HP, shell counter,
+ * skill bar, toasts, banner, rules, win/lose screens, coin flip and
+ * rewind 2D overlays, and the low-HP blood vignette.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GameEngine, type HudEvent, type HudSnapshot } from "@/game/engine";
 import {
+  ALL_SKILL_IDS,
+  RARITY,
+  RARITY_COLOR,
   SKILL_META,
   dataURL,
   texBulletPip,
+  texCoin,
   texDiffIcon,
   texHeart,
   texSkillIcon,
@@ -21,6 +26,10 @@ import {
   texVoodooMask,
   type SkillId,
 } from "@/game/doodle";
+import { setLang, t, type Lang } from "@/game/i18n";
+import { mutDefaultsFor, type MutConfig } from "@/game/mutator";
+import { parseScript } from "@/game/script";
+import type { Difficulty } from "@/game/logic";
 import type { ShellType } from "@/game/logic";
 import { gameAudio } from "@/game/audio";
 
@@ -29,6 +38,7 @@ type Pop = { id: number; side: string; text: string; tone: string };
 type Splat = { id: number; url: string; left: number; top: number; size: number; rot: number };
 type Stamp = { id: number; idSkill: SkillId };
 type MenuPanel = "play" | "settings" | null;
+type TableId = "easy" | "normal" | "insane" | "endless";
 
 type Quality = "low" | "medium" | "high";
 
@@ -36,6 +46,10 @@ type Quality = "low" | "medium" | "high";
 type Settings = {
   muted: boolean;
   quality: Quality;
+  /** EN (default) or ID */
+  lang: Lang;
+  /** MUTATORS: clicking play opens the CUSTOM TABLE popup */
+  mutators: boolean;
   /** the live/blank counter board at the top */
   showShellStat: boolean;
   /** TIME expands into these two */
@@ -45,10 +59,13 @@ type Settings = {
   showFps: boolean;
 };
 
-const SETTINGS_KEY = "roulette-mate-settings";
+const SETTINGS_KEY = "roulteemate-settings";
+const LEGACY_SETTINGS_KEY = "roulette-mate-settings";
 const DEFAULT_SETTINGS: Settings = {
   muted: false,
   quality: "high",
+  lang: "en",
+  mutators: false,
   showShellStat: true,
   showRoundTime: true,
   showTotalTime: true,
@@ -57,7 +74,7 @@ const DEFAULT_SETTINGS: Settings = {
 
 function loadSettings(): Settings {
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
+    const raw = localStorage.getItem(SETTINGS_KEY) ?? localStorage.getItem(LEGACY_SETTINGS_KEY);
     if (raw) return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
   } catch {
     /* corrupted storage — fall back to defaults */
@@ -65,16 +82,59 @@ function loadSettings(): Settings {
   return DEFAULT_SETTINGS;
 }
 
-const DIFFS: { id: "easy" | "normal" | "insane"; label: string; desc: string }[] = [
-  { id: "easy", label: "EASY", desc: "Your 6 HP vs his 5. The Dealer has 1 skill." },
-  { id: "normal", label: "NORMAL", desc: "5 vs 5 HP. The Dealer has 2 skills." },
-  { id: "insane", label: "INSANE", desc: "Your 4 HP vs his 5. 3 skills + shop legends." },
+const DIFFS: { id: TableId; labelKey: Parameters<typeof t>[0]; descKey: Parameters<typeof t>[0] }[] = [
+  { id: "easy", labelKey: "diffEasy", descKey: "diffEasyDesc" },
+  { id: "normal", labelKey: "diffNormal", descKey: "diffNormalDesc" },
+  { id: "insane", labelKey: "diffInsane", descKey: "diffInsaneDesc" },
+  { id: "endless", labelKey: "diffEndless", descKey: "diffEndlessDesc" },
 ];
+
+const baseDiffOf = (d: TableId): Difficulty => (d === "endless" ? "insane" : d);
+const modeOf = (d: TableId) => (d === "endless" ? "endless" : "standard");
 
 const fmtTime = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 };
+
+const SYNTAX_HELP = `# variable (int / float / string)
+shots = 0
+ratio = 2.5
+mood = "angry"
+
+# condition + command
+if hp dealer <= 2 run skill cuffs to player
+if hp player == 3 {
+  heal player 1
+} else {
+  damage dealer 1
+}
+
+# loop (negative = infinite, needs break)
+repeat 3 heal player 1
+repeat -1 {
+  if hp dealer <= 2 {
+    run skill coffee to dealer
+    break
+  }
+  add shots 1
+}
+
+# events
+every hit { ... }
+every player take damage { ... }
+every dealer take damage { ... }
+every skill cuffs used { ... }
+every skill all used { ... }
+every turn { ... }
+every round { ... }
+
+# commands
+run skill <name|all> to <player|dealer>
+heal <player|dealer> <n>
+damage <player|dealer> <n>
+set <var> = <value>   ·  add <var> <n>  ·  sub <var> <n>
+print <text|var>      ·  break`;
 
 export default function GameShell() {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -89,29 +149,41 @@ export default function GameShell() {
   const [banner, setBanner] = useState<{ title: string; sub?: string } | null>(null);
   const [reveal, setReveal] = useState<{ shell: "live" | "blank" } | null>(null);
   const [showHelp, setShowHelp] = useState(false);
-  const [diff, setDiff] = useState<"easy" | "normal" | "insane">("normal");
+  const [diff, setDiff] = useState<TableId>("normal");
   const [reloadPips, setReloadPips] = useState(0);
   const [flashRed, setFlashRed] = useState(false);
   const [revealQueue, setRevealQueue] = useState<(ShellType | null)[] | null>(null);
   const [times, setTimes] = useState<{ roundMs: number; totalMs: number }>({ roundMs: 0, totalMs: 0 });
   const [shopTip, setShopTip] = useState<{ id: SkillId | "bell"; xPct: number; yPct: number } | null>(null);
+  /* 2D overlays: GAMBLE coin flip + REWIND un-shot */
+  const [coin, setCoin] = useState<"spin" | "win" | "lose" | null>(null);
+  const [rewinding, setRewinding] = useState(false);
 
   /* ---------- MAIN MENU screens ---------- */
   const [menuPanel, setMenuPanel] = useState<MenuPanel>(null);
   /* ---------- SETTINGS (persisted) ---------- */
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [timeOpen, setTimeOpen] = useState(false);
+  /* ---------- MUTATOR popup ---------- */
+  const [mutOpen, setMutOpen] = useState(false);
+  const [mutCfg, setMutCfg] = useState<MutConfig | null>(null);
+  const [ruleText, setRuleText] = useState("");
+  const [ruleErrors, setRuleErrors] = useState<string[]>([]);
+  const [showSyntax, setShowSyntax] = useState(false);
   /* ---------- FPS meter ---------- */
   const [fps, setFps] = useState(0);
 
   /* load persisted settings once */
   useEffect(() => {
-    setSettings(loadSettings());
+    const s = loadSettings();
+    setSettings(s);
+    setLang(s.lang);
   }, []);
 
   const updateSettings = useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
+      if (patch.lang) setLang(patch.lang);
       try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
       } catch {
@@ -164,6 +236,9 @@ export default function GameShell() {
       diffEasy: dataURL("diff-easy", texDiffIcon("easy")),
       diffNormal: dataURL("diff-normal", texDiffIcon("normal")),
       diffInsane: dataURL("diff-insane", texDiffIcon("insane")),
+      diffEndless: dataURL("diff-endless", texDiffIcon("endless")),
+      coinHeads: dataURL("coin-heads", texCoin("heads")),
+      coinTails: dataURL("coin-tails", texCoin("tails")),
     };
   }, [ready]);
 
@@ -233,6 +308,16 @@ export default function GameShell() {
       case "shopTip":
         setShopTip(e.id ? { id: e.id, xPct: e.xPct, yPct: e.yPct } : null);
         break;
+      case "coinFlip":
+        // pure 2D doodle animation: coin spins, lands, result stamp
+        setCoin("spin");
+        setTimeout(() => setCoin(e.win ? "win" : "lose"), 1500);
+        setTimeout(() => setCoin(null), 2500);
+        break;
+      case "rewindFx":
+        setRewinding(true);
+        setTimeout(() => setRewinding(false), 1500);
+        break;
     }
   }, []);
 
@@ -273,6 +358,7 @@ export default function GameShell() {
       if (k === "escape") {
         setMenuPanel(null);
         setShowHelp(false);
+        setMutOpen(false);
         return;
       }
       if (!eng || !snap) return;
@@ -300,10 +386,61 @@ export default function GameShell() {
     return () => clearInterval(iv);
   }, [phaseKey]);
 
+  /* ---------- mutator helpers ---------- */
+  const openMutator = useCallback(() => {
+    setMutCfg(mutDefaultsFor(baseDiffOf(diff), modeOf(diff) as "standard" | "endless", ALL_SKILL_IDS));
+    setRuleText("");
+    setRuleErrors([]);
+    setMutOpen(true);
+  }, [diff]);
+
+  const addRule = () => {
+    const src = ruleText.trim();
+    if (!src) return;
+    const res = parseScript(src);
+    if (res.errors.length) {
+      setRuleErrors(res.errors.slice(0, 5));
+      return;
+    }
+    setRuleErrors([]);
+    setMutCfg((c) => (c ? { ...c, rules: [...c.rules, src] } : c));
+    setRuleText("");
+    gameAudio.stamp();
+  };
+
+  const togglePoolCard = (id: SkillId) => {
+    setMutCfg((c) => {
+      if (!c) return c;
+      const has = c.pool.includes(id);
+      const pool = has ? c.pool.filter((x) => x !== id) : [...c.pool, id];
+      return { ...c, pool };
+    });
+  };
+
+  const startFromMenu = () => {
+    gameAudio.ensure();
+    if (settings.mutators) {
+      openMutator();
+    } else {
+      setMenuPanel(null);
+      void engineRef.current?.startGame(diff);
+    }
+  };
+
+  const launchCustomTable = () => {
+    if (!mutCfg) return;
+    gameAudio.ensure();
+    gameAudio.click();
+    setMutOpen(false);
+    setMenuPanel(null);
+    void engineRef.current?.startGame(diff, mutCfg);
+  };
+
   const isPlayerTurn = snap?.phase === "playerTurn" && snap.turn === "player" && !snap.busy;
   const phase = snap?.phase ?? "menu";
   const inGame = phase !== "menu";
   const lowHp = inGame && snap ? snap.hpPlayer : 0;
+  const endless = snap?.mode === "endless";
 
   /* ---------- render ---------- */
   return (
@@ -315,6 +452,7 @@ export default function GameShell() {
       <div className="pointer-events-none absolute inset-0 vignette-overlay z-10" />
       <div className="pointer-events-none absolute inset-0 grain-overlay z-10" />
       {flashRed && <div className="pointer-events-none absolute inset-0 z-10 bg-[rgba(199,62,46,0.35)]" />}
+      {rewinding && <div className="pointer-events-none absolute inset-0 z-10 bg-[rgba(94,60,145,0.18)]" />}
 
       {/* LOW-HP BLOOD VIGNETTE: starts at 2 HP, thickest at 1 HP */}
       {snap && lowHp === 2 && (
@@ -436,7 +574,7 @@ export default function GameShell() {
           {/* top left: round + cash + optional timers (toggles in SETTINGS) */}
           <div className="absolute left-2 top-2 z-30 flex flex-col gap-1.5 sm:left-3 sm:top-3 sm:gap-2">
             <div className="doodle-box doodle-dark px-2 py-0.5 font-marker text-xs rotate-[-1.5deg] sm:px-3 sm:py-1 sm:text-sm">
-              ROUND {Math.max(1, snap.round)}
+              {t("round")} {Math.max(1, snap.round)}
             </div>
             <div
               className="doodle-box w-fit px-2 py-0.5 font-marker text-xs text-[#8a6d1d] rotate-[1deg] sm:text-sm"
@@ -460,20 +598,21 @@ export default function GameShell() {
             )}
           </div>
 
-          {/* top right: THE DEALER */}
+          {/* top right: THE DEALER — hearts in standard play, the SCORE
+              counter in ENDLESS (his HP literally becomes a scoreboard) */}
           <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-1">
             <div className="doodle-box px-3 py-1 rotate-[1.5deg]">
-              <span className="font-marker text-lg text-[#8f2418]">THE DEALER</span>
+              <span className="font-marker text-lg text-[#8f2418]">{t("theDealer")}</span>
               {snap.voodooEnemy > 0 && (
                 <img src={assets.voodoo} alt="voodoo" className="ml-2 inline h-6 w-6 wiggle align-middle" />
               )}
               {snap.enemyCuffed && (
-                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">cuffed</span>
+                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">{t("cuffed")}</span>
               )}
             </div>
             {snap.enemySkills.length > 0 && (
               <div className="doodle-box flex items-center gap-1 px-2 py-0.5 rotate-[1deg]">
-                <span className="font-hand-sc text-[10px] text-[#4a4036]">SKILLS</span>
+                <span className="font-hand-sc text-[10px] text-[#4a4036]">{t("skills")}</span>
                 {snap.enemySkills.map((s) => (
                   <img
                     key={s.id}
@@ -485,11 +624,20 @@ export default function GameShell() {
                 ))}
               </div>
             )}
-            <div className="flex gap-1">
-              {Array.from({ length: snap.maxHpEnemy }).map((_, i) => (
-                <img key={i} src={i < snap.hpEnemy ? assets.heartFull : assets.heartEmpty} alt="hp" className="h-8 w-8" />
-              ))}
-            </div>
+            {endless ? (
+              <div className="doodle-box score-box flex items-center gap-2 px-3 py-1 rotate-[1deg]">
+                <span className="font-hand-sc text-sm text-[#4a4036]">{t("score")}</span>
+                <span className={`font-marker text-2xl ${snap.score < 0 ? "text-[#57697c]" : "text-[#8a6d1d]"}`}>
+                  {snap.score}
+                </span>
+              </div>
+            ) : (
+              <div className="flex gap-1">
+                {Array.from({ length: snap.maxHpEnemy }).map((_, i) => (
+                  <img key={i} src={i < snap.hpEnemy ? assets.heartFull : assets.heartEmpty} alt="hp" className="h-8 w-8" />
+                ))}
+              </div>
+            )}
           </div>
 
           {/* player: top-left on mobile, bottom-left on desktop.
@@ -501,12 +649,14 @@ export default function GameShell() {
               </div>
             )}
             <div className="doodle-box w-fit px-2 py-0.5 rotate-[-1.5deg] sm:px-3 sm:py-1">
-              <span className="font-marker text-sm sm:text-lg">YOU</span>
+              <span className="font-marker text-sm sm:text-lg">{t("you")}</span>
               {snap.voodooPlayer > 0 && (
-                <span className="ml-2 font-hand-sc text-sm text-[#5e9c5b]">voodoo {snap.voodooPlayer}</span>
+                <span className="ml-2 font-hand-sc text-sm text-[#5e9c5b]">
+                  {t("voodooTag")} {snap.voodooPlayer}
+                </span>
               )}
               {snap.playerCuffed && (
-                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">cuffed</span>
+                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">{t("cuffed")}</span>
               )}
             </div>
             <div className="flex gap-0.5 sm:gap-1">
@@ -520,12 +670,12 @@ export default function GameShell() {
           <div className="pointer-events-none absolute left-1/2 top-[74px] z-20 -translate-x-1/2 sm:top-16">
             {snap.turn === "player" && (
               <div className="doodle-box px-4 py-0.5 font-marker text-[#8f2418] rotate-[-2deg] float-y">
-                YOUR TURN
+                {t("yourTurn")}
               </div>
             )}
             {snap.turn === "enemy" && (
               <div className="doodle-box doodle-dark px-4 py-0.5 font-marker rotate-[2deg] float-y">
-                THE DEALER&apos;S TURN...
+                {t("dealerTurn")}
               </div>
             )}
           </div>
@@ -534,7 +684,7 @@ export default function GameShell() {
           {snap.mustShoot && snap.turn === "player" && (
             <div className="pointer-events-none absolute left-1/2 top-28 z-30 -translate-x-1/2">
               <div className="doodle-box doodle-red px-4 py-1 font-marker text-xl blink-soft rotate-[-3deg]">
-                YOU MUST SHOOT!
+                {t("mustShoot")}
               </div>
             </div>
           )}
@@ -579,16 +729,18 @@ export default function GameShell() {
                     title={SKILL_META[s.id].desc}
                   >
                     <img src={s.icon} alt={s.id} className="h-8 w-8 sm:h-9 sm:w-9" />
-                    <span className="font-hand-sc text-[11px] leading-none">{SKILL_META[s.id].name}</span>
+                    <span className="line-clamp-2 text-center font-hand-sc text-[9px] leading-[1.05] sm:text-[11px]">
+                      {SKILL_META[s.id].name}
+                    </span>
                     {!ghost && (
                       <span className="absolute -top-2 -left-1.5 font-marker text-[11px] text-[#8f2418]">{idx + 1}</span>
                     )}
                     {ghost ? null : s.id === "phoenix" ? (
                       <span className="trial-ribbon font-hand-sc" style={{ background: "#e08b3a" }}>
-                        PASSIVE
+                        {t("passives")}
                       </span>
                     ) : (
-                      s.trial && <span className="trial-ribbon font-hand-sc">TRIAL</span>
+                      s.trial && <span className="trial-ribbon font-hand-sc">{t("trial")}</span>
                     )}
                     {!ghost && s.charges >= 0 && (
                       <span className="absolute -bottom-1 right-1 flex gap-0.5">
@@ -614,33 +766,33 @@ export default function GameShell() {
               disabled={!isPlayerTurn}
               onClick={() => void engineRef.current?.playerShoot("enemy")}
             >
-              SHOOT DEALER [E]
+              {t("shootDealer")}
             </button>
             <button
               className={`doodle-btn px-3 py-2.5 font-marker text-sm sm:px-5 sm:text-lg ${isPlayerTurn ? "" : "opacity-50"}`}
               disabled={!isPlayerTurn}
               onClick={() => void engineRef.current?.playerShoot("player")}
             >
-              SHOOT SELF [Q]
+              {t("shootSelf")}
             </button>
           </div>
 
           {/* toasts left (slide in, slide out) */}
           <div className="pointer-events-none absolute left-3 top-28 z-30 flex w-64 flex-col gap-1.5">
-            {toasts.map((t) => (
+            {toasts.map((tt) => (
               <div
-                key={t.id}
-                className={`doodle-box ${t.leaving ? "toast-out" : "toast-in"} px-3 py-1.5 font-hand text-[15px] leading-tight ${
-                  t.tone === "good"
+                key={tt.id}
+                className={`doodle-box ${tt.leaving ? "toast-out" : "toast-in"} px-3 py-1.5 font-hand text-[15px] leading-tight ${
+                  tt.tone === "good"
                     ? "border-[#3f6b3d]"
-                    : t.tone === "bad"
+                    : tt.tone === "bad"
                       ? "border-[#8f2418] text-[#8f2418]"
-                      : t.tone === "voodoo"
+                      : tt.tone === "voodoo"
                         ? "border-[#5e9c5b] text-[#3f6b3d] bg-[#e9f0e2]"
                         : ""
                 }`}
               >
-                {t.text}
+                {tt.text}
               </div>
             ))}
           </div>
@@ -663,7 +815,7 @@ export default function GameShell() {
           ))}
       </div>
 
-      {/* shell reveal (peek) */}
+      {/* shell reveal (magnifying glass) */}
       <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
         {assets && reveal && (
           <div className="pop-in flex flex-col items-center gap-2">
@@ -708,6 +860,48 @@ export default function GameShell() {
         )}
       </div>
 
+      {/* GAMBLE: the 2D coin flip */}
+      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+        {assets && coin && (
+          <div className="pop-in flex flex-col items-center gap-3">
+            <div className="coin-wrap">
+              <img
+                src={coin === "lose" ? assets.coinTails : assets.coinHeads}
+                alt="coin"
+                className={`h-44 w-44 ${coin === "spin" ? "coin-spinning" : "coin-landed"}`}
+              />
+            </div>
+            {coin !== "spin" && (
+              <div
+                className={`stamp-in doodle-box px-6 py-2 font-marker text-3xl rotate-[-2deg] ${
+                  coin === "win" ? "text-[#3f6b3d]" : "text-[#8f2418]"
+                }`}
+              >
+                {coin === "win" ? t("heads") : t("tails")}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* REWIND: the 2D un-shot (tape arrows + shell crawling back) */}
+      <div className="pointer-events-none absolute inset-0 z-40 overflow-hidden">
+        {rewinding && (
+          <>
+            <div className="rewind-arrows">
+              <svg viewBox="0 0 120 60" className="h-16 w-32">
+                <polygon points="10,8 52,30 10,52" fill="#8f5bd4" opacity="0.92" />
+                <polygon points="58,8 100,30 58,52" fill="#8f5bd4" opacity="0.92" />
+              </svg>
+              <div className="font-marker text-2xl tracking-[0.3em] text-[#c9b3ec] drop-shadow-[2px_2px_0_rgba(0,0,0,0.6)]">
+                REWIND
+              </div>
+            </div>
+            {assets && <img src={assets.pipLive} alt="" className="rewind-shell" />}
+          </>
+        )}
+      </div>
+
       {/* center banner */}
       <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
         {banner && (
@@ -728,10 +922,8 @@ export default function GameShell() {
         >
           {shopTip.id === "bell" ? (
             <>
-              <div className="font-marker text-lg text-[#8a6d1d]">THE BELL</div>
-              <div className="font-hand text-[13px] leading-snug text-[#221a12]">
-                Ring it to end the break — reload the gun and fight the next round.
-              </div>
+              <div className="font-marker text-lg text-[#8a6d1d]">{t("bellName")}</div>
+              <div className="font-hand text-[13px] leading-snug text-[#221a12]">{t("bellDesc")}</div>
             </>
           ) : (() => {
             const o = snap.shopOffers.find((x) => x.id === shopTip.id);
@@ -747,9 +939,10 @@ export default function GameShell() {
                 </div>
                 <div className="font-hand text-[13px] leading-snug text-[#221a12]">{m.desc}</div>
                 <div className="mt-1 font-hand-sc text-[11px] leading-none">
-                  <span className="text-[#8a6d1d]">TRIAL · 1 USE</span>
-                  {o.legendary && <span className="ml-2 text-[#8f2418]">INSANE ONLY</span>}
-                  {o.sold && <span className="ml-2 text-[#57697c]">SOLD</span>}
+                  <span style={{ color: RARITY_COLOR[o.rarity] }}>
+                    {o.rarity === "legend" ? t("tagLegend") : o.rarity === "epic" ? t("tagEpic") : t("tagTrial")}
+                  </span>
+                  {o.sold && <span className="ml-2 text-[#57697c]">{t("tagSold")}</span>}
                   {!o.sold && o.reason && <span className="ml-2 text-[#8f2418]">{o.reason}</span>}
                 </div>
               </>
@@ -762,14 +955,14 @@ export default function GameShell() {
       {/* the "background video": the living 3D table + THE DEALER idling,
           dimmed to 30%, no in-game UI anywhere */}
       {phase === "menu" && (
-        <div className={`absolute inset-0 z-50 ${menuPanel ? "bg-black/45" : "bg-black/30"}`}>
+        <div className={`absolute inset-0 z-50 ${menuPanel || mutOpen ? "bg-black/45" : "bg-black/30"}`}>
           {/* animated game title — top left, just below the corner */}
           <div className="menu-title absolute left-5 top-6 z-10 sm:left-8 sm:top-9">
             <div className="font-marker text-[2.6rem] leading-none tracking-wide text-[#f3ecd7] sm:text-6xl">
-              ROULETTE<span className="menu-title-mate">-MATE</span>
+              ROULTEE<span className="menu-title-mate">MATE</span>
             </div>
             <div className="menu-tagline mt-1 rotate-[-1.5deg] font-hand text-lg text-[#d9a441] sm:text-xl">
-              one revolver &middot; six chambers &middot; no mercy
+              {t("tagline")}
             </div>
           </div>
 
@@ -784,7 +977,7 @@ export default function GameShell() {
                 setMenuPanel("play");
               }}
             >
-              PICK A TABLE
+              {t("btnPlay")}
             </button>
             <button
               className="doodle-btn menu-btn px-6 py-2 font-marker text-xl sm:px-8"
@@ -795,7 +988,7 @@ export default function GameShell() {
                 setMenuPanel("settings");
               }}
             >
-              SETTINGS
+              {t("btnSettings")}
             </button>
             <button
               className="doodle-btn menu-btn px-6 py-2 font-marker text-xl sm:px-8"
@@ -806,16 +999,16 @@ export default function GameShell() {
                 setShowHelp(true);
               }}
             >
-              HELP / HOW TO PLAY
+              {t("btnHelp")}
             </button>
           </div>
 
           {/* ------- PICK A TABLE (the old menu UI, cleaned) ------- */}
           {menuPanel === "play" && (
             <div className="absolute inset-0 z-20 flex items-center justify-center p-4">
-              <div className="pop-in doodle-box w-[min(92vw,540px)] px-7 py-6 rotate-[-0.5deg]">
+              <div className="pop-in doodle-box w-[min(92vw,560px)] px-7 py-6 rotate-[-0.5deg]">
                 <div className="flex items-center justify-between">
-                  <div className="font-marker text-3xl text-[#8f2418]">PICK A TABLE</div>
+                  <div className="font-marker text-3xl text-[#8f2418]">{t("pickTable")}</div>
                   <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setMenuPanel(null)}>
                     X
                   </button>
@@ -833,25 +1026,34 @@ export default function GameShell() {
                       }`}
                     >
                       <img
-                        src={d.id === "easy" ? assets?.diffEasy : d.id === "normal" ? assets?.diffNormal : assets?.diffInsane}
+                        src={
+                          d.id === "easy"
+                            ? assets?.diffEasy
+                            : d.id === "normal"
+                              ? assets?.diffNormal
+                              : d.id === "insane"
+                                ? assets?.diffInsane
+                                : assets?.diffEndless
+                        }
                         alt={d.id}
                         className="h-12 w-12 shrink-0"
                       />
-                      <span className="font-marker text-xl">{d.label}</span>
-                      <span className="font-hand text-sm opacity-80 sm:text-base">{d.desc}</span>
+                      <span className="font-marker text-xl">{t(d.labelKey)}</span>
+                      <span className="font-hand text-sm opacity-80 sm:text-base">{t(d.descKey)}</span>
                     </button>
                   ))}
                 </div>
+                {settings.mutators && (
+                  <div className="mt-3 font-hand-sc text-sm text-[#8f5bd4]">
+                    MUTATORS ON — sitting down opens the CUSTOM TABLE sheet.
+                  </div>
+                )}
                 <div className="mt-5 flex justify-center">
                   <button
                     className="doodle-btn doodle-red px-10 py-3 font-marker text-2xl menu-btn"
-                    onClick={() => {
-                      gameAudio.ensure();
-                      setMenuPanel(null);
-                      void engineRef.current?.startGame(diff);
-                    }}
+                    onClick={startFromMenu}
                   >
-                    SIT AT THE TABLE
+                    {t("sitBtn")}
                   </button>
                 </div>
               </div>
@@ -861,29 +1063,47 @@ export default function GameShell() {
           {/* ------- SETTINGS ------- */}
           {menuPanel === "settings" && (
             <div className="absolute inset-0 z-20 flex items-center justify-center p-4">
-              <div className="pop-in doodle-box w-[min(92vw,520px)] px-7 py-6 rotate-[0.4deg]">
+              <div className="pop-in doodle-box max-h-[88vh] w-[min(92vw,520px)] overflow-y-auto doodle-scroll px-7 py-6 rotate-[0.4deg]">
                 <div className="flex items-center justify-between">
-                  <div className="font-marker text-3xl text-[#8f2418]">SETTINGS</div>
+                  <div className="font-marker text-3xl text-[#8f2418]">{t("settings")}</div>
                   <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setMenuPanel(null)}>
                     X
                   </button>
                 </div>
 
                 <div className="mt-4 flex flex-col gap-2.5 font-hand text-lg">
+                  {/* LANGUAGE */}
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-marker text-lg">{t("optLanguage")}</span>
+                    <div className="flex gap-1.5">
+                      {(["en", "id"] as Lang[]).map((l) => (
+                        <button
+                          key={l}
+                          className={`doodle-btn px-3 py-1 font-hand-sc text-base ${
+                            settings.lang === l ? "bg-[#221a12] text-[#f3ecd7]" : ""
+                          }`}
+                          onClick={() => updateSettings({ lang: l })}
+                        >
+                          {l === "en" ? "ENGLISH" : "INDONESIA"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   {/* SOUND */}
                   <div className="flex items-center justify-between gap-3">
-                    <span className="font-marker text-lg">SOUND</span>
+                    <span className="font-marker text-lg">{t("sound")}</span>
                     <button
                       className={`doodle-btn px-4 py-1 font-hand-sc text-base ${settings.muted ? "opacity-70" : ""}`}
                       onClick={() => updateSettings({ muted: !settings.muted })}
                     >
-                      {settings.muted ? "SOUND OFF" : "SOUND ON"}
+                      {settings.muted ? t("soundOff") : t("soundOn")}
                     </button>
                   </div>
 
                   {/* GRAPHICS */}
                   <div className="flex items-center justify-between gap-3">
-                    <span className="font-marker text-lg">GRAPHICS</span>
+                    <span className="font-marker text-lg">{t("graphics")}</span>
                     <div className="flex gap-1.5">
                       {(["low", "medium", "high"] as Quality[]).map((q) => (
                         <button
@@ -893,24 +1113,35 @@ export default function GameShell() {
                           }`}
                           onClick={() => updateSettings({ quality: q })}
                         >
-                          {q === "low" ? "LOW" : q === "medium" ? "MED" : "HIGH"}
+                          {q === "low" ? t("qLow") : q === "medium" ? t("qMed") : t("qHigh")}
                         </button>
                       ))}
                     </div>
                   </div>
 
                   <div className="mt-1 border-t-2 border-dashed border-[#221a12]/30 pt-2 font-marker text-lg text-[#8a6d1d]">
-                    UI &amp; QOL
+                    {t("uiQol")}
                   </div>
+
+                  {/* MUTATORS */}
+                  <button
+                    className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+                    onClick={() => updateSettings({ mutators: !settings.mutators })}
+                  >
+                    <span className="font-hand text-lg text-[#8f5bd4]">{t("optMutators")}</span>
+                    <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.mutators ? "" : "opacity-70"}`}>
+                      {settings.mutators ? t("on") : t("off")}
+                    </span>
+                  </button>
 
                   {/* live/blank stat */}
                   <button
                     className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
                     onClick={() => updateSettings({ showShellStat: !settings.showShellStat })}
                   >
-                    <span className="font-hand text-lg">Live / blank stat on the board</span>
+                    <span className="font-hand text-lg">{t("optShellStat")}</span>
                     <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showShellStat ? "" : "opacity-70"}`}>
-                      {settings.showShellStat ? "ON" : "OFF"}
+                      {settings.showShellStat ? t("on") : t("off")}
                     </span>
                   </button>
 
@@ -921,7 +1152,7 @@ export default function GameShell() {
                       onClick={() => setTimeOpen((v) => !v)}
                     >
                       <span className="font-hand text-lg">
-                        Time <span className="font-hand-sc text-sm text-[#4a4036]">(round &amp; total)</span>
+                        {t("optTime")} <span className="font-hand-sc text-sm text-[#4a4036]">{t("optTimeHint")}</span>
                       </span>
                       <span className={`font-marker text-xl transition-transform duration-200 ${timeOpen ? "rotate-180" : ""}`}>
                         v
@@ -933,18 +1164,18 @@ export default function GameShell() {
                           className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
                           onClick={() => updateSettings({ showRoundTime: !settings.showRoundTime })}
                         >
-                          <span className="font-hand text-base">Show round time</span>
+                          <span className="font-hand text-base">{t("optRoundTime")}</span>
                           <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showRoundTime ? "" : "opacity-70"}`}>
-                            {settings.showRoundTime ? "ON" : "OFF"}
+                            {settings.showRoundTime ? t("on") : t("off")}
                           </span>
                         </button>
                         <button
                           className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
                           onClick={() => updateSettings({ showTotalTime: !settings.showTotalTime })}
                         >
-                          <span className="font-hand text-base">Show total time</span>
+                          <span className="font-hand text-base">{t("optTotalTime")}</span>
                           <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showTotalTime ? "" : "opacity-70"}`}>
-                            {settings.showTotalTime ? "ON" : "OFF"}
+                            {settings.showTotalTime ? t("on") : t("off")}
                           </span>
                         </button>
                       </div>
@@ -957,11 +1188,219 @@ export default function GameShell() {
                     onClick={() => updateSettings({ showFps: !settings.showFps })}
                   >
                     <span className="font-hand text-lg">
-                      Show FPS <span className="font-hand-sc text-sm text-[#4a4036]">(above the YOU tag)</span>
+                      {t("optFps")} <span className="font-hand-sc text-sm text-[#4a4036]">{t("optFpsHint")}</span>
                     </span>
                     <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showFps ? "" : "opacity-70"}`}>
-                      {settings.showFps ? "ON" : "OFF"}
+                      {settings.showFps ? t("on") : t("off")}
                     </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ------- CUSTOM TABLE (mutators popup) ------- */}
+          {mutOpen && mutCfg && (
+            <div className="absolute inset-0 z-[55] flex items-center justify-center bg-black/50 p-4">
+              <div className="pop-in doodle-box doodle-scroll max-h-[92vh] w-[min(94vw,640px)] overflow-y-auto px-7 py-6 rotate-[0.3deg]">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="font-marker text-3xl text-[#8f5bd4]">{t("mutTitle")}</div>
+                    <div className="font-hand-sc text-sm text-[#4a4036]">{t("mutSub")}</div>
+                  </div>
+                  <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setMutOpen(false)}>
+                    X
+                  </button>
+                </div>
+
+                {/* card pool */}
+                <div className="mt-4">
+                  <div className="font-marker text-lg">{t("mutCardPool")}</div>
+                  <div className="font-hand-sc text-xs text-[#4a4036]">{t("mutCardPoolHint")}</div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {ALL_SKILL_IDS.map((id) => {
+                      const picked = mutCfg.pool.includes(id);
+                      const r = RARITY[id];
+                      const legendBlocked = r === "legend" && !mutCfg.allowLegend && baseDiffOf(diff) !== "insane" && diff !== "endless";
+                      const epicBlocked = r === "epic" && diff === "easy";
+                      return (
+                        <button
+                          key={id}
+                          onClick={() => togglePoolCard(id)}
+                          className={`doodle-btn flex items-center gap-1.5 px-2 py-1 text-[13px] ${
+                            picked ? "" : "opacity-40 line-through"
+                          }`}
+                          style={{ borderColor: picked ? RARITY_COLOR[r] : undefined }}
+                          title={`${SKILL_META[id].name}${legendBlocked ? ` — ${t("mutLegendNote")}` : ""}${epicBlocked ? " — EPIC needs NORMAL+" : ""}`}
+                        >
+                          <span className="h-2 w-2 rounded-full" style={{ background: RARITY_COLOR[r] }} />
+                          <span className="font-hand-sc">{SKILL_META[id].name}</span>
+                          {(legendBlocked || epicBlocked) && <span className="font-hand-sc text-[10px] text-[#8f2418]">!</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1.5 flex gap-2">
+                    <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs" onClick={() => setMutCfg({ ...mutCfg, pool: [...ALL_SKILL_IDS] })}>
+                      {t("mutPoolAll")}
+                    </button>
+                    <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs" onClick={() => setMutCfg({ ...mutCfg, pool: [] })}>
+                      {t("mutPoolNone")}
+                    </button>
+                  </div>
+                </div>
+
+                {/* allow legend */}
+                <button
+                  className="mt-3 flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+                  onClick={() => setMutCfg({ ...mutCfg, allowLegend: !mutCfg.allowLegend })}
+                >
+                  <span className="font-hand text-base text-[#d9a441]">
+                    {t("mutAllowLegend")} <span className="font-hand-sc text-xs text-[#4a4036]">— {t("mutLegendNote")}</span>
+                  </span>
+                  <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${mutCfg.allowLegend ? "" : "opacity-70"}`}>
+                    {mutCfg.allowLegend ? t("on") : t("off")}
+                  </span>
+                </button>
+
+                {/* dealer AI + HP + skill counts */}
+                <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-hand text-base">{t("mutAi")}</span>
+                    <div className="flex gap-1">
+                      {(["easy", "normal", "insane"] as Difficulty[]).map((d) => (
+                        <button
+                          key={d}
+                          className={`doodle-btn px-2 py-0.5 font-hand-sc text-xs ${
+                            mutCfg.ai === d ? "bg-[#221a12] text-[#f3ecd7]" : ""
+                          }`}
+                          onClick={() => setMutCfg({ ...mutCfg, ai: d })}
+                        >
+                          {d.toUpperCase()}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <label className="flex items-center justify-between gap-2">
+                    <span className="font-hand text-base">{t("mutHpPlayer")}</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={mutCfg.hpPlayer}
+                      onChange={(e) => setMutCfg({ ...mutCfg, hpPlayer: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
+                      className="doodle-box w-16 px-2 py-0.5 text-center font-marker text-lg"
+                    />
+                  </label>
+                  <label className={`flex items-center justify-between gap-2 ${diff === "endless" ? "opacity-40" : ""}`} title={diff === "endless" ? "ENDLESS: the dealer's HP is a score counter" : ""}>
+                    <span className="font-hand text-base">{t("mutHpDealer")}</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      disabled={diff === "endless"}
+                      value={mutCfg.hpEnemy}
+                      onChange={(e) => setMutCfg({ ...mutCfg, hpEnemy: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
+                      className="doodle-box w-16 px-2 py-0.5 text-center font-marker text-lg"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between gap-2">
+                    <span className="font-hand text-base">{t("mutSkillsPlayer")}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={6}
+                      value={mutCfg.skillsPlayer}
+                      onChange={(e) => setMutCfg({ ...mutCfg, skillsPlayer: Math.max(0, Math.min(6, Number(e.target.value) || 0)) })}
+                      className="doodle-box w-16 px-2 py-0.5 text-center font-marker text-lg"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between gap-2">
+                    <span className="font-hand text-base">{t("mutSkillsDealer")}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={6}
+                      value={mutCfg.skillsEnemy}
+                      onChange={(e) => setMutCfg({ ...mutCfg, skillsEnemy: Math.max(0, Math.min(6, Number(e.target.value) || 0)) })}
+                      className="doodle-box w-16 px-2 py-0.5 text-center font-marker text-lg"
+                    />
+                  </label>
+                  <button
+                    className="flex items-center justify-between gap-2"
+                    onClick={() => setMutCfg({ ...mutCfg, allowDup: !mutCfg.allowDup })}
+                  >
+                    <span className="font-hand text-base">{t("mutAllowDup")}</span>
+                    <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${mutCfg.allowDup ? "" : "opacity-70"}`}>
+                      {mutCfg.allowDup ? t("on") : t("off")}
+                    </span>
+                  </button>
+                </div>
+
+                {/* custom rules */}
+                <div className="mt-4">
+                  <div className="flex items-center justify-between">
+                    <div className="font-marker text-lg">{t("mutRules")}</div>
+                    <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs" onClick={() => setShowSyntax((v) => !v)}>
+                      {t("mutSyntaxTitle")} {showSyntax ? "▲" : "▼"}
+                    </button>
+                  </div>
+                  {showSyntax && (
+                    <pre className="expand-in mt-1 max-h-44 overflow-auto rounded-lg border-2 border-[#221a12]/30 bg-[#efe7d2] p-2 font-mono text-[11px] leading-tight text-[#221a12]">
+                      {SYNTAX_HELP}
+                    </pre>
+                  )}
+                  <textarea
+                    value={ruleText}
+                    onChange={(e) => setRuleText(e.target.value)}
+                    placeholder={t("mutRulePh")}
+                    spellCheck={false}
+                    className="doodle-box mt-2 h-28 w-full resize-y bg-[#efe7d2] p-2 font-mono text-[13px] leading-snug"
+                  />
+                  {ruleErrors.length > 0 && (
+                    <div className="mt-1 font-hand-sc text-xs text-[#8f2418]">
+                      {ruleErrors.map((e, i) => (
+                        <div key={i}>{e}</div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <button className="doodle-btn px-3 py-1 font-marker text-sm" onClick={addRule}>
+                      + {t("mutAddRule")}
+                    </button>
+                    {mutCfg.rules.length > 0 && (
+                      <button
+                        className="doodle-btn px-3 py-1 font-hand-sc text-sm"
+                        onClick={() => setMutCfg({ ...mutCfg, rules: [] })}
+                      >
+                        {t("mutClearAll")}
+                      </button>
+                    )}
+                    <span className="font-hand-sc text-xs text-[#4a4036]">
+                      {mutCfg.rules.length ? `${mutCfg.rules.length} ${t("mutRuleCount")}` : t("mutNoRules")}
+                    </span>
+                  </div>
+                  {mutCfg.rules.length > 0 && (
+                    <div className="mt-1.5 flex flex-col gap-1">
+                      {mutCfg.rules.map((r, i) => (
+                        <div key={i} className="flex items-center gap-2 rounded-lg border-2 border-[#221a12]/20 bg-[#efe7d2] px-2 py-1">
+                          <span className="font-marker text-sm text-[#8f5bd4]">#{i + 1}</span>
+                          <code className="flex-1 truncate font-mono text-[11px]">{r.split("\n")[0]}</code>
+                          <button
+                            className="doodle-btn px-1.5 py-0.5 font-hand-sc text-[11px]"
+                            onClick={() => setMutCfg({ ...mutCfg, rules: mutCfg.rules.filter((_, k) => k !== i) })}
+                          >
+                            X
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-5 flex flex-col items-center gap-1.5">
+                  <button className="doodle-btn doodle-red px-10 py-3 font-marker text-2xl menu-btn" onClick={launchCustomTable}>
+                    {t("mutStartBtn")}
                   </button>
                 </div>
               </div>
@@ -977,35 +1416,33 @@ export default function GameShell() {
             <div className="text-center">
               {phase === "victory" ? (
                 <>
-                  <div className="font-marker text-5xl text-[#3f6b3d] rotate-[1deg]">YOU SURVIVED!</div>
-                  <div className="mt-2 font-hand text-xl">
-                    The Dealer fell in round {snap.round}. This room is officially yours.
-                  </div>
+                  <div className="font-marker text-5xl text-[#3f6b3d] rotate-[1deg]">{t("winTitle")}</div>
+                  <div className="mt-2 font-hand text-xl">{t("winBody", { r: snap.round })}</div>
                 </>
               ) : (
                 <>
-                  <div className="font-marker text-6xl text-[#8f2418] rotate-[-1.5deg]">GAME OVER</div>
+                  <div className="font-marker text-6xl text-[#8f2418] rotate-[-1.5deg]">{t("loseTitle")}</div>
                   <div className="mt-2 font-hand text-xl">
-                    That bullet was for you. You lasted until round {snap.round}.
+                    {endless ? t("loseEndlessBody", { r: snap.round, s: snap.score }) : t("loseBody", { r: snap.round })}
                   </div>
                 </>
               )}
               <div className="mt-3 font-hand text-lg text-[#4a4036]">
-                Final HP: you {snap.hpPlayer}/{snap.maxHpPlayer} &middot; Dealer {snap.hpEnemy}/{snap.maxHpEnemy}
+                {endless
+                  ? t("finalStatsEndless", { s: snap.score, a: snap.hpPlayer, b: snap.maxHpPlayer })
+                  : t("finalStats", { a: snap.hpPlayer, b: snap.maxHpPlayer, c: snap.hpEnemy, d: snap.maxHpEnemy })}
               </div>
-              <div className="mt-1 font-hand text-base text-[#4a4036]">
-                Cash left: ${snap.money} &middot; Match time {fmtTime(times.totalMs)}
-              </div>
+              <div className="mt-1 font-hand text-base text-[#4a4036]">{t("cashLeft", { m: snap.money, t: fmtTime(times.totalMs) })}</div>
             </div>
             <div className="mt-5 flex justify-center gap-3">
               <button
                 className="doodle-btn doodle-red px-8 py-2.5 font-marker text-xl"
                 onClick={() => void engineRef.current?.startGame(snap.difficulty)}
               >
-                PLAY AGAIN
+                {t("playAgain")}
               </button>
               <button className="doodle-btn px-6 py-2.5 font-marker text-xl" onClick={() => engineRef.current?.backToMenu()}>
-                MENU
+                {t("menu")}
               </button>
             </div>
           </div>
@@ -1023,68 +1460,129 @@ export default function GameShell() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between">
-              <div className="font-marker text-3xl text-[#8f2418]">HOW TO PLAY</div>
+              <div className="font-marker text-3xl text-[#8f2418]">{t("helpTitle")}</div>
               <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setShowHelp(false)}>
-                X
+                {t("helpClose")}
               </button>
             </div>
-            <div className="mt-3 space-y-2 font-hand text-lg leading-snug">
-              <p>
-                On the table sits a 6-chamber revolver. Each round it is loaded with a mix of{" "}
-                <b className="text-[#8f2418]">LIVE</b> (red, hurts) and <b className="text-[#57697c]">BLANK</b>{" "}
-                (blue, empty) shells. The counts are honest on the board up top — but only for the first{" "}
-                <b>3 turns</b> of a round. Then the board <b className="text-[#8f2418]">fades away turn by turn</b>,
-                its opacity sinking until nothing is left, and both of you run on pure memory. The Dealer has a
-                real memory too: he tracks every shell he sees — and on EASY/NORMAL he sometimes loses count.
-              </p>
-              <p>
-                On your turn use a skill first if you want (free, doesn&apos;t pass the turn), then choose:{" "}
-                <b>SHOOT SELF</b> — if it&apos;s a blank you automatically fire ONE free shot at the Dealer;
-                if it&apos;s live, you take the hit and the turn passes. <b>SHOOT DEALER</b> — if it&apos;s live
-                he takes the hit and the turn passes. Out of HP = over.
-              </p>
-              <p>
-                The opening dice grants you <b>2 skills</b>. Between rounds the gun runs dry and a{" "}
-                <b>SHOP BREAK</b> begins: <b>3 random items</b> appear right on the table. <b>Hover</b> one to
-                read its price and effect, <b>click</b> to buy it as a 1-use <b className="text-[#8a6d1d]">TRIAL</b>,
-                and hold up to <b>4 skills</b> at once. A spent trial dissolves over 2 turns. When you&apos;re
-                done, <b>ring the golden bell</b> — every card leaps into the Dealer&apos;s hands and the next
-                round loads. Voodoo is not for sale — a reflection like that earns its keep, it doesn&apos;t buy it.
-              </p>
-              <p>
-                <b>Cash:</b> every bullet you land pays <b>$100</b>, a voodoo reflection pays <b>$150</b>,
-                surviving a round pays <b>$75</b>, and you start with <b>$200</b>. On INSANE the table can also
-                stock two legends: <b className="text-[#e08b3a]">PHOENIX</b> (refuse to die once) and{" "}
-                <b className="text-[#5aa7a0]">THIRD EYE</b> (see the next 3 shells in order).
-              </p>
-              <p className="text-[#8f2418]">
-                HP: your 6 against his 5 on EASY, 5 vs 5 on NORMAL — and on INSANE you get only 4 while the
-                Dealer keeps 5. At 2 HP a blood vignette creeps in and your heartbeat returns. Below 3 HP,
-                shooting yourself takes a long, cruel 0.7 seconds to pull — and the bullet leaves the barrel
-                0.2 seconds late.
-              </p>
-              <p className="font-hand-sc text-base text-[#4a4036]">
-                Keyboard: Q = shoot self &middot; E = shoot the Dealer &middot; 1-4 = skills &middot; M = mute &middot; H = help
-              </p>
-            </div>
-            <div className="mt-4 font-marker text-2xl">8 SKILLS</div>
+            {settings.lang === "id" ? (
+              <div className="mt-3 space-y-2 font-hand text-lg leading-snug">
+                <p>
+                  Di atas meja ada revolver 6-chamber. Tiap ronde diisi campuran{" "}
+                  <b className="text-[#8f2418]">LIVE</b> (merah, sakit) dan <b className="text-[#57697c]">BLANK</b>{" "}
+                  (biru, kosong). Jumlahnya jujur di papan atas — tapi cuma <b>3 giliran</b> pertama. Setelah itu papan{" "}
+                  <b className="text-[#8f2418]">memudar giliran demi giliran</b>, dan kalian berdua jalan hanya dengan ingatan.
+                  Dealer juga punya ingatan beneran: dia ngitung setiap peluru yang dia lihat — di MUDAH/NORMAL dia kadang
+                  kehilangan hitungan.
+                </p>
+                <p>
+                  Di giliranmu pakai skill dulu kalau mau (gratis, tidak melewatkan giliran), lalu pilih:{" "}
+                  <b>TEMBAK DIRI</b> — kalau kosong kamu otomatis dapat SATU tembakan gratis ke Dealer; kalau hidup, kamu
+                  kena dan giliran pindah. <b>TEMBAK DEALER</b> — kalau hidup, dia kena dan giliran pindah. HP habis = tamat.
+                </p>
+                <p>
+                  Dadu pembuka memberi <b>2 skill</b>. Di sela ronde, saat senjata habis, <b>ISTIRAHAT TOKO</b> dimulai:{" "}
+                  <b>3 barang acak</b> muncul di atas meja. <b>Arahkan kursor</b> buat lihat harga & efek,{" "}
+                  <b>klik</b> buat beli sebagai <b className="text-[#8a6d1d]">COBA</b> 1 pakai, maksimal <b>4 skill</b> satu
+                  waktu. Coba yang terpakai menguap dalam 2 giliran. Kalau selesai, <b>bunyikan lonceng emas</b> — semua kartu
+                  melompat ke tangan Dealer dan ronde berikutnya diisi. Voodoo tidak dijual — pantulan seperti itu harus
+                  diperjuangkan, bukan dibeli.
+                </p>
+                <p>
+                  <b>Rarity:</b> kartu <span className="font-marker" style={{ color: RARITY_COLOR.base }}>dasar</span> muncul
+                  di semua meja. Kartu <span className="font-marker" style={{ color: RARITY_COLOR.epic }}>EPIC</span> (REWIND,
+                  GAMBLE) cuma muncul di NORMAL ke atas. Kartu{" "}
+                  <span className="font-marker" style={{ color: RARITY_COLOR.legend }}>LEGEND</span> (PHOENIX, THIRD EYE) cuma
+                  di GILA & TANPA BATAS.
+                </p>
+                <p>
+                  <b>Uang:</b> peluru yang mengenai bayar <b>$100</b>, pantulan voodoo <b>$150</b>, selamat satu ronde{" "}
+                  <b>$75</b>, modal awal <b>$200</b>. <b>TANPA BATAS:</b> Dealer tidak pernah mati — HP-nya jadi{" "}
+                  <b className="text-[#8a6d1d]">SKOR</b>: +1 tiap dia kena, -1 tiap dia sembuh, boleh minus. Bertahanlah
+                  selama mungkin. Di PENGATURAN ada juga <b className="text-[#8f5bd4]">MUTATOR</b>: meja kustom dengan HP,
+                  skill, kartu, dan efek script buatanmu sendiri.
+                </p>
+                <p className="text-[#8f2418]">
+                  HP: 6 lawan 5 di MUDAH, 5 vs 5 di NORMAL — di GILA kamu cuma dapat 4 sementara Dealer tetap 5. Di 2 HP
+                  vignette darah merayap dan jantungmu kembali. Di bawah 3 HP, menembak diri sendiri butuh 0.7 detik penuh
+                  keputusan — dan pelurunya keluar 0.2 detik terlambat.
+                </p>
+                <p className="font-hand-sc text-base text-[#4a4036]">
+                  Keyboard: Q = tembak diri · E = tembak Dealer · 1-4 = skill · M = mute · H = bantuan
+                </p>
+              </div>
+            ) : (
+              <div className="mt-3 space-y-2 font-hand text-lg leading-snug">
+                <p>
+                  On the table sits a 6-chamber revolver. Each round it is loaded with a mix of{" "}
+                  <b className="text-[#8f2418]">LIVE</b> (red, hurts) and <b className="text-[#57697c]">BLANK</b>{" "}
+                  (blue, empty) shells. The counts are honest on the board up top — but only for the first{" "}
+                  <b>3 turns</b> of a round. Then the board <b className="text-[#8f2418]">fades away turn by turn</b>,
+                  its opacity sinking until nothing is left, and both of you run on pure memory. The Dealer has a
+                  real memory too: he tracks every shell he sees — and on EASY/NORMAL he sometimes loses count.
+                </p>
+                <p>
+                  On your turn use a skill first if you want (free, doesn&apos;t pass the turn), then choose:{" "}
+                  <b>SHOOT SELF</b> — if it&apos;s a blank you automatically fire ONE free shot at the Dealer;
+                  if it&apos;s live, you take the hit and the turn passes. <b>SHOOT DEALER</b> — if it&apos;s live
+                  he takes the hit and the turn passes. Out of HP = over.
+                </p>
+                <p>
+                  The opening dice grants you <b>2 skills</b>. Between rounds the gun runs dry and a{" "}
+                  <b>SHOP BREAK</b> begins: <b>3 random items</b> appear right on the table. <b>Hover</b> one to
+                  read its price and effect, <b>click</b> to buy it as a 1-use <b className="text-[#8a6d1d]">TRIAL</b>,
+                  and hold up to <b>4 skills</b> at once. A spent trial dissolves over 2 turns. When you&apos;re
+                  done, <b>ring the golden bell</b> — every card leaps into the Dealer&apos;s hands and the next
+                  round loads. Voodoo is not for sale — a reflection like that earns its keep, it doesn&apos;t buy it.
+                </p>
+                <p>
+                  <b>Rarity:</b> <span className="font-marker" style={{ color: RARITY_COLOR.base }}>base</span> cards appear
+                  everywhere. <span className="font-marker" style={{ color: RARITY_COLOR.epic }}>EPIC</span> cards (REWIND,
+                  GAMBLE) only spawn on NORMAL and above.{" "}
+                  <span className="font-marker" style={{ color: RARITY_COLOR.legend }}>LEGEND</span> cards (PHOENIX, THIRD
+                  EYE) only on INSANE & ENDLESS tables.
+                </p>
+                <p>
+                  <b>Cash:</b> every bullet you land pays <b>$100</b>, a voodoo reflection pays <b>$150</b>,
+                  surviving a round pays <b>$75</b>, and you start with <b>$200</b>. <b>ENDLESS:</b> the Dealer never
+                  dies — his HP becomes a <b className="text-[#8a6d1d]">SCORE</b> counter: +1 for every hit he takes,
+                  -1 whenever he heals, and it can go negative. Survive as long as you can. SETTINGS also hides{" "}
+                  <b className="text-[#8f5bd4]">MUTATORS</b>: custom tables with your own HP, skill counts, card pool and
+                  scripted effects.
+                </p>
+                <p className="text-[#8f2418]">
+                  HP: your 6 against his 5 on EASY, 5 vs 5 on NORMAL — and on INSANE you get only 4 while the
+                  Dealer keeps 5. At 2 HP a blood vignette creeps in and your heartbeat returns. Below 3 HP,
+                  shooting yourself takes a long, cruel 0.7 seconds to pull — and the bullet leaves the barrel
+                  0.2 seconds late.
+                </p>
+                <p className="font-hand-sc text-base text-[#4a4036]">
+                  Keyboard: Q = shoot self · E = shoot the Dealer · 1-4 = skills · M = mute · H = help
+                </p>
+              </div>
+            )}
+            <div className="mt-4 font-marker text-2xl">{t("skillsCount", { n: ALL_SKILL_IDS.length })}</div>
             <div className="mt-2 space-y-2">
-              {(Object.keys(SKILL_META) as SkillId[]).map((id) => (
+              {(ALL_SKILL_IDS as SkillId[]).map((id) => (
                 <div key={id} className="flex gap-3 border-2 border-[#221a12]/20 rounded-[14px_4px_16px_6px] bg-[#efe7d2] p-2.5">
                   <img src={dataURL(`icon-${id}`, texSkillIcon(id))} alt={id} className="h-12 w-12 shrink-0" />
                   <div>
                     <div className="font-marker text-lg" style={{ color: SKILL_META[id].color }}>
-                      {SKILL_META[id].name} <span className="font-hand text-sm text-[#4a4036]">— {SKILL_META[id].tag}</span>
+                      {SKILL_META[id].name}{" "}
+                      <span
+                        className="ml-1 font-hand-sc text-[11px] align-middle"
+                        style={{ color: RARITY_COLOR[RARITY[id]] }}
+                      >
+                        {RARITY[id].toUpperCase()}
+                      </span>
+                      <span className="font-hand text-sm text-[#4a4036]"> — {SKILL_META[id].tag}</span>
                     </div>
                     <div className="font-hand text-[15px] leading-tight">{SKILL_META[id].desc}</div>
                   </div>
                 </div>
               ))}
             </div>
-            <div className="mt-4 font-hand text-base text-[#4a4036]">
-              Tip: PEEK before you decide. Reroll when the chamber feels too dangerous. Voodoo is at its
-              meanest when the Dealer looks brave — every live bullet he fires at you crawls back into him.
-            </div>
+            <div className="mt-4 font-hand text-base text-[#4a4036]">{t("helpTip")}</div>
           </div>
         </div>
       )}

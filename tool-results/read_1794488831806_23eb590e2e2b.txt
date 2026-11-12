@@ -1,0 +1,1094 @@
+     1→"use client";
+     2→
+     3→/**
+     4→ * GameShell — React layer for ROULETTE-MATE.
+     5→ * Mounts the engine (Three.js) plus all doodle overlays: the animated
+     6→ * main menu (title top-left, 3 buttons bottom-left), settings, HP,
+     7→ * shell counter, skill bar, toasts, banner, rules, win/lose screens,
+     8→ * and the low-HP blood vignette.
+     9→ */
+    10→
+    11→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+    12→import { GameEngine, type HudEvent, type HudSnapshot } from "@/game/engine";
+    13→import {
+    14→  SKILL_META,
+    15→  dataURL,
+    16→  texBulletPip,
+    17→  texDiffIcon,
+    18→  texHeart,
+    19→  texSkillIcon,
+    20→  texSplat,
+    21→  texVoodooMask,
+    22→  type SkillId,
+    23→} from "@/game/doodle";
+    24→import type { ShellType } from "@/game/logic";
+    25→import { gameAudio } from "@/game/audio";
+    26→
+    27→type Toast = { id: number; text: string; tone: string; leaving?: boolean };
+    28→type Pop = { id: number; side: string; text: string; tone: string };
+    29→type Splat = { id: number; url: string; left: number; top: number; size: number; rot: number };
+    30→type Stamp = { id: number; idSkill: SkillId };
+    31→type MenuPanel = "play" | "settings" | null;
+    32→
+    33→type Quality = "low" | "medium" | "high";
+    34→
+    35→/** All toggles the SETTINGS screen owns (persisted in localStorage). */
+    36→type Settings = {
+    37→  muted: boolean;
+    38→  quality: Quality;
+    39→  /** the live/blank counter board at the top */
+    40→  showShellStat: boolean;
+    41→  /** TIME expands into these two */
+    42→  showRoundTime: boolean;
+    43→  showTotalTime: boolean;
+    44→  /** frame-per-second meter right above the YOU indicator */
+    45→  showFps: boolean;
+    46→};
+    47→
+    48→const SETTINGS_KEY = "roulette-mate-settings";
+    49→const DEFAULT_SETTINGS: Settings = {
+    50→  muted: false,
+    51→  quality: "high",
+    52→  showShellStat: true,
+    53→  showRoundTime: true,
+    54→  showTotalTime: true,
+    55→  showFps: false,
+    56→};
+    57→
+    58→function loadSettings(): Settings {
+    59→  try {
+    60→    const raw = localStorage.getItem(SETTINGS_KEY);
+    61→    if (raw) return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    62→  } catch {
+    63→    /* corrupted storage — fall back to defaults */
+    64→  }
+    65→  return DEFAULT_SETTINGS;
+    66→}
+    67→
+    68→const DIFFS: { id: "easy" | "normal" | "insane"; label: string; desc: string }[] = [
+    69→  { id: "easy", label: "EASY", desc: "Your 6 HP vs his 5. The Dealer has 1 skill." },
+    70→  { id: "normal", label: "NORMAL", desc: "5 vs 5 HP. The Dealer has 2 skills." },
+    71→  { id: "insane", label: "INSANE", desc: "Your 4 HP vs his 5. 3 skills + shop legends." },
+    72→];
+    73→
+    74→const fmtTime = (ms: number) => {
+    75→  const s = Math.max(0, Math.floor(ms / 1000));
+    76→  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+    77→};
+    78→
+    79→export default function GameShell() {
+    80→  const mountRef = useRef<HTMLDivElement>(null);
+    81→  const engineRef = useRef<GameEngine | null>(null);
+    82→  const evId = useRef(0);
+    83→  const [ready, setReady] = useState(false);
+    84→  const [snap, setSnap] = useState<HudSnapshot | null>(null);
+    85→  const [toasts, setToasts] = useState<Toast[]>([]);
+    86→  const [pops, setPops] = useState<Pop[]>([]);
+    87→  const [splats, setSplats] = useState<Splat[]>([]);
+    88→  const [stamps, setStamps] = useState<Stamp[]>([]);
+    89→  const [banner, setBanner] = useState<{ title: string; sub?: string } | null>(null);
+    90→  const [reveal, setReveal] = useState<{ shell: "live" | "blank" } | null>(null);
+    91→  const [showHelp, setShowHelp] = useState(false);
+    92→  const [diff, setDiff] = useState<"easy" | "normal" | "insane">("normal");
+    93→  const [reloadPips, setReloadPips] = useState(0);
+    94→  const [flashRed, setFlashRed] = useState(false);
+    95→  const [revealQueue, setRevealQueue] = useState<(ShellType | null)[] | null>(null);
+    96→  const [times, setTimes] = useState<{ roundMs: number; totalMs: number }>({ roundMs: 0, totalMs: 0 });
+    97→  const [shopTip, setShopTip] = useState<{ id: SkillId | "bell"; xPct: number; yPct: number } | null>(null);
+    98→
+    99→  /* ---------- MAIN MENU screens ---------- */
+   100→  const [menuPanel, setMenuPanel] = useState<MenuPanel>(null);
+   101→  /* ---------- SETTINGS (persisted) ---------- */
+   102→  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+   103→  const [timeOpen, setTimeOpen] = useState(false);
+   104→  /* ---------- FPS meter ---------- */
+   105→  const [fps, setFps] = useState(0);
+   106→
+   107→  /* load persisted settings once */
+   108→  useEffect(() => {
+   109→    setSettings(loadSettings());
+   110→  }, []);
+   111→
+   112→  const updateSettings = useCallback((patch: Partial<Settings>) => {
+   113→    setSettings((prev) => {
+   114→      const next = { ...prev, ...patch };
+   115→      try {
+   116→        localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+   117→      } catch {
+   118→        /* private mode — settings just won't persist */
+   119→      }
+   120→      return next;
+   121→    });
+   122→  }, []);
+   123→
+   124→  /* apply sound + graphics settings */
+   125→  useEffect(() => {
+   126→    gameAudio.setMuted(settings.muted);
+   127→  }, [settings.muted]);
+   128→
+   129→  useEffect(() => {
+   130→    if (ready) engineRef.current?.setSceneQuality(settings.quality);
+   131→  }, [settings.quality, ready]);
+   132→
+   133→  /* FPS meter (only measured while visible) */
+   134→  useEffect(() => {
+   135→    if (!settings.showFps) return;
+   136→    let frames = 0;
+   137→    let last = performance.now();
+   138→    let raf = 0;
+   139→    const tick = () => {
+   140→      frames++;
+   141→      const now = performance.now();
+   142→      if (now - last >= 500) {
+   143→        setFps(Math.round((frames * 1000) / (now - last)));
+   144→        frames = 0;
+   145→        last = now;
+   146→      }
+   147→      raf = requestAnimationFrame(tick);
+   148→    };
+   149→    raf = requestAnimationFrame(tick);
+   150→    return () => cancelAnimationFrame(raf);
+   151→  }, [settings.showFps]);
+   152→
+   153→  /* ---------- HUD asset dataURLs (after mount, client-only) ---------- */
+   154→  const assets = useMemo(() => {
+   155→    if (!ready) return null;
+   156→    return {
+   157→      heartFull: dataURL("heart-full", texHeart("full")),
+   158→      heartEmpty: dataURL("heart-empty", texHeart("empty")),
+   159→      pipLive: dataURL("pip-live", texBulletPip("live")),
+   160→      pipBlank: dataURL("pip-blank", texBulletPip("blank")),
+   161→      voodoo: dataURL("voodoo-mask", texVoodooMask()),
+   162→      splat0: dataURL("splat-hud-0", texSplat(333)),
+   163→      splat1: dataURL("splat-hud-1", texSplat(444)),
+   164→      diffEasy: dataURL("diff-easy", texDiffIcon("easy")),
+   165→      diffNormal: dataURL("diff-normal", texDiffIcon("normal")),
+   166→      diffInsane: dataURL("diff-insane", texDiffIcon("insane")),
+   167→    };
+   168→  }, [ready]);
+   169→
+   170→  const assetsRef = useRef(assets);
+   171→  useEffect(() => {
+   172→    assetsRef.current = assets;
+   173→  }, [assets]);
+   174→
+   175→  const handleEvent = useCallback((e: HudEvent) => {
+   176→    const id = ++evId.current;
+   177→    switch (e.type) {
+   178→      case "toast": {
+   179→        setToasts((t) => [...t.slice(-4), { id, text: e.text, tone: e.tone ?? "info" }]);
+   180→        // graceful exit: slide-fade out before removal
+   181→        setTimeout(() => setToasts((t) => t.map((x) => (x.id === id ? { ...x, leaving: true } : x))), 2700);
+   182→        setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200);
+   183→        break;
+   184→      }
+   185→      case "banner":
+   186→        setBanner({ title: e.title, sub: e.sub });
+   187→        setTimeout(() => setBanner(null), e.long ? 2600 : 1700);
+   188→        break;
+   189→      case "skillGet":
+   190→        setStamps((s) => [...s, { id, idSkill: e.id }]);
+   191→        setTimeout(() => setStamps((s) => s.filter((x) => x.id !== id)), 1500);
+   192→        break;
+   193→      case "shellReveal":
+   194→        if (e.shell) {
+   195→          setReveal({ shell: e.shell });
+   196→          setTimeout(() => setReveal(null), 1900);
+   197→        }
+   198→        break;
+   199→      case "shellRevealQueue":
+   200→        setRevealQueue(e.shells);
+   201→        setTimeout(() => setRevealQueue(null), 2800);
+   202→        break;
+   203→      case "dmgPop":
+   204→        setPops((p) => [...p.slice(-5), { id, side: e.side, text: e.text, tone: e.tone ?? "hit" }]);
+   205→        setTimeout(() => setPops((p) => p.filter((x) => x.id !== id)), 1500);
+   206→        break;
+   207→      case "screenSplat": {
+   208→        const url = evId.current % 2 === 0 ? "splat-hud-0" : "splat-hud-1";
+   209→        const a = assetsRef.current;
+   210→        if (!a) break;
+   211→        setSplats((s) => [
+   212→          ...s.slice(-3),
+   213→          {
+   214→            id,
+   215→            url: a[url],
+   216→            left: 15 + Math.random() * 55,
+   217→            top: 8 + Math.random() * 50,
+   218→            size: 130 + Math.random() * 160,
+   219→            rot: Math.random() * 360,
+   220→          },
+   221→        ]);
+   222→        setFlashRed(true);
+   223→        setTimeout(() => setFlashRed(false), 180);
+   224→        setTimeout(() => setSplats((s) => s.filter((x) => x.id !== id)), 2600);
+   225→        break;
+   226→      }
+   227→      case "skillFlash":
+   228→        break;
+   229→      case "reloadStep":
+   230→        setReloadPips(e.loaded);
+   231→        setTimeout(() => setReloadPips(0), 2400);
+   232→        break;
+   233→      case "shopTip":
+   234→        setShopTip(e.id ? { id: e.id, xPct: e.xPct, yPct: e.yPct } : null);
+   235→        break;
+   236→    }
+   237→  }, []);
+   238→
+   239→  /* ---------- mount engine ---------- */
+   240→  useEffect(() => {
+   241→    let disposed = false;
+   242→    (async () => {
+   243→      try {
+   244→        await document.fonts.ready;
+   245→      } catch {
+   246→        /* noop */
+   247→      }
+   248→      if (disposed || !mountRef.current) return;
+   249→      const engine = new GameEngine();
+   250→      engineRef.current = engine;
+   251→      (window as unknown as { __eng?: GameEngine }).__eng = engine;
+   252→      engine.onHud = (s) => setSnap(s);
+   253→      engine.onEvent = (e) => handleEvent(e);
+   254→      engine.mount(mountRef.current);
+   255→      setReady(true);
+   256→    })();
+   257→    return () => {
+   258→      disposed = true;
+   259→      engineRef.current?.dispose();
+   260→      engineRef.current = null;
+   261→    };
+   262→  }, []);
+   263→
+   264→  const toggleMute = useCallback(() => {
+   265→    updateSettings({ muted: !settings.muted });
+   266→  }, [settings.muted, updateSettings]);
+   267→
+   268→  /* ---------- keyboard ---------- */
+   269→  useEffect(() => {
+   270→    const onKey = (ev: KeyboardEvent) => {
+   271→      const eng = engineRef.current;
+   272→      const k = ev.key.toLowerCase();
+   273→      if (k === "escape") {
+   274→        setMenuPanel(null);
+   275→        setShowHelp(false);
+   276→        return;
+   277→      }
+   278→      if (!eng || !snap) return;
+   279→      if (k === "q") void eng.playerShoot("player");
+   280→      else if (k === "e") void eng.playerShoot("enemy");
+   281→      else if (k === "h") setShowHelp((v) => !v);
+   282→      else if (k === "m") toggleMute();
+   283→      else if (/^[1-4]$/.test(k)) {
+   284→        const owned = snap.skills.filter((s) => s.owned && s.ghostTurns <= 0);
+   285→        const target = owned[parseInt(k) - 1];
+   286→        if (target) void eng.playerUseSkill(target.id);
+   287→      }
+   288→    };
+   289→    window.addEventListener("keydown", onKey);
+   290→    return () => window.removeEventListener("keydown", onKey);
+   291→  }, [snap, toggleMute]);
+   292→
+   293→  /* ---------- playtime ticker (round + total) ---------- */
+   294→  const phaseKey = snap?.phase ?? "menu";
+   295→  useEffect(() => {
+   296→    if (phaseKey === "menu") return;
+   297→    const tick = () => setTimes(engineRef.current?.getTimes() ?? { roundMs: 0, totalMs: 0 });
+   298→    tick();
+   299→    const iv = setInterval(tick, 1000);
+   300→    return () => clearInterval(iv);
+   301→  }, [phaseKey]);
+   302→
+   303→  const isPlayerTurn = snap?.phase === "playerTurn" && snap.turn === "player" && !snap.busy;
+   304→  const phase = snap?.phase ?? "menu";
+   305→  const inGame = phase !== "menu";
+   306→  const lowHp = inGame && snap ? snap.hpPlayer : 0;
+   307→
+   308→  /* ---------- render ---------- */
+   309→  return (
+   310→    <div className="fixed inset-0 overflow-hidden bg-[#0b0a08] select-none">
+   311→      {/* 3D world */}
+   312→      <div ref={mountRef} className="absolute inset-0" />
+   313→
+   314→      {/* cinematic overlays */}
+   315→      <div className="pointer-events-none absolute inset-0 vignette-overlay z-10" />
+   316→      <div className="pointer-events-none absolute inset-0 grain-overlay z-10" />
+   317→      {flashRed && <div className="pointer-events-none absolute inset-0 z-10 bg-[rgba(199,62,46,0.35)]" />}
+   318→
+   319→      {/* LOW-HP BLOOD VIGNETTE: starts at 2 HP, thickest at 1 HP */}
+   320→      {snap && lowHp === 2 && (
+   321→        <div className="pointer-events-none absolute inset-0 z-10 blood-vignette" />
+   322→      )}
+   323→      {snap && lowHp === 1 && (
+   324→        <>
+   325→          <div className="pointer-events-none absolute inset-0 z-10 blood-vignette heavy" />
+   326→          <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
+   327→            <span className="blood-drip drip-1" />
+   328→            <span className="blood-drip drip-2" />
+   329→            <span className="blood-drip drip-3" />
+   330→            <span className="blood-drip drip-4" />
+   331→          </div>
+   332→          <div className="pointer-events-none absolute inset-0 z-10 pulse-danger" />
+   333→        </>
+   334→      )}
+   335→
+   336→      {snap && snap.voodooPlayer > 0 && phase !== "menu" && (
+   337→        <div
+   338→          className="pointer-events-none absolute inset-0 z-10"
+   339→          style={{ boxShadow: "inset 0 0 120px rgba(94,156,91,0.45)" }}
+   340→        />
+   341→      )}
+   342→
+   343→      {/* blood on screen */}
+   344→      <div className="pointer-events-none absolute inset-0 z-20 overflow-hidden">
+   345→        {assets &&
+   346→          splats.map((s) => (
+   347→            <img
+   348→              key={s.id}
+   349→              src={s.url}
+   350→              alt=""
+   351→              className="absolute pop-in"
+   352→              style={{
+   353→                left: `${s.left}%`,
+   354→                top: `${s.top}%`,
+   355→                width: s.size,
+   356→                transform: `rotate(${s.rot}deg)`,
+   357→                transition: "opacity 1.2s ease 1s",
+   358→                opacity: 0.92,
+   359→              }}
+   360→            />
+   361→          ))}
+   362→      </div>
+   363→
+   364→      {/* damage pops */}
+   365→      <div className="pointer-events-none absolute inset-0 z-30">
+   366→        {pops.map((p) => (
+   367→          <div
+   368→            key={p.id}
+   369→            className={`absolute rise-fade font-marker text-3xl drop-shadow-[3px_3px_0_rgba(0,0,0,0.7)] ${
+   370→              p.tone === "reflect" ? "text-[#8fdc8a]" : p.tone === "blank" ? "text-[#cfd8e3]" : "text-[#ff6b57]"
+   371→            }`}
+   372→            style={p.side === "enemy" ? { left: "58%", top: "28%" } : { left: "42%", top: "62%" }}
+   373→          >
+   374→            {p.text}
+   375→          </div>
+   376→        ))}
+   377→      </div>
+   378→
+   379→      {/* ================= IN-GAME HUD ================= */}
+   380→      {inGame && assets && snap && (
+   381→        <>
+   382→          {/* shell counter board — the honest numbers fade turn by turn,
+   383→              their opacity really stepping down until it hits zero.
+   384→              Can be switched off entirely in SETTINGS > UI & QOL. */}
+   385→          {snap.round > 0 && settings.showShellStat && (
+   386→          <div className="absolute left-1/2 top-3 z-30 -translate-x-1/2">
+   387→            <div className="relative">
+   388→              <div
+   389→                className="doodle-box flex items-center gap-3 px-4 py-1.5 transition-opacity duration-[1100ms] ease-in-out"
+   390→                style={{ opacity: snap.countsPublic ? Math.min(1, snap.countdown / 3) : 0 }}
+   391→              >
+   392→                <div className="flex items-center gap-1">
+   393→                  <img src={assets.pipLive} alt="live" className="h-7 w-7" />
+   394→                  <span className="font-marker text-xl text-[#8f2418]">x{snap.live}</span>
+   395→                </div>
+   396→                <div className="h-6 w-0.5 bg-[#221a12]/30" />
+   397→                <div className="flex items-center gap-1">
+   398→                  <img src={assets.pipBlank} alt="blank" className="h-7 w-7" />
+   399→                  <span className="font-marker text-xl text-[#57697c]">x{snap.blank}</span>
+   400→                </div>
+   401→              </div>
+   402→              {!snap.countsPublic && (
+   403→                <div className="absolute inset-0 flex items-center justify-center">
+   404→                  <div className="doodle-box doodle-dark board-dark-box pop-in-delayed flex items-center gap-2 whitespace-nowrap px-4 py-1.5">
+   405→                    <span className="font-marker text-xl tracking-widest text-[#8b8577]">? ? ?</span>
+   406→                    <span className="rotate-[-2deg] font-hand-sc text-xs text-[#d9a441]">memorize!</span>
+   407→                  </div>
+   408→                </div>
+   409→              )}
+   410→            </div>
+   411→            {snap.known && (
+   412→              <div className="mt-1 flex justify-center">
+   413→                <div
+   414→                  className={`pop-in font-hand-sc px-2 py-0.5 border-2 border-[#221a12] bg-[#f3ecd7] text-sm rotate-[-2deg] ${
+   415→                    snap.known === "live" ? "text-[#8f2418]" : "text-[#57697c]"
+   416→                  }`}
+   417→                >
+   418→                  CHAMBER: {snap.known.toUpperCase()}
+   419→                </div>
+   420→              </div>
+   421→            )}
+   422→          </div>
+   423→          )}
+   424→          {snap.round > 0 && !settings.showShellStat && snap.known && (
+   425→            <div className="absolute left-1/2 top-3 z-30 -translate-x-1/2">
+   426→              <div
+   427→                className={`pop-in font-hand-sc px-2 py-0.5 border-2 border-[#221a12] bg-[#f3ecd7] text-sm rotate-[-2deg] ${
+   428→                  snap.known === "live" ? "text-[#8f2418]" : "text-[#57697c]"
+   429→                }`}
+   430→              >
+   431→                CHAMBER: {snap.known.toUpperCase()}
+   432→              </div>
+   433→            </div>
+   434→          )}
+   435→
+   436→          {/* top left: round + cash + optional timers (toggles in SETTINGS) */}
+   437→          <div className="absolute left-2 top-2 z-30 flex flex-col gap-1.5 sm:left-3 sm:top-3 sm:gap-2">
+   438→            <div className="doodle-box doodle-dark px-2 py-0.5 font-marker text-xs rotate-[-1.5deg] sm:px-3 sm:py-1 sm:text-sm">
+   439→              ROUND {Math.max(1, snap.round)}
+   440→            </div>
+   441→            <div
+   442→              className="doodle-box w-fit px-2 py-0.5 font-marker text-xs text-[#8a6d1d] rotate-[1deg] sm:text-sm"
+   443→              title="Cash — land bullets ($100), voodoo reflections ($150), survive rounds ($75). Between rounds 3 random items appear on the table."
+   444→            >
+   445→              $ {snap.money}
+   446→            </div>
+   447→            {(settings.showRoundTime || settings.showTotalTime) && (
+   448→              <div className="flex gap-1.5">
+   449→                {settings.showRoundTime && (
+   450→                  <div className="doodle-box doodle-dark px-2 py-0.5 font-hand-sc text-[10px] sm:text-xs" title="Playtime in this round">
+   451→                    RND {fmtTime(times.roundMs)}
+   452→                  </div>
+   453→                )}
+   454→                {settings.showTotalTime && (
+   455→                  <div className="doodle-box doodle-dark px-2 py-0.5 font-hand-sc text-[10px] sm:text-xs" title="Playtime across all rounds">
+   456→                    SUM {fmtTime(times.totalMs)}
+   457→                  </div>
+   458→                )}
+   459→              </div>
+   460→            )}
+   461→          </div>
+   462→
+   463→          {/* top right: THE DEALER */}
+   464→          <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-1">
+   465→            <div className="doodle-box px-3 py-1 rotate-[1.5deg]">
+   466→              <span className="font-marker text-lg text-[#8f2418]">THE DEALER</span>
+   467→              {snap.voodooEnemy > 0 && (
+   468→                <img src={assets.voodoo} alt="voodoo" className="ml-2 inline h-6 w-6 wiggle align-middle" />
+   469→              )}
+   470→              {snap.enemyCuffed && (
+   471→                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">cuffed</span>
+   472→              )}
+   473→            </div>
+   474→            {snap.enemySkills.length > 0 && (
+   475→              <div className="doodle-box flex items-center gap-1 px-2 py-0.5 rotate-[1deg]">
+   476→                <span className="font-hand-sc text-[10px] text-[#4a4036]">SKILLS</span>
+   477→                {snap.enemySkills.map((s) => (
+   478→                  <img
+   479→                    key={s.id}
+   480→                    src={s.icon}
+   481→                    alt={s.id}
+   482→                    title={SKILL_META[s.id].name}
+   483→                    className="h-6 w-6"
+   484→                  />
+   485→                ))}
+   486→              </div>
+   487→            )}
+   488→            <div className="flex gap-1">
+   489→              {Array.from({ length: snap.maxHpEnemy }).map((_, i) => (
+   490→                <img key={i} src={i < snap.hpEnemy ? assets.heartFull : assets.heartEmpty} alt="hp" className="h-8 w-8" />
+   491→              ))}
+   492→            </div>
+   493→          </div>
+   494→
+   495→          {/* player: top-left on mobile, bottom-left on desktop.
+   496→              The optional FPS meter sits right ABOVE the YOU indicator (60% opacity). */}
+   497→          <div className="absolute left-2 top-[88px] z-30 flex flex-col gap-1 sm:left-3 sm:top-auto sm:bottom-3">
+   498→            {settings.showFps && (
+   499→              <div className="doodle-box doodle-dark w-fit px-2 py-0.5 font-hand-sc text-[10px] opacity-60 sm:text-xs">
+   500→                FPS {fps}
+   501→              </div>
+   502→            )}
+   503→            <div className="doodle-box w-fit px-2 py-0.5 rotate-[-1.5deg] sm:px-3 sm:py-1">
+   504→              <span className="font-marker text-sm sm:text-lg">YOU</span>
+   505→              {snap.voodooPlayer > 0 && (
+   506→                <span className="ml-2 font-hand-sc text-sm text-[#5e9c5b]">voodoo {snap.voodooPlayer}</span>
+   507→              )}
+   508→              {snap.playerCuffed && (
+   509→                <span className="ml-2 font-hand-sc text-sm text-[#9b8ec4] underline">cuffed</span>
+   510→              )}
+   511→            </div>
+   512→            <div className="flex gap-0.5 sm:gap-1">
+   513→              {Array.from({ length: snap.maxHpPlayer }).map((_, i) => (
+   514→                <img key={i} src={i < snap.hpPlayer ? assets.heartFull : assets.heartEmpty} alt="hp" className="h-7 w-7 sm:h-9 sm:w-9" />
+   515→              ))}
+   516→            </div>
+   517→          </div>
+   518→
+   519→          {/* turn indicator */}
+   520→          <div className="pointer-events-none absolute left-1/2 top-[74px] z-20 -translate-x-1/2 sm:top-16">
+   521→            {snap.turn === "player" && (
+   522→              <div className="doodle-box px-4 py-0.5 font-marker text-[#8f2418] rotate-[-2deg] float-y">
+   523→                YOUR TURN
+   524→              </div>
+   525→            )}
+   526→            {snap.turn === "enemy" && (
+   527→              <div className="doodle-box doodle-dark px-4 py-0.5 font-marker rotate-[2deg] float-y">
+   528→                THE DEALER&apos;S TURN...
+   529→              </div>
+   530→            )}
+   531→          </div>
+   532→
+   533→          {/* must shoot */}
+   534→          {snap.mustShoot && snap.turn === "player" && (
+   535→            <div className="pointer-events-none absolute left-1/2 top-28 z-30 -translate-x-1/2">
+   536→              <div className="doodle-box doodle-red px-4 py-1 font-marker text-xl blink-soft rotate-[-3deg]">
+   537→                YOU MUST SHOOT!
+   538→              </div>
+   539→            </div>
+   540→          )}
+   541→
+   542→          {/* reload pips */}
+   543→          {reloadPips > 0 && (
+   544→            <div className="pointer-events-none absolute left-1/2 top-[62%] z-30 flex -translate-x-1/2 gap-1.5">
+   545→              {Array.from({ length: 6 }).map((_, i) => (
+   546→                <div
+   547→                  key={i}
+   548→                  className={`h-4 w-4 rounded-full border-[3px] border-[#f3ecd7] ${
+   549→                    i < reloadPips ? "bg-[#c73e2e]" : "bg-transparent"
+   550→                  }`}
+   551→                />
+   552→              ))}
+   553→            </div>
+   554→          )}
+   555→
+   556→          {/* skill bar (dice skills + shop trials; spent trials dissolve away) */}
+   557→          <div className="absolute bottom-[104px] left-1/2 z-30 flex -translate-x-1/2 items-end gap-1.5 sm:bottom-3 sm:gap-2">
+   558→            {snap.skills
+   559→              .filter((s) => s.owned)
+   560→              .map((s, idx) => {
+   561→                const ghost = s.ghostTurns > 0;
+   562→                return (
+   563→                  <button
+   564→                    key={s.id}
+   565→                    className={`doodle-btn relative flex h-16 w-16 flex-col items-center justify-center gap-0.5 sm:h-[74px] sm:w-[74px] ${
+   566→                      ghost ? "ghost-skill" : s.usable ? "" : "opacity-60"
+   567→                    }`}
+   568→                    style={
+   569→                      ghost
+   570→                        ? {
+   571→                            opacity: 0.1 + s.ghostTurns * 0.24,
+   572→                            filter: `grayscale(${0.55 + (2 - s.ghostTurns) * 0.22}) blur(${(2 - s.ghostTurns) * 0.8}px)`,
+   573→                            transition: "opacity 1.1s ease, filter 1.1s ease",
+   574→                          }
+   575→                        : undefined
+   576→                    }
+   577→                    disabled={!s.usable || ghost}
+   578→                    onClick={() => void engineRef.current?.playerUseSkill(s.id)}
+   579→                    title={SKILL_META[s.id].desc}
+   580→                  >
+   581→                    <img src={s.icon} alt={s.id} className="h-8 w-8 sm:h-9 sm:w-9" />
+   582→                    <span className="font-hand-sc text-[11px] leading-none">{SKILL_META[s.id].name}</span>
+   583→                    {!ghost && (
+   584→                      <span className="absolute -top-2 -left-1.5 font-marker text-[11px] text-[#8f2418]">{idx + 1}</span>
+   585→                    )}
+   586→                    {ghost ? null : s.id === "phoenix" ? (
+   587→                      <span className="trial-ribbon font-hand-sc" style={{ background: "#e08b3a" }}>
+   588→                        PASSIVE
+   589→                      </span>
+   590→                    ) : (
+   591→                      s.trial && <span className="trial-ribbon font-hand-sc">TRIAL</span>
+   592→                    )}
+   593→                    {!ghost && s.charges >= 0 && (
+   594→                      <span className="absolute -bottom-1 right-1 flex gap-0.5">
+   595→                        {Array.from({ length: Math.max(s.charges, 0) }).map((_, c) => (
+   596→                          <span key={c} className="h-2 w-2 rounded-full bg-[#5e9c5b] border border-[#221a12]" />
+   597→                        ))}
+   598→                      </span>
+   599→                    )}
+   600→                    {!ghost && s.cooldown > 0 && (
+   601→                      <span className="absolute inset-0 flex items-center justify-center rounded-[inherit] bg-black/55 font-marker text-2xl text-[#f3ecd7]">
+   602→                        {s.cooldown}
+   603→                      </span>
+   604→                    )}
+   605→                  </button>
+   606→                );
+   607→              })}
+   608→          </div>
+   609→
+   610→          {/* shoot buttons */}
+   611→          <div className="absolute bottom-3 right-2 z-30 flex flex-row gap-2 sm:right-3 sm:flex-col">
+   612→            <button
+   613→              className={`doodle-btn doodle-red px-3 py-2.5 font-marker text-sm sm:px-5 sm:text-lg ${isPlayerTurn ? "" : "opacity-50"}`}
+   614→              disabled={!isPlayerTurn}
+   615→              onClick={() => void engineRef.current?.playerShoot("enemy")}
+   616→            >
+   617→              SHOOT DEALER [E]
+   618→            </button>
+   619→            <button
+   620→              className={`doodle-btn px-3 py-2.5 font-marker text-sm sm:px-5 sm:text-lg ${isPlayerTurn ? "" : "opacity-50"}`}
+   621→              disabled={!isPlayerTurn}
+   622→              onClick={() => void engineRef.current?.playerShoot("player")}
+   623→            >
+   624→              SHOOT SELF [Q]
+   625→            </button>
+   626→          </div>
+   627→
+   628→          {/* toasts left (slide in, slide out) */}
+   629→          <div className="pointer-events-none absolute left-3 top-28 z-30 flex w-64 flex-col gap-1.5">
+   630→            {toasts.map((t) => (
+   631→              <div
+   632→                key={t.id}
+   633→                className={`doodle-box ${t.leaving ? "toast-out" : "toast-in"} px-3 py-1.5 font-hand text-[15px] leading-tight ${
+   634→                  t.tone === "good"
+   635→                    ? "border-[#3f6b3d]"
+   636→                    : t.tone === "bad"
+   637→                      ? "border-[#8f2418] text-[#8f2418]"
+   638→                      : t.tone === "voodoo"
+   639→                        ? "border-[#5e9c5b] text-[#3f6b3d] bg-[#e9f0e2]"
+   640→                        : ""
+   641→                }`}
+   642→              >
+   643→                {t.text}
+   644→              </div>
+   645→            ))}
+   646→          </div>
+   647→        </>
+   648→      )}
+   649→
+   650→      {/* skill-get stamp */}
+   651→      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+   652→        {assets &&
+   653→          stamps.map((s) => (
+   654→            <div key={s.id} className="stamp-in absolute flex flex-col items-center">
+   655→              <div className="doodle-box flex items-center gap-3 px-8 py-4 rotate-[-3deg]">
+   656→                <img src={snap?.skills.find((x) => x.id === s.idSkill)?.icon} alt={s.idSkill} className="h-16 w-16" />
+   657→                <div>
+   658→                  <div className="font-marker text-3xl text-[#8f2418]">{SKILL_META[s.idSkill].name}!</div>
+   659→                  <div className="font-hand text-lg">{SKILL_META[s.idSkill].tag}</div>
+   660→                </div>
+   661→              </div>
+   662→            </div>
+   663→          ))}
+   664→      </div>
+   665→
+   666→      {/* shell reveal (peek) */}
+   667→      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+   668→        {assets && reveal && (
+   669→          <div className="pop-in flex flex-col items-center gap-2">
+   670→            <img
+   671→              src={reveal.shell === "live" ? assets.pipLive : assets.pipBlank}
+   672→              alt={reveal.shell}
+   673→              className="h-40 w-40 float-y"
+   674→              style={{ imageRendering: "auto", transform: "scale(1.6)" }}
+   675→            />
+   676→            <div
+   677→              className={`doodle-box px-5 py-1 font-marker text-2xl rotate-[-2deg] ${
+   678→                reveal.shell === "live" ? "text-[#8f2418]" : "text-[#57697c]"
+   679→              }`}
+   680→            >
+   681→              {reveal.shell!.toUpperCase()}!
+   682→            </div>
+   683→          </div>
+   684→        )}
+   685→      </div>
+   686→
+   687→      {/* third eye: the next shells in firing order */}
+   688→      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+   689→        {assets && revealQueue && (
+   690→          <div className="pop-in doodle-box px-6 py-4 rotate-[-1.5deg]">
+   691→            <div className="mb-2 text-center font-marker text-xl text-[#5aa7a0]">THIRD EYE</div>
+   692→            <div className="flex items-center gap-3">
+   693→              {revealQueue.map((sh, i) =>
+   694→                sh ? (
+   695→                  <img key={i} src={sh === "live" ? assets.pipLive : assets.pipBlank} alt={sh} className="h-20 w-20" />
+   696→                ) : (
+   697→                  <div
+   698→                    key={i}
+   699→                    className="flex h-20 w-20 items-center justify-center border-4 border-dashed border-[#221a12]/40 font-marker text-3xl text-[#57697c]"
+   700→                  >
+   701→                    ?
+   702→                  </div>
+   703→                ),
+   704→              )}
+   705→            </div>
+   706→            <div className="mt-2 text-center font-hand-sc text-sm text-[#4a4036]">in firing order</div>
+   707→          </div>
+   708→        )}
+   709→      </div>
+   710→
+   711→      {/* center banner */}
+   712→      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+   713→        {banner && (
+   714→          <div className="stamp-in flex flex-col items-center gap-2">
+   715→            <div className="doodle-box px-10 py-4 rotate-[-2deg]">
+   716→              <div className="font-marker text-5xl text-[#221a12]">{banner.title}</div>
+   717→              {banner.sub && <div className="mt-1 text-center font-hand text-xl text-[#8f2418]">{banner.sub}</div>}
+   718→            </div>
+   719→          </div>
+   720→        )}
+   721→      </div>
+   722→
+   723→      {/* ================= SHOP BREAK (physical, on the table) ================= */}
+   724→      {phase === "shop" && shopTip && snap && (
+   725→        <div
+   726→          className={`shop-tip ${shopTip.id !== "bell" && snap.shopOffers.find((o) => o.id === shopTip.id)?.legendary ? "shop-tip-gold" : ""}`}
+   727→          style={{ left: `${Math.min(86, Math.max(14, shopTip.xPct))}%`, top: `${Math.max(18, shopTip.yPct)}%` }}
+   728→        >
+   729→          {shopTip.id === "bell" ? (
+   730→            <>
+   731→              <div className="font-marker text-lg text-[#8a6d1d]">THE BELL</div>
+   732→              <div className="font-hand text-[13px] leading-snug text-[#221a12]">
+   733→                Ring it to end the break — reload the gun and fight the next round.
+   734→              </div>
+   735→            </>
+   736→          ) : (() => {
+   737→            const o = snap.shopOffers.find((x) => x.id === shopTip.id);
+   738→            if (!o) return null;
+   739→            const m = SKILL_META[o.id];
+   740→            return (
+   741→              <>
+   742→                <div className="flex items-center justify-between gap-3">
+   743→                  <div className="font-marker text-lg leading-tight" style={{ color: m.color }}>
+   744→                    {m.name}
+   745→                  </div>
+   746→                  <div className="font-marker text-xl text-[#8a6d1d]">$ {o.price}</div>
+   747→                </div>
+   748→                <div className="font-hand text-[13px] leading-snug text-[#221a12]">{m.desc}</div>
+   749→                <div className="mt-1 font-hand-sc text-[11px] leading-none">
+   750→                  <span className="text-[#8a6d1d]">TRIAL · 1 USE</span>
+   751→                  {o.legendary && <span className="ml-2 text-[#8f2418]">INSANE ONLY</span>}
+   752→                  {o.sold && <span className="ml-2 text-[#57697c]">SOLD</span>}
+   753→                  {!o.sold && o.reason && <span className="ml-2 text-[#8f2418]">{o.reason}</span>}
+   754→                </div>
+   755→              </>
+   756→            );
+   757→          })()}
+   758→        </div>
+   759→      )}
+   760→
+   761→      {/* ================= MAIN MENU ================= */}
+   762→      {/* the "background video": the living 3D table + THE DEALER idling,
+   763→          dimmed to 30%, no in-game UI anywhere */}
+   764→      {phase === "menu" && (
+   765→        <div className={`absolute inset-0 z-50 ${menuPanel ? "bg-black/45" : "bg-black/30"}`}>
+   766→          {/* animated game title — top left, just below the corner */}
+   767→          <div className="menu-title absolute left-5 top-6 z-10 sm:left-8 sm:top-9">
+   768→            <div className="font-marker text-[2.6rem] leading-none tracking-wide text-[#f3ecd7] sm:text-6xl">
+   769→              ROULETTE<span className="menu-title-mate">-MATE</span>
+   770→            </div>
+   771→            <div className="menu-tagline mt-1 rotate-[-1.5deg] font-hand text-lg text-[#d9a441] sm:text-xl">
+   772→              one revolver &middot; six chambers &middot; no mercy
+   773→            </div>
+   774→          </div>
+   775→
+   776→          {/* the three doors of this establishment — bottom left, top to bottom */}
+   777→          <div className="absolute bottom-6 left-5 z-10 flex flex-col items-start gap-3 sm:bottom-9 sm:left-8">
+   778→            <button
+   779→              className="doodle-btn doodle-red menu-btn px-8 py-3 font-marker text-2xl sm:px-10"
+   780→              style={{ animationDelay: "0.05s" }}
+   781→              onClick={() => {
+   782→                gameAudio.ensure();
+   783→                gameAudio.click();
+   784→                setMenuPanel("play");
+   785→              }}
+   786→            >
+   787→              PICK A TABLE
+   788→            </button>
+   789→            <button
+   790→              className="doodle-btn menu-btn px-6 py-2 font-marker text-xl sm:px-8"
+   791→              style={{ animationDelay: "0.18s" }}
+   792→              onClick={() => {
+   793→                gameAudio.ensure();
+   794→                gameAudio.click();
+   795→                setMenuPanel("settings");
+   796→              }}
+   797→            >
+   798→              SETTINGS
+   799→            </button>
+   800→            <button
+   801→              className="doodle-btn menu-btn px-6 py-2 font-marker text-xl sm:px-8"
+   802→              style={{ animationDelay: "0.31s" }}
+   803→              onClick={() => {
+   804→                gameAudio.ensure();
+   805→                gameAudio.click();
+   806→                setShowHelp(true);
+   807→              }}
+   808→            >
+   809→              HELP / HOW TO PLAY
+   810→            </button>
+   811→          </div>
+   812→
+   813→          {/* ------- PICK A TABLE (the old menu UI, cleaned) ------- */}
+   814→          {menuPanel === "play" && (
+   815→            <div className="absolute inset-0 z-20 flex items-center justify-center p-4">
+   816→              <div className="pop-in doodle-box w-[min(92vw,540px)] px-7 py-6 rotate-[-0.5deg]">
+   817→                <div className="flex items-center justify-between">
+   818→                  <div className="font-marker text-3xl text-[#8f2418]">PICK A TABLE</div>
+   819→                  <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setMenuPanel(null)}>
+   820→                    X
+   821→                  </button>
+   822→                </div>
+   823→                <div className="mt-4 flex flex-col gap-2">
+   824→                  {DIFFS.map((d) => (
+   825→                    <button
+   826→                      key={d.id}
+   827→                      onClick={() => {
+   828→                        setDiff(d.id);
+   829→                        gameAudio.click();
+   830→                      }}
+   831→                      className={`doodle-btn flex items-center gap-3 px-3 py-2 ${
+   832→                        diff === d.id ? "bg-[#221a12] text-[#f3ecd7]" : ""
+   833→                      }`}
+   834→                    >
+   835→                      <img
+   836→                        src={d.id === "easy" ? assets?.diffEasy : d.id === "normal" ? assets?.diffNormal : assets?.diffInsane}
+   837→                        alt={d.id}
+   838→                        className="h-12 w-12 shrink-0"
+   839→                      />
+   840→                      <span className="font-marker text-xl">{d.label}</span>
+   841→                      <span className="font-hand text-sm opacity-80 sm:text-base">{d.desc}</span>
+   842→                    </button>
+   843→                  ))}
+   844→                </div>
+   845→                <div className="mt-5 flex justify-center">
+   846→                  <button
+   847→                    className="doodle-btn doodle-red px-10 py-3 font-marker text-2xl menu-btn"
+   848→                    onClick={() => {
+   849→                      gameAudio.ensure();
+   850→                      setMenuPanel(null);
+   851→                      void engineRef.current?.startGame(diff);
+   852→                    }}
+   853→                  >
+   854→                    SIT AT THE TABLE
+   855→                  </button>
+   856→                </div>
+   857→              </div>
+   858→            </div>
+   859→          )}
+   860→
+   861→          {/* ------- SETTINGS ------- */}
+   862→          {menuPanel === "settings" && (
+   863→            <div className="absolute inset-0 z-20 flex items-center justify-center p-4">
+   864→              <div className="pop-in doodle-box w-[min(92vw,520px)] px-7 py-6 rotate-[0.4deg]">
+   865→                <div className="flex items-center justify-between">
+   866→                  <div className="font-marker text-3xl text-[#8f2418]">SETTINGS</div>
+   867→                  <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setMenuPanel(null)}>
+   868→                    X
+   869→                  </button>
+   870→                </div>
+   871→
+   872→                <div className="mt-4 flex flex-col gap-2.5 font-hand text-lg">
+   873→                  {/* SOUND */}
+   874→                  <div className="flex items-center justify-between gap-3">
+   875→                    <span className="font-marker text-lg">SOUND</span>
+   876→                    <button
+   877→                      className={`doodle-btn px-4 py-1 font-hand-sc text-base ${settings.muted ? "opacity-70" : ""}`}
+   878→                      onClick={() => updateSettings({ muted: !settings.muted })}
+   879→                    >
+   880→                      {settings.muted ? "SOUND OFF" : "SOUND ON"}
+   881→                    </button>
+   882→                  </div>
+   883→
+   884→                  {/* GRAPHICS */}
+   885→                  <div className="flex items-center justify-between gap-3">
+   886→                    <span className="font-marker text-lg">GRAPHICS</span>
+   887→                    <div className="flex gap-1.5">
+   888→                      {(["low", "medium", "high"] as Quality[]).map((q) => (
+   889→                        <button
+   890→                          key={q}
+   891→                          className={`doodle-btn px-3 py-1 font-hand-sc text-base ${
+   892→                            settings.quality === q ? "bg-[#221a12] text-[#f3ecd7]" : ""
+   893→                          }`}
+   894→                          onClick={() => updateSettings({ quality: q })}
+   895→                        >
+   896→                          {q === "low" ? "LOW" : q === "medium" ? "MED" : "HIGH"}
+   897→                        </button>
+   898→                      ))}
+   899→                    </div>
+   900→                  </div>
+   901→
+   902→                  <div className="mt-1 border-t-2 border-dashed border-[#221a12]/30 pt-2 font-marker text-lg text-[#8a6d1d]">
+   903→                    UI &amp; QOL
+   904→                  </div>
+   905→
+   906→                  {/* live/blank stat */}
+   907→                  <button
+   908→                    className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+   909→                    onClick={() => updateSettings({ showShellStat: !settings.showShellStat })}
+   910→                  >
+   911→                    <span className="font-hand text-lg">Live / blank stat on the board</span>
+   912→                    <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showShellStat ? "" : "opacity-70"}`}>
+   913→                      {settings.showShellStat ? "ON" : "OFF"}
+   914→                    </span>
+   915→                  </button>
+   916→
+   917→                  {/* TIME — expands into round/total */}
+   918→                  <div>
+   919→                    <button
+   920→                      className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+   921→                      onClick={() => setTimeOpen((v) => !v)}
+   922→                    >
+   923→                      <span className="font-hand text-lg">
+   924→                        Time <span className="font-hand-sc text-sm text-[#4a4036]">(round &amp; total)</span>
+   925→                      </span>
+   926→                      <span className={`font-marker text-xl transition-transform duration-200 ${timeOpen ? "rotate-180" : ""}`}>
+   927→                        v
+   928→                      </span>
+   929→                    </button>
+   930→                    {timeOpen && (
+   931→                      <div className="expand-in mt-1 ml-4 flex flex-col gap-1.5 border-l-2 border-dashed border-[#221a12]/30 pl-3">
+   932→                        <button
+   933→                          className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+   934→                          onClick={() => updateSettings({ showRoundTime: !settings.showRoundTime })}
+   935→                        >
+   936→                          <span className="font-hand text-base">Show round time</span>
+   937→                          <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showRoundTime ? "" : "opacity-70"}`}>
+   938→                            {settings.showRoundTime ? "ON" : "OFF"}
+   939→                          </span>
+   940→                        </button>
+   941→                        <button
+   942→                          className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+   943→                          onClick={() => updateSettings({ showTotalTime: !settings.showTotalTime })}
+   944→                        >
+   945→                          <span className="font-hand text-base">Show total time</span>
+   946→                          <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showTotalTime ? "" : "opacity-70"}`}>
+   947→                            {settings.showTotalTime ? "ON" : "OFF"}
+   948→                          </span>
+   949→                        </button>
+   950→                      </div>
+   951→                    )}
+   952→                  </div>
+   953→
+   954→                  {/* show FPS */}
+   955→                  <button
+   956→                    className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+   957→                    onClick={() => updateSettings({ showFps: !settings.showFps })}
+   958→                  >
+   959→                    <span className="font-hand text-lg">
+   960→                      Show FPS <span className="font-hand-sc text-sm text-[#4a4036]">(above the YOU tag)</span>
+   961→                    </span>
+   962→                    <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showFps ? "" : "opacity-70"}`}>
+   963→                      {settings.showFps ? "ON" : "OFF"}
+   964→                    </span>
+   965→                  </button>
+   966→                </div>
+   967→              </div>
+   968→            </div>
+   969→          )}
+   970→        </div>
+   971→      )}
+   972→
+   973→      {/* ================= GAME OVER / VICTORY ================= */}
+   974→      {(phase === "gameover" || phase === "victory") && snap && (
+   975→        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[2px]">
+   976→          <div className={`pop-in doodle-box w-[min(92vw,520px)] px-8 py-7 ${phase === "victory" ? "rotate-[0.5deg]" : "rotate-[-0.7deg]"}`}>
+   977→            <div className="text-center">
+   978→              {phase === "victory" ? (
+   979→                <>
+   980→                  <div className="font-marker text-5xl text-[#3f6b3d] rotate-[1deg]">YOU SURVIVED!</div>
+   981→                  <div className="mt-2 font-hand text-xl">
+   982→                    The Dealer fell in round {snap.round}. This room is officially yours.
+   983→                  </div>
+   984→                </>
+   985→              ) : (
+   986→                <>
+   987→                  <div className="font-marker text-6xl text-[#8f2418] rotate-[-1.5deg]">GAME OVER</div>
+   988→                  <div className="mt-2 font-hand text-xl">
+   989→                    That bullet was for you. You lasted until round {snap.round}.
+   990→                  </div>
+   991→                </>
+   992→              )}
+   993→              <div className="mt-3 font-hand text-lg text-[#4a4036]">
+   994→                Final HP: you {snap.hpPlayer}/{snap.maxHpPlayer} &middot; Dealer {snap.hpEnemy}/{snap.maxHpEnemy}
+   995→              </div>
+   996→              <div className="mt-1 font-hand text-base text-[#4a4036]">
+   997→                Cash left: ${snap.money} &middot; Match time {fmtTime(times.totalMs)}
+   998→              </div>
+   999→            </div>
+  1000→            <div className="mt-5 flex justify-center gap-3">
+  1001→              <button
+  1002→                className="doodle-btn doodle-red px-8 py-2.5 font-marker text-xl"
+  1003→                onClick={() => void engineRef.current?.startGame(snap.difficulty)}
+  1004→              >
+  1005→                PLAY AGAIN
+  1006→              </button>
+  1007→              <button className="doodle-btn px-6 py-2.5 font-marker text-xl" onClick={() => engineRef.current?.backToMenu()}>
+  1008→                MENU
+  1009→              </button>
+  1010→            </div>
+  1011→          </div>
+  1012→        </div>
+  1013→      )}
+  1014→
+  1015→      {/* ================= HELP ================= */}
+  1016→      {showHelp && (
+  1017→        <div
+  1018→          className="absolute inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+  1019→          onClick={() => setShowHelp(false)}
+  1020→        >
+  1021→          <div
+  1022→            className="pop-in doodle-box doodle-scroll max-h-[88vh] w-[min(94vw,680px)] overflow-y-auto px-7 py-6"
+  1023→            onClick={(e) => e.stopPropagation()}
+  1024→          >
+  1025→            <div className="flex items-start justify-between">
+  1026→              <div className="font-marker text-3xl text-[#8f2418]">HOW TO PLAY</div>
+  1027→              <button className="doodle-btn px-3 py-1 font-marker" onClick={() => setShowHelp(false)}>
+  1028→                X
+  1029→              </button>
+  1030→            </div>
+  1031→            <div className="mt-3 space-y-2 font-hand text-lg leading-snug">
+  1032→              <p>
+  1033→                On the table sits a 6-chamber revolver. Each round it is loaded with a mix of{" "}
+  1034→                <b className="text-[#8f2418]">LIVE</b> (red, hurts) and <b className="text-[#57697c]">BLANK</b>{" "}
+  1035→                (blue, empty) shells. The counts are honest on the board up top — but only for the first{" "}
+  1036→                <b>3 turns</b> of a round. Then the board <b className="text-[#8f2418]">fades away turn by turn</b>,
+  1037→                its opacity sinking until nothing is left, and both of you run on pure memory. The Dealer has a
+  1038→                real memory too: he tracks every shell he sees — and on EASY/NORMAL he sometimes loses count.
+  1039→              </p>
+  1040→              <p>
+  1041→                On your turn use a skill first if you want (free, doesn&apos;t pass the turn), then choose:{" "}
+  1042→                <b>SHOOT SELF</b> — if it&apos;s a blank you automatically fire ONE free shot at the Dealer;
+  1043→                if it&apos;s live, you take the hit and the turn passes. <b>SHOOT DEALER</b> — if it&apos;s live
+  1044→                he takes the hit and the turn passes. Out of HP = over.
+  1045→              </p>
+  1046→              <p>
+  1047→                The opening dice grants you <b>2 skills</b>. Between rounds the gun runs dry and a{" "}
+  1048→                <b>SHOP BREAK</b> begins: <b>3 random items</b> appear right on the table. <b>Hover</b> one to
+  1049→                read its price and effect, <b>click</b> to buy it as a 1-use <b className="text-[#8a6d1d]">TRIAL</b>,
+  1050→                and hold up to <b>4 skills</b> at once. A spent trial dissolves over 2 turns. When you&apos;re
+  1051→                done, <b>ring the golden bell</b> — every card leaps into the Dealer&apos;s hands and the next
+  1052→                round loads. Voodoo is not for sale — a reflection like that earns its keep, it doesn&apos;t buy it.
+  1053→              </p>
+  1054→              <p>
+  1055→                <b>Cash:</b> every bullet you land pays <b>$100</b>, a voodoo reflection pays <b>$150</b>,
+  1056→                surviving a round pays <b>$75</b>, and you start with <b>$200</b>. On INSANE the table can also
+  1057→                stock two legends: <b className="text-[#e08b3a]">PHOENIX</b> (refuse to die once) and{" "}
+  1058→                <b className="text-[#5aa7a0]">THIRD EYE</b> (see the next 3 shells in order).
+  1059→              </p>
+  1060→              <p className="text-[#8f2418]">
+  1061→                HP: your 6 against his 5 on EASY, 5 vs 5 on NORMAL — and on INSANE you get only 4 while the
+  1062→                Dealer keeps 5. At 2 HP a blood vignette creeps in and your heartbeat returns. Below 3 HP,
+  1063→                shooting yourself takes a long, cruel 0.7 seconds to pull — and the bullet leaves the barrel
+  1064→                0.2 seconds late.
+  1065→              </p>
+  1066→              <p className="font-hand-sc text-base text-[#4a4036]">
+  1067→                Keyboard: Q = shoot self &middot; E = shoot the Dealer &middot; 1-4 = skills &middot; M = mute &middot; H = help
+  1068→              </p>
+  1069→            </div>
+  1070→            <div className="mt-4 font-marker text-2xl">8 SKILLS</div>
+  1071→            <div className="mt-2 space-y-2">
+  1072→              {(Object.keys(SKILL_META) as SkillId[]).map((id) => (
+  1073→                <div key={id} className="flex gap-3 border-2 border-[#221a12]/20 rounded-[14px_4px_16px_6px] bg-[#efe7d2] p-2.5">
+  1074→                  <img src={dataURL(`icon-${id}`, texSkillIcon(id))} alt={id} className="h-12 w-12 shrink-0" />
+  1075→                  <div>
+  1076→                    <div className="font-marker text-lg" style={{ color: SKILL_META[id].color }}>
+  1077→                      {SKILL_META[id].name} <span className="font-hand text-sm text-[#4a4036]">— {SKILL_META[id].tag}</span>
+  1078→                    </div>
+  1079→                    <div className="font-hand text-[15px] leading-tight">{SKILL_META[id].desc}</div>
+  1080→                  </div>
+  1081→                </div>
+  1082→              ))}
+  1083→            </div>
+  1084→            <div className="mt-4 font-hand text-base text-[#4a4036]">
+  1085→              Tip: PEEK before you decide. Reroll when the chamber feels too dangerous. Voodoo is at its
+  1086→              meanest when the Dealer looks brave — every live bullet he fires at you crawls back into him.
+  1087→            </div>
+  1088→          </div>
+  1089→        </div>
+  1090→      )}
+  1091→    </div>
+  1092→  );
+  1093→}
+  1094→

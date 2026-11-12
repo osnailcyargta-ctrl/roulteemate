@@ -34,6 +34,16 @@ import type { SkillId } from "./doodle";
 export type ShellType = "live" | "blank";
 export type Side = "player" | "enemy";
 export type Difficulty = "easy" | "normal" | "insane";
+export type Mode = "standard" | "endless";
+
+/** What the last fired shell did — the REWIND skill needs this to undo it. */
+export interface LastShot {
+  shell: ShellType;
+  damageTo: Side | null;
+  reflected: boolean;
+  /** Cash the engine paid out for this shot (refunded by rewind). */
+  moneyGain: number;
+}
 
 export interface SkillState {
   owned: boolean;
@@ -57,9 +67,12 @@ export interface GameState {
   phase: Phase;
   round: number;
   difficulty: Difficulty;
+  mode: Mode; // endless: the DEALER never dies — his HP becomes a SCORE counter
+  score: number; // ENDLESS: +1 every damage the DEALER takes, -1 when he heals (can go negative)
   maxHp: Record<Side, number>;
   hp: Record<Side, number>;
   cylinder: ShellType[]; // index 0 = next shell
+  lastShot: LastShot | null; // the most recent trigger pull (for REWIND)
   turn: Side;
   skills: Record<SkillId, SkillState>; // player
   enemySkills: Record<SkillId, SkillState>; // enemy
@@ -93,6 +106,9 @@ export interface SkillOutcome {
   cuffsApplied?: boolean;
   ejected?: ShellType | null;
   queue?: (ShellType | null)[]; // third eye: the next shells in order
+  rewound?: LastShot | null; // rewind: the shot that was undone
+  gambleWin?: boolean; // gamble: true = heads (+1 HP), false = tails (-1 HP)
+  died?: boolean; // gamble tails at 1 HP — the coin killed its own flipper
 }
 
 const CHAMBER_SIZE = 6;
@@ -111,6 +127,8 @@ function emptySkills(): Record<SkillId, SkillState> {
     cuffs: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
     phoenix: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
     thirdEye: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
+    rewind: { owned: false, charges: 0, cooldown: 0, maxCharges: 3 },
+    gamble: { owned: false, charges: 0, cooldown: 0, maxCharges: 3 },
   };
 }
 
@@ -123,11 +141,19 @@ export const SKILL_CD: Record<SkillId, number> = {
   cuffs: 0,
   phoenix: 0,
   thirdEye: 0,
+  rewind: 2,
+  gamble: 2,
 };
 
 /** How many skills the ENEMY gets per difficulty. */
 export function enemySkillCount(diff: Difficulty): number {
   return diff === "easy" ? 1 : diff === "normal" ? 2 : 3;
+}
+
+export interface LogicOverrides {
+  /** MUTATORS: custom HP for both sides. */
+  hpPlayer?: number;
+  hpEnemy?: number;
 }
 
 export class RouletteLogic {
@@ -143,25 +169,39 @@ export class RouletteLogic {
   /** True when the enemy misremembered at the start of its turn. */
   lastSlip = false;
 
-  constructor(difficulty: Difficulty = "normal") {
-    this.state = this.freshState(difficulty);
+  constructor(
+    difficulty: Difficulty = "normal",
+    mode: Mode = "standard",
+    overrides: LogicOverrides = {},
+  ) {
+    this.state = this.freshState(difficulty, mode, overrides);
   }
 
-  freshState(difficulty: Difficulty): GameState {
-    // The DEALER always sits at 5 HP — easy to hurt, hard to outdraw.
-    const maxHp: Record<Side, number> =
+  freshState(difficulty: Difficulty, mode: Mode = "standard", overrides: LogicOverrides = {}): GameState {
+    // The DEALER always sits at 5 HP in standard play (ENDLESS replaces it
+    // with the SCORE counter) — mutators may override both sides.
+    const base: Record<Side, number> =
       difficulty === "easy"
         ? { player: 6, enemy: 5 }
         : difficulty === "normal"
           ? { player: 5, enemy: 5 }
-          : { player: 4, enemy: 5 }; // INSANE: fewer hearts, same dealer
+          : mode === "endless"
+            ? { player: 5, enemy: 5 } // ENDLESS: you need staying power
+            : { player: 4, enemy: 5 }; // INSANE: fewer hearts, same dealer
+    const maxHp: Record<Side, number> = {
+      player: overrides.hpPlayer ?? base.player,
+      enemy: overrides.hpEnemy ?? base.enemy,
+    };
     return {
       phase: "dice",
       round: 0,
       difficulty,
+      mode,
+      score: 0,
       maxHp,
       hp: { player: maxHp.player, enemy: maxHp.enemy },
       cylinder: [],
+      lastShot: null,
       turn: "player",
       skills: emptySkills(),
       enemySkills: emptySkills(),
@@ -196,6 +236,7 @@ export class RouletteLogic {
     this.aiKnown = null;
     this.playerKnownQueue = [];
     this.state.countdown = 4; // the honest board survives the first 3 turns
+    this.state.lastShot = null; // a fresh magazine erases history (no rewind across reloads)
     this.aiMem = { live: liveCount, total: shells.length };
   }
 
@@ -216,7 +257,6 @@ export class RouletteLogic {
   }
 
   /* ---------------- skill grants (dice) ---------------- */
-
   /** The dice grants a skill. If already owned: charge skills +1 charge
    *  (up to cap), cooldown skills get their cooldown reset. */
   grantSkill(side: Side, id: SkillId) {
@@ -288,6 +328,41 @@ export class RouletteLogic {
     this.aiMem.live = this.clampMem(this.aiMem.live - oldP + 0.5);
   }
 
+  /* ---------------- endless scoring ---------------- */
+
+  /** ENDLESS: the DEALER's HP is replaced by a SCORE counter.
+   *  Every damage he takes = +1 score, every heal = -1 score.
+   *  The score may go negative — nobody is stopping you from bullying him. */
+  addScore(delta: number) {
+    this.state.score += delta;
+  }
+
+  /** Apply damage to a side. In ENDLESS, hurting the DEALER feeds the
+   *  score instead of his HP — he simply cannot die. */
+  damageSide(side: Side, amount: number): boolean {
+    const st = this.state;
+    if (amount <= 0) return false;
+    if (side === "enemy" && st.mode === "endless") {
+      st.score += amount; // +1 score per point of damage (can pierce zero, go negative)
+      return false; // never a death
+    }
+    st.hp[side] = Math.max(0, st.hp[side] - amount);
+    return st.hp[side] <= 0;
+  }
+
+  /** Heal a side. In ENDLESS, a healing DEALER LOSES score (may go negative). */
+  healSide(side: Side, amount: number): boolean {
+    const st = this.state;
+    if (amount <= 0) return false;
+    if (side === "enemy" && st.mode === "endless") {
+      st.score -= amount;
+      return false;
+    }
+    const before = st.hp[side];
+    st.hp[side] = Math.min(st.maxHp[side], st.hp[side] + amount);
+    return st.hp[side] > before; // true when the heal actually did something
+  }
+
   /* ---------------- skills ---------------- */
 
   canUseSkill(side: Side, id: SkillId): boolean {
@@ -306,6 +381,8 @@ export class RouletteLogic {
     if (id === "voodoo" && st.voodooTurns[side] > 0) return false;
     if (id === "eject" && st.cylinder.length === 0) return false;
     if (id === "reroll" && (st.usedRerollThisTurn || st.cylinder.length === 0)) return false;
+    if (id === "rewind" && !st.lastShot) return false; // nothing to undo
+    if (id === "gamble" && st.hp[side] <= 0) return false;
     return true;
   }
 
@@ -365,7 +442,7 @@ export class RouletteLogic {
         return { ok: true, ejected: cur };
       }
       case "coffee": {
-        st.hp[side] = Math.min(st.maxHp[side], st.hp[side] + 1);
+        this.healSide(side, 1);
         if (!sk.trial) sk.charges -= 1;
         return { ok: true, healed: true };
       }
@@ -379,6 +456,46 @@ export class RouletteLogic {
         if (!sk.trial) sk.charges -= 1;
         st.voodooTurns[side] = 2;
         return { ok: true };
+      }
+      case "rewind": {
+        // TIME FLOWS BACKWARDS: the last fired shell returns to the chamber
+        // and its whole result is undone — HP damage healed, cash refunded,
+        // the chamber exactly as it was before the trigger was pulled.
+        const last = st.lastShot;
+        if (!last) return { ok: false, reason: "nothing to rewind" };
+        st.cylinder.unshift(last.shell);
+        if (last.damageTo) {
+          if (last.damageTo === "enemy" && st.mode === "endless") {
+            st.score -= 1; // even the score forgets it happened
+          } else {
+            st.hp[last.damageTo] = Math.min(st.maxHp[last.damageTo], st.hp[last.damageTo] + 1);
+          }
+        }
+        // the AI's memory gets its shell back too
+        this.aiMem.total += 1;
+        if (last.shell === "live") this.aiMem.live = Math.min(this.aiMem.live + 1, this.aiMem.total);
+        else this.aiMem.live = this.clampMem(this.aiMem.live);
+        // the player SAW that shell fire — the knowledge walks back in
+        this.playerKnownQueue = [last.shell, ...this.playerKnownQueue];
+        this.playerKnown = last.shell;
+        this.aiKnown = null;
+        st.lastShot = null;
+        sk.cooldown = SKILL_CD.rewind;
+        if (!sk.trial) sk.charges -= 1;
+        return { ok: true, rewound: last };
+      }
+      case "gamble": {
+        // THE COIN: heads +1 HP, tails -1 HP. It can absolutely kill you.
+        if (!sk.trial) sk.charges -= 1;
+        sk.cooldown = SKILL_CD.gamble;
+        const win = Math.random() < 0.5;
+        let died = false;
+        if (win) {
+          this.healSide(side, 1);
+        } else {
+          died = this.damageSide(side, 1);
+        }
+        return { ok: true, gambleWin: win, died: died || st.hp[side] <= 0 };
       }
     }
   }
@@ -438,6 +555,7 @@ export class RouletteLogic {
           this.playerKnownQueue = [null, ...this.playerKnownQueue];
           this.playerKnown = null;
           out.voodooReroll = true;
+          st.lastShot = null; // a cursed shot tears the timeline — no rewind
           return out;
         }
         // GLOBAL RULE: self-shot blank -> one automatic free shot at the enemy.
@@ -470,17 +588,105 @@ export class RouletteLogic {
         st.hp.player = 1;
         out.phoenixSaved = true;
       } else {
-        st.hp[out.damageTo] = Math.max(0, st.hp[out.damageTo] - 1);
-        if (st.hp[out.damageTo] <= 0) {
-          out.death = out.damageTo;
-        }
+        const dead = this.damageSide(out.damageTo, 1);
+        // ENDLESS: hurting the DEALER only feeds the score — nobody dies
+        if (dead) out.death = out.damageTo;
       }
     }
+
+    // remember this trigger pull so REWIND can walk it backwards
+    st.lastShot = {
+      shell: out.shell,
+      damageTo: out.damageTo,
+      reflected: out.reflected,
+      moneyGain: 0, // the engine fills in the cash payout it gave
+    };
 
     return out;
   }
 
   /* ---------------- turn flow ---------------- */
+
+  /** Script/mutator FORCED skill effect: applies the effect with no
+   *  turn/cooldown checks (the custom rules are above the law). */
+  forceSkill(id: SkillId, target: Side): { win?: boolean; died?: boolean; revealed?: ShellType | null } {
+    const st = this.state;
+    const skTarget = target === "player" ? st.skills[id] : st.enemySkills[id];
+    switch (id) {
+      case "cuffs":
+        if (target === "player") st.playerSkipTurns += 1;
+        else st.enemySkipTurns += 1;
+        return {};
+      case "coffee":
+        this.healSide(target, 1);
+        return {};
+      case "reroll": {
+        const next: ShellType = Math.random() < 0.5 ? "live" : "blank";
+        if (st.cylinder.length) st.cylinder[0] = next;
+        this.playerKnownQueue = this.playerKnownQueue.length ? [null, ...this.playerKnownQueue.slice(1)] : [];
+        this.playerKnown = this.playerKnownQueue[0] ?? null;
+        this.aiKnown = null;
+        return {};
+      }
+      case "peek": {
+        const cur = st.cylinder[0] ?? null;
+        if (target === "player") {
+          if (this.playerKnownQueue.length) this.playerKnownQueue[0] = cur;
+          else this.playerKnownQueue = [cur];
+          this.playerKnown = cur;
+        } else {
+          this.aiKnown = cur;
+        }
+        return { revealed: cur };
+      }
+      case "thirdEye": {
+        const q: (ShellType | null)[] = [];
+        for (let i = 0; i < 3 && i < st.cylinder.length; i++) q.push(st.cylinder[i]);
+        if (target === "player") {
+          this.playerKnownQueue = q;
+          this.playerKnown = q[0] ?? null;
+        }
+        return { revealed: q[0] ?? null };
+      }
+      case "eject": {
+        const cur = st.cylinder.shift() ?? null;
+        this.observeShell(cur ?? "blank");
+        this.playerKnownQueue = this.playerKnownQueue.slice(1);
+        this.playerKnown = this.playerKnownQueue[0] ?? null;
+        this.aiKnown = null;
+        return { revealed: cur };
+      }
+      case "voodoo":
+        st.voodooTurns[target] = 2;
+        return {};
+      case "phoenix":
+        skTarget.owned = true;
+        skTarget.charges = Math.max(1, skTarget.charges);
+        return {};
+      case "rewind": {
+        const last = st.lastShot;
+        if (!last) return {};
+        st.cylinder.unshift(last.shell);
+        if (last.damageTo) {
+          if (last.damageTo === "enemy" && st.mode === "endless") st.score -= 1;
+          else st.hp[last.damageTo] = Math.min(st.maxHp[last.damageTo], st.hp[last.damageTo] + 1);
+        }
+        this.aiMem.total += 1;
+        if (last.shell === "live") this.aiMem.live = Math.min(this.aiMem.live + 1, this.aiMem.total);
+        st.lastShot = null;
+        return {};
+      }
+      case "gamble": {
+        const win = Math.random() < 0.5;
+        let died = false;
+        if (win) this.healSide(target, 1);
+        else died = this.damageSide(target, 1);
+        return { win, died: died || st.hp[target] <= 0 };
+      }
+      default:
+        return {};
+    }
+  }
 
   /** End the current side's turn: tick voodoo down, pass to the opponent.
    *  Skips (cuffs) & cooldowns are processed when a turn STARTS. */
