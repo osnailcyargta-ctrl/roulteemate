@@ -285,6 +285,10 @@ export class GameEngine {
     this.logic = new RouletteLogic(diff);
     this.ai = new EnemyAI(this.logic, SMART[diff]);
     this.scene.clearSpentShells();
+    this.scene.dealerCuffed(false);
+    this.scene.dollyHome();
+    this.scene.voodooEndFX("player");
+    this.scene.voodooEndFX("enemy");
     this.notify();
     this.toast(`Starting cash: $${START_MONEY} — the table stocks goods between rounds.`, "info");
 
@@ -303,6 +307,10 @@ export class GameEngine {
     this.scene.enemySetMood("idle1");
     this.scene.hideShopItems();
     this.scene.clearSpentShells();
+    this.scene.dealerCuffed(false);
+    this.scene.dollyHome();
+    this.scene.voodooEndFX("player");
+    this.scene.voodooEndFX("enemy");
     this.logic = new RouletteLogic(this.logic.state.difficulty);
     this.logic.setPhase("menu");
     this.busy = false;
@@ -464,6 +472,7 @@ export class GameEngine {
       gameAudio.ghostFade();
     }
     this.busy = false;
+    this.scene.dealerCuffed(false); // his skipped turn is over — uncuff him
     this.notify();
   }
 
@@ -666,17 +675,12 @@ export class GameEngine {
 
     if (out.voodooReroll) {
       gameAudio.blankClick();
-      if (shooterIsPlayer) {
-        this.toast("VOODOO: blank rerolled — a FRESH shell enters the chamber! Now FIRE at the enemy!", "voodoo");
-      } else {
-        // the DEALER just grew the magazine — make it impossible to miss:
-        this.onEvent({
-          type: "banner",
-          title: "FRESH SHELL LOADED",
-          sub: "VOODOO rerolled the DEALER's blank — one MORE shell just entered the chamber. The count has changed!",
-        });
-        this.toast("VOODOO: the DEALER's blank rerolled — a FRESH shell enters! He must fire at YOU!", "voodoo");
-      }
+      this.toast(
+        shooterIsPlayer
+          ? "VOODOO: blank rerolled — a FRESH shell enters the chamber! Now FIRE at the enemy!"
+          : "VOODOO: the DEALER's blank rerolled — a FRESH shell enters! He must fire at YOU!",
+        "voodoo",
+      );
       await sleep(700);
       gameAudio.spinCylinder();
       this.scene.addTrauma(0.25);
@@ -819,23 +823,31 @@ export class GameEngine {
         gameAudio.spinCylinder();
         this.scene.addTrauma(0.2);
         if (isPlayer) {
+          this.scene.gunSpinFX(); // the revolver leaps up and spins fate around
           this.toast("Chamber REROLLED — the live/blank count may have shifted! Now you MUST shoot.", "info");
         } else {
           this.toast("THE DEALER REROLLS the chamber — the live/blank count may have shifted!", "bad");
           this.scene.enemySay([pick("useReroll")], 2);
         }
         await sleep(900);
+        if (isPlayer) this.scene.gunSpinEnd();
         break;
       }
       case "peek": {
         gameAudio.scanDing();
         if (isPlayer) {
+          this.scene.gunPeek(true); // the revolver swings up close to your eyes
           this.onEvent({ type: "shellReveal", shell: oc.revealed ?? null });
           this.toast(oc.revealed ? `PEEK: this shell is ${oc.revealed.toUpperCase()}!` : "PEEK: chamber empty?", "info");
+          await sleep(1600);
+          this.scene.gunPeek(false);
         } else {
+          // the DEALER studies the chamber across the table
+          this.scene.ringBurst(this.scene.enemyWorldPos().add(new THREE.Vector3(0, -0.15, 0.55)), 0.7);
+          this.scene.enemySetMood("idle2");
           this.scene.enemySay([pick("scan")], 2);
+          await sleep(1300);
         }
-        await sleep(1300);
         break;
       }
       case "eject": {
@@ -852,21 +864,32 @@ export class GameEngine {
       }
       case "coffee": {
         gameAudio.heal();
-        if (isPlayer) this.toast("Sip... +1 HP. That hits the spot.", "good");
-        else this.scene.enemySay([pick("useCoffee")], 2);
-        await sleep(800);
+        if (isPlayer) {
+          this.toast("Sip... +1 HP. That hits the spot.", "good");
+          await this.scene.coffeeDrinkFX("player"); // the real mug, lifted & drunk
+        } else {
+          this.scene.enemySay([pick("useCoffee")], 2);
+          await this.scene.coffeeDrinkFX("enemy"); // the DEALER takes a sip too
+        }
         break;
       }
       case "cuffs": {
         gameAudio.cuffs();
         if (isPlayer) {
+          // interrogation push-in: the camera marches right up to the DEALER
+          this.scene.dollyToDealer();
           this.scene.enemySetMood("scared");
+          await sleep(700);
+          this.scene.dealerCuffed(true); // SNAP — real cuffs on his wrists
           this.scene.enemySay([pick("cuffed")], 2.2);
           this.toast("THE DEALER IS CUFFED! He skips his next turn.", "good");
+          await sleep(1000);
+          this.scene.dollyHome();
+          await sleep(450);
         } else {
           this.toast("The DEALER cuffs you!", "bad");
+          await this.scene.cuffsAtCameraFX(); // the cuffs fly at YOUR wrists
         }
-        await sleep(900);
         break;
       }
       case "voodoo": {
@@ -874,6 +897,7 @@ export class GameEngine {
         this.scene.flash(0.3);
         this.scene.setDesat(0.15);
         setTimeout(() => this.scene.setDesat(0), 600);
+        this.scene.voodooCastFX(side); // a real doll rises & dangles while cursed
         if (isPlayer) {
           this.toast("VOODOO ACTIVE (2 turns): every live hit on you is REFLECTED!", "voodoo");
           this.scene.enemySetMood("scared");
@@ -888,6 +912,7 @@ export class GameEngine {
       case "thirdEye": {
         gameAudio.scanDing();
         this.scene.flash(0.25);
+        this.scene.gunPeek(true); // the chamber swings open before your eyes
         const q = oc.queue ?? [];
         this.onEvent({ type: "shellRevealQueue", shells: q });
         this.scene.enemySetMood("scared");
@@ -898,7 +923,8 @@ export class GameEngine {
             : "THIRD EYE: chamber empty?",
           "voodoo",
         );
-        await sleep(1800);
+        await sleep(1900);
+        this.scene.gunPeek(false);
         break;
       }
     }
@@ -976,10 +1002,13 @@ export class GameEngine {
     this.ghosts = this.ghosts.filter((g) => g.turns > 0);
   }
 
-  /** endTurnAndPass + ghost fade bookkeeping. */
+  /** endTurnAndPass + ghost fade + voodoo doll bookkeeping. */
   private passTurn(): Side {
     const next = this.logic.endTurnAndPass();
     this.tickGhosts();
+    const st = this.logic.state;
+    if (st.voodooTurns.player <= 0) this.scene.voodooEndFX("player");
+    if (st.voodooTurns.enemy <= 0) this.scene.voodooEndFX("enemy");
     return next;
   }
 

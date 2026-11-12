@@ -35,6 +35,9 @@ import {
   texArrowSign,
   texPriceTag,
   texBellNote,
+  texCuffsProp,
+  texCoffeeCup,
+  texVoodooDoll,
   texSkillIcon,
   type SkillId,
   type EnemyMood,
@@ -217,6 +220,21 @@ export class RouletteScene {
   private bellHoverK = 0;
   private bellRingT = 0;
 
+  /* physical skill VFX props */
+  private cuffsMesh!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  private cuffsShown = false;
+  private cuffsPopT = 0;
+  private voodooDolls = new Map<
+    "player" | "enemy",
+    { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>; born: number; attached: boolean }
+  >();
+  private coffeeCup!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>;
+  private coffeeHome = new THREE.Vector3(-0.88, 0.99, 0.26);
+  private coffeeBusy = false;
+  private dollyTarget = new THREE.Vector3(0, 0, 0);
+  private gunSpinT = 0;
+  private gunPeeking = false;
+
   private trauma = 0;
   private timeScale = 1;
   private timeScaleTarget = 1;
@@ -257,6 +275,7 @@ export class RouletteScene {
     this.buildDice();
     this.buildParticles();
     this.buildShop();
+    this.buildSkillProps();
 
     // post processing
     this.composer = new EffectComposer(this.renderer);
@@ -562,6 +581,223 @@ export class RouletteScene {
     this.ringTex = ctex(texRing());
     this.dustTex = ctex(texDust());
     this.muzzleTex = ctex(texMuzzle());
+  }
+
+  /* ---------------- physical skill props (real VFX) ---------------- */
+
+  private buildSkillProps() {
+    // steaming coffee mug on the table — COFFEE lifts it up for a real sip
+    this.coffeeCup = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.15, 0.19),
+      doodleMat(ctex(texCoffeeCup()), { lit: true }) as THREE.MeshLambertMaterial,
+    );
+    this.coffeeCup.position.copy(this.coffeeHome);
+    this.coffeeCup.rotation.y = 0.14;
+    this.coffeeCup.renderOrder = 6;
+    this.coffeeCup.castShadow = true;
+    // the mug must read bright even where the spotlight barely reaches
+    (this.coffeeCup.material as THREE.MeshLambertMaterial).emissiveIntensity = 1.25;
+    this.scene.add(this.coffeeCup);
+
+    // handcuffs that snap onto THE DEALER's wrists
+    this.cuffsMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.9, 0.6),
+      new THREE.MeshBasicMaterial({
+        map: ctex(texCuffsProp()),
+        transparent: true,
+        alphaTest: 0.02,
+        depthWrite: false,
+      }),
+    );
+    this.cuffsMesh.position.set(this.enemyBasePos.x, this.enemyBasePos.y - 0.34, this.enemyBasePos.z + 0.42);
+    this.cuffsMesh.visible = false;
+    this.cuffsMesh.renderOrder = 7;
+    this.scene.add(this.cuffsMesh);
+  }
+
+  /** Push the camera right up into THE DEALER's face (cuffs time). */
+  dollyToDealer() {
+    this.dollyTarget.set(0, -0.04, -1.45);
+  }
+
+  /** Camera back to the player's seat. */
+  dollyHome() {
+    this.dollyTarget.set(0, 0, 0);
+  }
+
+  /** Snap the handcuffs onto the DEALER (or take them off). */
+  dealerCuffed(show: boolean) {
+    if (show === this.cuffsShown) return;
+    this.cuffsShown = show;
+    this.cuffsMesh.visible = show;
+    if (show) {
+      this.cuffsPopT = 1;
+      const at = this.cuffsMesh.position.clone();
+      this.sparkBurst(at, 8);
+      this.ringBurst(at, 0.55);
+    }
+  }
+
+  /** The voodoo doll rises: for the player it dangles before the camera,
+   *  for the DEALER it floats up beside him. It stays while the curse lasts. */
+  voodooCastFX(side: "player" | "enemy") {
+    this.voodooEndFX(side);
+    const attached = side === "player";
+    // the player's dangle stays modest; the DEALER's doll is full-size
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(attached ? 0.2 : 0.36, attached ? 0.25 : 0.45),
+      new THREE.MeshBasicMaterial({
+        map: ctex(texVoodooDoll()),
+        transparent: true,
+        alphaTest: 0.02,
+        depthWrite: false,
+      }),
+    );
+    mesh.renderOrder = 8;
+    if (attached) {
+      mesh.position.set(-0.42, -0.18, -0.85);
+      this.camera.add(mesh);
+    } else {
+      mesh.position.copy(this.enemyBasePos).add(new THREE.Vector3(0.62, -0.25, 0.55));
+      this.scene.add(mesh);
+    }
+    mesh.scale.setScalar(0.001);
+    this.voodooDolls.set(side, { mesh, born: performance.now(), attached });
+    const at = mesh.getWorldPosition(new THREE.Vector3());
+    this.ringBurst(at, 0.5);
+    for (let i = 0; i < 4; i++) {
+      this.spawn(
+        this.smokeTex,
+        at.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.3, Math.random() * 0.2, 0)),
+        {
+          size: 0.16 + Math.random() * 0.14,
+          vel: new THREE.Vector3((Math.random() - 0.5) * 0.2, 0.3, 0),
+          life: 0.9,
+          grow: 0.4,
+        },
+      );
+    }
+  }
+
+  /** The curse ends: the doll drops away in a puff (no-op if absent). */
+  voodooEndFX(side: "player" | "enemy") {
+    const d = this.voodooDolls.get(side);
+    if (!d) return;
+    this.voodooDolls.delete(side);
+    const at = d.mesh.getWorldPosition(new THREE.Vector3());
+    d.mesh.removeFromParent();
+    d.mesh.geometry.dispose();
+    (d.mesh.material as THREE.Material).dispose();
+    for (let i = 0; i < 3; i++) {
+      this.spawn(
+        this.smokeTex,
+        at.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.25, (Math.random() - 0.5) * 0.2, 0)),
+        {
+          size: 0.15 + Math.random() * 0.12,
+          vel: new THREE.Vector3((Math.random() - 0.5) * 0.3, 0.25, 0),
+          life: 0.7,
+          grow: 0.4,
+        },
+      );
+    }
+  }
+
+  /** COFFEE: the mug rises from the table, tilts for two real gulps in
+   *  front of the drinker, then settles back on its saucer. */
+  coffeeDrinkFX(who: "player" | "enemy"): Promise<void> {
+    if (this.coffeeBusy) return Promise.resolve();
+    this.coffeeBusy = true;
+    const cup = this.coffeeCup;
+    const from = this.coffeeHome.clone();
+    const cam = this.camera.getWorldPosition(new THREE.Vector3());
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
+    const to =
+      who === "player"
+        ? cam.clone().addScaledVector(dir, 0.52).addScaledVector(right, 0.2).add(new THREE.Vector3(0, -0.2, 0))
+        : this.enemyWorldPos().add(new THREE.Vector3(-0.05, 0.1, 0.55));
+    // rising steam
+    for (let i = 0; i < 3; i++) {
+      this.spawn(this.smokeTex, from.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.1, 0.12, 0)), {
+        size: 0.1 + Math.random() * 0.08,
+        vel: new THREE.Vector3((Math.random() - 0.5) * 0.1, 0.35, 0),
+        life: 0.8,
+        grow: 0.35,
+      });
+    }
+    const start = performance.now();
+    const DUR = 2100;
+    return new Promise<void>((resolve) => {
+      const step = () => {
+        const t = Math.min(1, (performance.now() - start) / DUR);
+        if (t < 0.32) {
+          const e = 1 - Math.pow(1 - t / 0.32, 2);
+          cup.position.lerpVectors(from, to, e);
+          cup.position.y += Math.sin((t / 0.32) * Math.PI) * 0.18;
+          cup.rotation.z = Math.sin((t / 0.32) * Math.PI) * 0.2;
+        } else if (t < 0.68) {
+          cup.position.copy(to);
+          const g = (t - 0.32) / 0.36;
+          cup.rotation.z = 0.2 + Math.sin(g * Math.PI * 4) * 0.55;
+          if (Math.random() < 0.1) {
+            this.spawn(this.smokeTex, to.clone(), { size: 0.07, vel: new THREE.Vector3(0, 0.25, 0), life: 0.5 });
+          }
+        } else {
+          const e = (t - 0.68) / 0.32;
+          cup.position.lerpVectors(to, from, e * e);
+          cup.rotation.z = (1 - e) * 0.2;
+        }
+        if (t < 1) requestAnimationFrame(step);
+        else {
+          cup.position.copy(from);
+          cup.rotation.z = 0;
+          this.coffeeBusy = false;
+          resolve();
+        }
+      };
+      requestAnimationFrame(step);
+    });
+  }
+
+  /** The DEALER cuffs YOU: the cuffs fly from him straight into the camera. */
+  cuffsAtCameraFX(): Promise<void> {
+    const from = this.enemyWorldPos().add(new THREE.Vector3(0.2, 0.25, 0.5));
+    const cam = this.camera.getWorldPosition(new THREE.Vector3());
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const to = cam.addScaledVector(dir, 0.5);
+    const mat = new THREE.MeshBasicMaterial({
+      map: ctex(texCuffsProp()),
+      transparent: true,
+      alphaTest: 0.02,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.33), mat);
+    mesh.position.copy(from);
+    mesh.renderOrder = 9;
+    this.scene.add(mesh);
+    const start = performance.now();
+    return new Promise<void>((resolve) => {
+      const step = () => {
+        const t = Math.min(1, (performance.now() - start) / 850);
+        const e = 1 - Math.pow(1 - t, 1.6);
+        mesh.position.lerpVectors(from, to, e);
+        mesh.position.y += Math.sin(t * Math.PI) * 0.22;
+        mesh.lookAt(this.camera.getWorldPosition(new THREE.Vector3()));
+        mesh.rotateZ(Math.sin(t * Math.PI * 3) * 0.5);
+        mesh.scale.setScalar(0.5 + t * 1.5);
+        if (t < 1) requestAnimationFrame(step);
+        else {
+          this.scene.remove(mesh);
+          mesh.geometry.dispose();
+          mat.dispose();
+          this.addTrauma(0.35);
+          this.setAberration(1.6);
+          setTimeout(() => this.setAberration(0), 320);
+          resolve();
+        }
+      };
+      requestAnimationFrame(step);
+    });
   }
 
   /* ---------------- physical shop (items live on the table) ---------------- */
@@ -1110,6 +1346,37 @@ export class RouletteScene {
     this.gunRecoil = 1;
   }
 
+  /** PEEK: the revolver swings up for inspection, cylinder swung open. */
+  gunPeek(show: boolean) {
+    this.gunPeeking = show;
+    if (show) {
+      this.gunMesh.visible = true;
+      this.gunMesh.material.map = this.gunAimTex.open;
+      this.gunTarget.set(0.34, -0.2, -0.66);
+      this.gunMesh.scale.setScalar(0.95);
+    } else {
+      this.gunTarget.set(0, -0.52, -0.8);
+      this.gunMesh.scale.setScalar(1);
+      if (this.gunPose === null) this.gunMesh.visible = false;
+    }
+    this.gunMesh.material.needsUpdate = true;
+  }
+
+  /** REROLL: the revolver leaps up and spins fate around. */
+  gunSpinFX() {
+    this.gunMesh.visible = true;
+    this.gunMesh.material.map = this.gunAimTex.enemy;
+    this.gunMesh.material.needsUpdate = true;
+    this.gunTarget.set(0, -0.4, -0.68);
+    this.gunSpinT = 1;
+  }
+
+  gunSpinEnd() {
+    this.gunSpinT = 0;
+    this.gunTarget.set(0, -0.52, -0.8);
+    if (this.gunPose === null && !this.gunPeeking) this.gunMesh.visible = false;
+  }
+
   /* ---------------- dice ---------------- */
 
   diceSetFace(id: string, cv: HTMLCanvasElement) {
@@ -1183,6 +1450,9 @@ export class RouletteScene {
     this.camGroup.position.x = this.shakeOff.x;
     this.camGroup.position.y = Math.sin(t * 1.7) * 0.012 + this.shakeOff.y;
 
+    // camera dolly: the interrogation push-in toward THE DEALER
+    this.camRig.position.lerp(this.dollyTarget, Math.min(1, dt0 * 3.2));
+
     // lampu flicker
     this.lampFlicker += (1 - this.lampFlicker) * Math.min(1, dt0 * 8);
     if (Math.random() < 0.012) this.lampFlicker = 0.55 + Math.random() * 0.3;
@@ -1220,6 +1490,10 @@ export class RouletteScene {
     this.gunMesh.position.z += this.gunRecoil * 0.22;
     this.gunMesh.rotation.x = this.gunRecoil * 0.3 - Math.sin(t * 1.7) * 0.008;
     this.gunMesh.rotation.z = this.gunPose === "self" ? -0.06 : Math.sin(t * 1.4) * 0.006;
+    if (this.gunSpinT > 0) {
+      this.gunSpinT = Math.max(0, this.gunSpinT - dt0 * 1.35);
+      this.gunMesh.rotation.z += this.gunSpinT * this.gunSpinT * 0.55 + this.gunSpinT * 0.22;
+    }
 
     // muzzle fade
     if (this.muzzleMesh.material.opacity > 0) {
@@ -1299,6 +1573,39 @@ export class RouletteScene {
       } else if (b.visible) {
         b.rotation.z = Math.sin(t * 1.2) * 0.02;
       }
+    }
+
+    // skill props: cuffs snap-pop, voodoo dolls dangling, coffee idle bob
+    if (this.cuffsMesh.visible) {
+      const cq = this.camera.getWorldQuaternion(new THREE.Quaternion());
+      this.cuffsMesh.quaternion.copy(cq);
+      if (this.cuffsPopT > 0) {
+        this.cuffsPopT = Math.max(0, this.cuffsPopT - dt0 * 2.2);
+        const p = 1 - this.cuffsPopT;
+        const e = 1 + 2.7 * Math.pow(p - 1, 3) + 1.7 * Math.pow(p - 1, 2); // easeOutBack
+        this.cuffsMesh.scale.setScalar(Math.max(0.01, e));
+      } else {
+        this.cuffsMesh.scale.setScalar(1);
+        this.cuffsMesh.position.y = this.enemyBasePos.y - 0.34 + Math.sin(t * 2.4) * 0.012;
+        this.cuffsMesh.rotateZ(Math.sin(t * 1.7) * 0.035);
+      }
+    }
+    for (const [, d] of this.voodooDolls) {
+      const pop = Math.min(1, (nowMs - d.born) / 480);
+      const e = 1 + 2.7 * Math.pow(pop - 1, 3) + 1.7 * Math.pow(pop - 1, 2); // easeOutBack
+      d.mesh.scale.setScalar(Math.max(0.001, e));
+      if (d.attached) {
+        d.mesh.position.y = -0.05 + Math.sin(t * 2.2) * 0.022;
+        d.mesh.rotation.z = Math.sin(t * 1.5) * 0.08;
+      } else {
+        const wq = this.camera.getWorldQuaternion(new THREE.Quaternion());
+        d.mesh.quaternion.copy(wq);
+        d.mesh.rotateZ(Math.sin(t * 1.5) * 0.08);
+        d.mesh.position.y = this.enemyBasePos.y - 0.25 + Math.sin(t * 2.2) * 0.022;
+      }
+    }
+    if (!this.coffeeBusy) {
+      this.coffeeCup.position.y = this.coffeeHome.y + Math.sin(t * 1.8) * 0.004;
     }
 
     // spent-shell trail: land, billboard toward the camera

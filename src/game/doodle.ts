@@ -2328,3 +2328,210 @@ export function texArrowSign() {
     157,
   );
 }
+
+/* ============================ SKILL PROPS (physical VFX) ============================ */
+
+/** Handcuffs — really snapped onto THE DEALER when CUFFS is cast. */
+export function texCuffsProp() {
+  return makeCanvas(
+    "prop-cuffs",
+    384,
+    256,
+    (ctx, w, h, rng) => {
+      const cy = h / 2 + 6;
+      const steel = "#aeb9c2";
+      const steelDark = "#7d8a94";
+      // chain between the rings
+      for (let i = 0; i < 3; i++) {
+        const x = w / 2 - 30 + i * 30;
+        sketchEllipse(ctx, x, cy + (i % 2 === 0 ? -10 : 10), 17, 11, rng, {
+          width: 7,
+          fill: steelDark,
+          rot: i % 2 === 0 ? 0.5 : -0.4,
+        });
+      }
+      // two cuff rings
+      for (const sx of [-1, 1]) {
+        const x = w / 2 + sx * 108;
+        sketchCircle(ctx, x, cy, 56, rng, { width: 8, fill: steel });
+        sketchCircle(ctx, x, cy, 30, rng, { width: 6, fill: "#1c1a16" });
+        // lock block + keyhole
+        ctx.fillStyle = steelDark;
+        wobblePath(ctx, [[x - 14, cy + 48], [x + 14, cy + 48], [x + 10, cy + 78], [x - 10, cy + 78]], rng, 2, true);
+        ctx.fill();
+        sketchStroke(ctx, [[x - 14, cy + 48], [x + 14, cy + 48], [x + 10, cy + 78], [x - 10, cy + 78]], rng, {
+          width: 5,
+          jitter: 2,
+          close: true,
+        });
+        sketchCircle(ctx, x, cy + 62, 6, rng, { width: 3, fill: INK });
+        // glint
+        sketchStroke(ctx, [[x - 26, cy - 34], [x - 6, cy - 44]], rng, { width: 4, jitter: 1, color: "#e8eef2" });
+      }
+    },
+    211,
+  );
+}
+
+/** Voodoo doll — rises from the table when VOODOO is cast. */
+export function texVoodooDoll() {
+  return makeCanvas(
+    "prop-voodoo",
+    320,
+    400,
+    (ctx, w, h, rng) => {
+      const cx = w / 2;
+      const burlap = "#c9a878";
+      const steelDark = "#7d8a94";
+      // hanging string from above
+      sketchLine(ctx, cx, -8, cx, 52, rng, { width: 4, jitter: 2 });
+      // head
+      sketchCircle(ctx, cx, 96, 58, rng, { width: 7, fill: burlap });
+      // stitched X eyes + mouth
+      for (const sx of [-22, 22]) {
+        sketchLine(ctx, cx + sx - 10, 84, cx + sx + 10, 104, rng, { width: 5, jitter: 1.5 });
+        sketchLine(ctx, cx + sx + 10, 84, cx + sx - 10, 104, rng, { width: 5, jitter: 1.5 });
+      }
+      sketchStroke(
+        ctx,
+        [
+          [cx - 16, 132],
+          [cx - 6, 138],
+          [cx + 4, 130],
+          [cx + 14, 138],
+        ],
+        rng,
+        { width: 4, jitter: 1.5 },
+      );
+      // body (tunic)
+      ctx.fillStyle = burlap;
+      wobblePath(ctx, [[cx - 52, 148], [cx + 52, 148], [cx + 66, 300], [cx - 66, 300]], rng, 4, true);
+      ctx.fill();
+      sketchStroke(ctx, [[cx - 52, 148], [cx + 52, 148], [cx + 66, 300], [cx - 66, 300]], rng, {
+        width: 7,
+        jitter: 3,
+        close: true,
+      });
+      // arms
+      for (const sx of [-1, 1]) {
+        ctx.fillStyle = burlap;
+        wobblePath(
+          ctx,
+          [
+            [cx + sx * 50, 162],
+            [cx + sx * 118, sx < 0 ? 130 : 126],
+            [cx + sx * 126, sx < 0 ? 152 : 148],
+            [cx + sx * 58, 190],
+          ],
+          rng,
+          3,
+          true,
+        );
+        ctx.fill();
+        sketchStroke(
+          ctx,
+          [
+            [cx + sx * 50, 162],
+            [cx + sx * 118, sx < 0 ? 130 : 126],
+            [cx + sx * 126, sx < 0 ? 152 : 148],
+            [cx + sx * 58, 190],
+          ],
+          rng,
+          { width: 5, jitter: 2.5, close: true },
+        );
+      }
+      // burlap hatching
+      hatch(ctx, cx - 60, 150, 120, 146, rng, "rgba(34,26,18,0.28)", 11);
+      // big red X stitch on the belly
+      for (const [a, b, c, d] of [
+        [cx - 30, 200, cx + 30, 262],
+        [cx + 30, 200, cx - 30, 262],
+      ]) {
+        sketchLine(ctx, a, b, c, d, rng, { width: 8, jitter: 2, color: RED });
+      }
+      // pins stuck in the body
+      const pins: [number, number, number][] = [
+        [cx - 44, 176, -0.6],
+        [cx + 40, 210, 0.5],
+        [cx - 8, 268, 0.1],
+      ];
+      for (const [px, py, a] of pins) {
+        sketchLine(ctx, px, py, px + Math.sin(a) * 46, py - Math.cos(a) * 46, rng, { width: 4, jitter: 1, color: steelDark });
+        sketchCircle(ctx, px + Math.sin(a) * 46, py - Math.cos(a) * 46, 10, rng, { width: 3, fill: RED });
+      }
+      // little shadow
+      sketchEllipse(ctx, cx, 344, 74, 14, rng, { width: 4, fill: "rgba(34,26,18,0.25)" });
+    },
+    223,
+  );
+}
+
+/** Coffee mug — sits on the table; COFFEE lifts it up for a sip. */
+export function texCoffeeCup() {
+  return makeCanvas(
+    "prop-coffee",
+    256,
+    320,
+    (ctx, w, h, rng) => {
+      const cx = w / 2;
+      // steam wisps
+      for (const sx of [-26, 2, 28]) {
+        sketchStroke(
+          ctx,
+          [
+            [cx + sx, 96],
+            [cx + sx - 10, 66],
+            [cx + sx + 8, 40],
+            [cx + sx - 4, 10],
+          ],
+          rng,
+          { width: 5, jitter: 2, color: "rgba(246,241,227,0.6)", passes: 1 },
+        );
+      }
+      // handle
+      sketchEllipse(ctx, cx + 62, 196, 26, 34, rng, { width: 9, rot: -0.15 });
+      // mug body
+      ctx.fillStyle = PAPER;
+      wobblePath(ctx, [[cx - 56, 120], [cx + 56, 120], [cx + 44, 268], [cx - 44, 268]], rng, 3, true);
+      ctx.fill();
+      sketchStroke(ctx, [[cx - 56, 120], [cx + 56, 120], [cx + 44, 268], [cx - 44, 268]], rng, {
+        width: 8,
+        jitter: 2.5,
+        close: true,
+      });
+      // coffee surface
+      sketchEllipse(ctx, cx, 126, 48, 13, rng, { width: 5, fill: "#5a3a22" });
+      sketchStroke(ctx, [[cx - 18, 124], [cx - 4, 121]], rng, {
+        width: 3,
+        jitter: 1,
+        color: "rgba(246,241,227,0.55)",
+        passes: 1,
+      });
+      // doodle heart on the mug
+      ctx.fillStyle = RED;
+      wobblePath(
+        ctx,
+        [
+          [cx - 12, 190],
+          [cx - 24, 178],
+          [cx - 20, 166],
+          [cx - 8, 172],
+          [cx, 182],
+          [cx + 8, 172],
+          [cx + 20, 166],
+          [cx + 24, 178],
+          [cx + 12, 190],
+          [cx, 202],
+        ],
+        rng,
+        1.5,
+        true,
+      );
+      ctx.fill();
+      // saucer
+      sketchEllipse(ctx, cx, 282, 84, 18, rng, { width: 6, fill: PAPER });
+      sketchEllipse(ctx, cx, 282, 52, 10, rng, { width: 3 });
+    },
+    233,
+  );
+}

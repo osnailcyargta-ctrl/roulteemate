@@ -19,9 +19,9 @@ type Splat = { id: number; url: string; left: number; top: number; size: number;
 type Stamp = { id: number; idSkill: SkillId };
 
 const DIFFS: { id: "easy" | "normal" | "insane"; label: string; desc: string }[] = [
-  { id: "easy", label: "EASY", desc: "6 vs 6 HP. The Dealer has 1 skill." },
-  { id: "normal", label: "NORMAL", desc: "Your 5 HP vs his 6. The Dealer has 2 skills." },
-  { id: "insane", label: "INSANE", desc: "Your 4 HP vs his 7. 3 skills + shop legends." },
+  { id: "easy", label: "EASY", desc: "Your 6 HP vs his 5. The Dealer has 1 skill." },
+  { id: "normal", label: "NORMAL", desc: "5 vs 5 HP. The Dealer has 2 skills." },
+  { id: "insane", label: "INSANE", desc: "Your 4 HP vs his 5. 3 skills + shop legends." },
 ];
 
 const fmtTime = (ms: number) => {
@@ -788,8 +788,8 @@ export default function GameShell() {
                 <b className="text-[#5aa7a0]">THIRD EYE</b> (see the next 3 shells in order).
               </p>
               <p className="text-[#8f2418]">
-                HP: 6 vs 6 on EASY, your 5 against his 6 on NORMAL — and on INSANE you get only 4 while the
-                Dealer sits fat at 7. At 2 HP a blood vignette creeps in and your heartbeat returns. Below 3 HP,
+                HP: your 6 against his 5 on EASY, 5 vs 5 on NORMAL — and on INSANE you get only 4 while the
+                Dealer keeps 5. At 2 HP a blood vignette creeps in and your heartbeat returns. Below 3 HP,
                 shooting yourself takes a long, cruel 0.7 seconds to pull — and the bullet leaves the barrel
                 0.2 seconds late.
               </p>
