@@ -901,7 +901,8 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       break;
     }
     case "peek": {
-      // the MAGNIFYING GLASS: a big doodle lens + handle, a tiny shell inside
+      // the MAGNIFYING GLASS: a clean doodle lens + handle. No bullet, no
+      // red — the glass itself is the tool, the reveal comes separately.
       const lensR = s * 0.24;
       const lx = cx - s * 0.07;
       const ly = cy - s * 0.05;
@@ -910,21 +911,6 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
         width: W * 0.6,
         fill: PAPER,
       });
-      // a tiny shell under the lens — the whole point of the glass
-      ctx.fillStyle = RED;
-      wobblePath(
-        ctx,
-        [
-          [lx + s * 0.02, ly - s * 0.05],
-          [lx + s * 0.14, ly - s * 0.05],
-          [lx + s * 0.14, ly + s * 0.05],
-          [lx + s * 0.02, ly + s * 0.05],
-        ],
-        rng,
-        2,
-        true,
-      );
-      ctx.fill();
       // handle
       sketchStroke(
         ctx,
@@ -2873,34 +2859,12 @@ export function texMagnifier() {
         rng,
         { width: 26, jitter: 2, color: "#8a5a13" },
       );
-      // the reflection of a shell in the lens (the point of the glass!)
-      ctx.fillStyle = RED;
-      wobblePath(
-        ctx,
-        [
-          [cx - 52, cy - 26],
-          [cx + 34, cy - 26],
-          [cx + 34, cy + 34],
-          [cx - 52, cy + 34],
-        ],
-        rng,
-        3,
-        true,
-      );
-      ctx.fill();
-      sketchStroke(
-        ctx,
-        [
-          [cx - 52, cy - 26],
-          [cx + 34, cy - 26],
-          [cx + 34, cy + 34],
-          [cx - 52, cy + 34],
-        ],
-        rng,
-        { width: 8, jitter: 2, close: true },
-      );
-      ctx.fillStyle = BRASS;
-      ctx.fillRect(cx - 52, cy + 34, 86, 20);
+      // a neutral glass glint — NO live/blank imagery: the reveal is shown
+      // separately, the glass never spoils the answer.
+      sketchEllipse(ctx, cx + 34, cy + 44, 26, 12, rng, {
+        width: 6,
+        fill: "rgba(255,255,255,0.85)",
+      });
     },
     253,
   );

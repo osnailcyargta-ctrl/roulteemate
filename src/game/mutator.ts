@@ -19,17 +19,18 @@ export interface MutConfig {
   /** How many skills the opening dice hands out. */
   skillsPlayer: number;
   skillsEnemy: number;
-  /** Already-owned skills may be granted again (charges stack / shop restock). */
+  /** Already-owned skills may be granted again — each copy joins the
+   *  inventory as its OWN slot with its own charges & cooldown. */
   allowDup: boolean;
-  /** Custom effect scripts (the C-like mini language, one block per string). */
-  rules: string[];
+  /** Custom effect program — ENGINE C source, compiled to WebAssembly. */
+  rules: string;
 }
 
 export const MUT_DEFAULTS: Omit<MutConfig, "pool" | "ai" | "hpPlayer" | "hpEnemy" | "skillsEnemy"> = {
   allowLegend: false,
   skillsPlayer: 2,
   allowDup: false,
-  rules: [],
+  rules: "",
 };
 
 /** Sensible starting points per table (before the player tweaks anything). */
@@ -49,6 +50,6 @@ export function mutDefaultsFor(diff: Difficulty, mode: Mode, pool: SkillId[]): M
     skillsPlayer: b.skillsPlayer,
     skillsEnemy: b.skillsEnemy,
     allowDup: false,
-    rules: [],
+    rules: "",
   };
 }

@@ -35,6 +35,7 @@ import {
   texCoffeeCup,
   texVoodooDoll,
   texMagnifier,
+  texCoin,
   texSkillIcon,
   type SkillId,
   type EnemyMood,
@@ -253,6 +254,145 @@ export class RouletteScene {
   private dollyTarget = new THREE.Vector3(0, 0, 0);
   private gunSpinT = 0;
   private gunPeeking = false;
+  /* GAMBLE: a REAL semi-3D coin — two doodle plates (heads up, tails down)
+     with a tiny gap between them, the gap closed by a gold cylinder rim.
+     Tossed from the table, spins in the air, lands and shows the answer. */
+  private coinGroup: THREE.Group | null = null;
+
+  /** Build (once) the semi-3D coin: two 2D plates + a 3D cylindrical rim. */
+  private buildCoin(): THREE.Group {
+    const R = 0.16;
+    const GAP = 0.02;
+    const g = new THREE.Group();
+    const mkFace = (face: "heads" | "tails") =>
+      new THREE.MeshStandardMaterial({
+        map: ctex(texCoin(face)),
+        roughness: 0.55,
+        metalness: 0.3,
+        transparent: true,
+      });
+    const heads = new THREE.Mesh(new THREE.CircleGeometry(R, 48), mkFace("heads"));
+    heads.rotation.x = -Math.PI / 2; // faces UP
+    heads.position.y = GAP / 2;
+    const tails = new THREE.Mesh(new THREE.CircleGeometry(R, 48), mkFace("tails"));
+    tails.rotation.x = Math.PI / 2; // faces DOWN
+    tails.position.y = -GAP / 2;
+    const rim = new THREE.Mesh(
+      new THREE.CylinderGeometry(R, R, GAP, 48, 1, true),
+      new THREE.MeshStandardMaterial({
+        color: 0xc99a35,
+        roughness: 0.35,
+        metalness: 0.85,
+        transparent: true,
+        side: THREE.DoubleSide,
+      }),
+    );
+    g.add(heads, tails, rim);
+    g.visible = false;
+    this.scene.add(g);
+    return g;
+  }
+
+  /** THE COIN TOSS: thrown up from the table, flipping fast around its X
+   *  axis; bounces once; the winning face is aligned on landing; holds so
+   *  the player can read it; then sinks away. Fully 3D, in the world — it
+   *  never follows the camera. */
+  coinTossFX(win: boolean): Promise<void> {
+    if (!this.coinGroup) this.coinGroup = this.buildCoin();
+    const coin = this.coinGroup;
+    coin.visible = true;
+    coin.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+      if (m) {
+        m.opacity = 1;
+        m.needsUpdate = true;
+      }
+    });
+    const BASE_Y = 1.0;
+    coin.position.set(0.08, BASE_Y + 0.02, -0.3);
+    coin.rotation.set(0, 0, 0);
+    coin.scale.setScalar(0.01);
+
+    const G = 11.5;
+    const SPIN = 20.0; // rad/s — a proper flipping coin
+    const targetRot = win ? 0 : Math.PI; // heads plate up = win
+    let vy = 4.7;
+    let rotX = 0;
+    let phase: "grow" | "fly" | "settle" | "hold" | "fade" = "grow";
+    let phaseStart = performance.now();
+    let lastFrame = phaseStart;
+    let bounces = 0;
+    let settleFrom = 0;
+
+    return new Promise<void>((resolve) => {
+      const step = () => {
+        const now = performance.now();
+        const dt = Math.min(0.05, (now - lastFrame) / 1000);
+        const phaseMs = now - phaseStart;
+        lastFrame = now;
+        if (phase === "grow") {
+          // pop into existence, already starting to turn
+          const t = Math.min(1, phaseMs / 140);
+          coin.scale.setScalar(0.4 + 0.6 * t);
+          rotX += SPIN * dt;
+          coin.rotation.x = rotX;
+          if (t >= 1) {
+            phase = "fly";
+            phaseStart = now;
+          }
+        } else if (phase === "fly") {
+          vy -= G * dt;
+          coin.position.y += vy * dt;
+          rotX += SPIN * dt;
+          coin.rotation.x = rotX;
+          coin.rotation.z = Math.sin(rotX * 0.55) * 0.07; // slight wobble
+          if (coin.position.y <= BASE_Y + 0.02 && vy < 0) {
+            coin.position.y = BASE_Y + 0.02;
+            if (Math.abs(vy) > 1.5 && bounces < 1) {
+              vy = -vy * 0.32;
+              bounces++;
+            } else {
+              phase = "settle";
+              settleFrom = rotX;
+            }
+          }
+        } else if (phase === "settle") {
+          // rotate to the nearest 2π-equivalent of the winning orientation
+          const target = targetRot + Math.round((settleFrom - targetRot) / (Math.PI * 2)) * Math.PI * 2;
+          rotX += (target - rotX) * Math.min(1, dt * 60);
+          coin.rotation.x = rotX;
+          coin.rotation.z *= 0.8;
+          if (Math.abs(target - rotX) < 0.01) {
+            coin.rotation.x = target;
+            coin.rotation.z = 0;
+            phase = "hold";
+            phaseStart = now;
+          }
+        } else if (phase === "hold") {
+          coin.rotation.z = Math.sin(phaseMs * 0.02) * 0.015; // barely breathing
+          if (phaseMs > 750) {
+            phase = "fade";
+            phaseStart = now;
+          }
+        } else {
+          const k = Math.min(1, phaseMs / 300);
+          coin.traverse((o) => {
+            const m = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+            if (m) m.opacity = 1 - k;
+          });
+          coin.scale.setScalar(Math.max(0.01, 1 - k * 0.5));
+          coin.position.y -= dt * 0.35;
+          if (k >= 1) {
+            coin.visible = false;
+            resolve();
+            return;
+          }
+        }
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+  }
 
   private trauma = 0;
   private timeScale = 1;
@@ -1944,6 +2084,14 @@ export class RouletteScene {
 
   dispose() {
     window.removeEventListener("resize", this.onResize);
+    if (this.coinGroup) {
+      this.coinGroup.traverse((o) => {
+        const m = o as THREE.Mesh;
+        m.geometry?.dispose?.();
+        (m.material as THREE.Material | undefined)?.dispose?.();
+      });
+      this.coinGroup = null;
+    }
     this.renderer?.dispose();
     this.renderer?.domElement?.remove();
   }

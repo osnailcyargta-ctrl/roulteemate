@@ -53,6 +53,18 @@ export interface SkillState {
   trial?: boolean; // shop trial: one single use, then the slot fades away
 }
 
+/** The PLAYER's inventory is a LIST OF SLOTS: every grant (dice, shop trial,
+ *  duplicate) becomes its own slot with its own charges and its own cooldown.
+ *  The DEALER keeps the simple per-id record. */
+export interface SkillSlot {
+  uid: number; // unique per grant — the HUD targets a slot by uid
+  id: SkillId;
+  charges: number;
+  cooldown: number;
+  maxCharges: number;
+  trial?: boolean;
+}
+
 export type Phase =
   | "menu"
   | "dice"
@@ -74,7 +86,7 @@ export interface GameState {
   cylinder: ShellType[]; // index 0 = next shell
   lastShot: LastShot | null; // the most recent trigger pull (for REWIND)
   turn: Side;
-  skills: Record<SkillId, SkillState>; // player
+  skills: SkillSlot[]; // player — separate slots, each with own charges/cooldown
   enemySkills: Record<SkillId, SkillState>; // enemy
   voodooTurns: Record<Side, number>; // remaining voodoo duration (0 = off)
   enemySkipTurns: number;
@@ -112,6 +124,20 @@ export interface SkillOutcome {
 }
 
 const CHAMBER_SIZE = 6;
+
+/** Charges a fresh (non-trial) slot starts with; -1 = cooldown-based skill. */
+const SKILL_MAX_CHARGES: Record<SkillId, number> = {
+  reroll: -1,
+  voodoo: 1,
+  peek: -1,
+  eject: -1,
+  coffee: 2,
+  cuffs: 1,
+  phoenix: 1,
+  thirdEye: 1,
+  rewind: 3,
+  gamble: 3,
+};
 
 export function opponentOf(side: Side): Side {
   return side === "player" ? "enemy" : "player";
@@ -177,6 +203,9 @@ export class RouletteLogic {
     this.state = this.freshState(difficulty, mode, overrides);
   }
 
+  /** uid counter for player skill slots. */
+  private nextUid = 1;
+
   freshState(difficulty: Difficulty, mode: Mode = "standard", overrides: LogicOverrides = {}): GameState {
     // The DEALER always sits at 5 HP in standard play (ENDLESS replaces it
     // with the SCORE counter) — mutators may override both sides.
@@ -203,7 +232,7 @@ export class RouletteLogic {
       cylinder: [],
       lastShot: null,
       turn: "player",
-      skills: emptySkills(),
+      skills: [],
       enemySkills: emptySkills(),
       voodooTurns: { player: 0, enemy: 0 },
       enemySkipTurns: 0,
@@ -256,11 +285,33 @@ export class RouletteLogic {
     return this.state.cylinder.length === 0;
   }
 
-  /* ---------------- skill grants (dice) ---------------- */
-  /** The dice grants a skill. If already owned: charge skills +1 charge
-   *  (up to cap), cooldown skills get their cooldown reset. */
+  /* ---------------- skill grants (dice / shop) ---------------- */
+
+  /** Resolve a player slot: by uid, or (legacy id lookups) the LAST slot
+   *  with that skill id. */
+  playerSlot(ref: SkillId | number): SkillSlot | null {
+    const list = this.state.skills;
+    if (typeof ref === "number") return list.find((s) => s.uid === ref) ?? null;
+    for (let i = list.length - 1; i >= 0; i--) if (list[i].id === ref) return list[i];
+    return null;
+  }
+
+  /** DICE grant. The PLAYER always receives a NEW SLOT (duplicates included
+   *  when the mutator allows them) — separate cooldown, separate charges.
+   *  The DEALER keeps the simple stacking behavior. */
   grantSkill(side: Side, id: SkillId) {
-    const sk = side === "player" ? this.state.skills[id] : this.state.enemySkills[id];
+    if (side === "player") {
+      const max = SKILL_MAX_CHARGES[id];
+      this.state.skills.push({
+        uid: this.nextUid++,
+        id,
+        charges: max,
+        cooldown: 0,
+        maxCharges: max,
+      });
+      return;
+    }
+    const sk = this.state.enemySkills[id];
     sk.owned = true;
     if (sk.charges >= 0) {
       sk.charges = Math.min(sk.maxCharges, sk.charges + 1);
@@ -271,7 +322,18 @@ export class RouletteLogic {
 
   /** SHOP purchase: a TRIAL skill — one single use, then its slot fades. */
   grantTrial(side: Side, id: SkillId) {
-    const sk = side === "player" ? this.state.skills[id] : this.state.enemySkills[id];
+    if (side === "player") {
+      this.state.skills.push({
+        uid: this.nextUid++,
+        id,
+        charges: 1,
+        cooldown: 0,
+        maxCharges: 1,
+        trial: true,
+      });
+      return;
+    }
+    const sk = this.state.enemySkills[id];
     sk.owned = true;
     sk.trial = true;
     sk.maxCharges = 1;
@@ -365,19 +427,23 @@ export class RouletteLogic {
 
   /* ---------------- skills ---------------- */
 
-  canUseSkill(side: Side, id: SkillId): boolean {
+  canUseSkill(side: Side, ref: SkillId | number): boolean {
     const st = this.state;
-    const sk = side === "player" ? st.skills[id] : st.enemySkills[id];
+    if (side === "player") {
+      const slot = this.playerSlot(ref);
+      if (!slot) return false;
+      return this.slotUsable(slot);
+    }
+    const id = ref as SkillId;
+    const sk = st.enemySkills[id];
     if (!sk.owned) return false;
     if (sk.cooldown > 0) return false;
     if (sk.charges === 0) return false;
     if (id === "phoenix") return false; // passive charm — it triggers itself
-    if (side === "player" && st.mustShoot && id !== "coffee") return false;
     if (st.phase !== "playerTurn" && st.phase !== "enemyTurn") return false;
     if (side !== st.turn) return false;
     if (id === "coffee" && st.hp[side] >= st.maxHp[side]) return false;
-    if (id === "cuffs" && (side === "player" ? st.enemySkipTurns : st.playerSkipTurns) > 0)
-      return false;
+    if (id === "cuffs" && st.playerSkipTurns > 0) return false;
     if (id === "voodoo" && st.voodooTurns[side] > 0) return false;
     if (id === "eject" && st.cylinder.length === 0) return false;
     if (id === "reroll" && (st.usedRerollThisTurn || st.cylinder.length === 0)) return false;
@@ -386,10 +452,39 @@ export class RouletteLogic {
     return true;
   }
 
-  useSkill(side: Side, id: SkillId): SkillOutcome {
-    if (!this.canUseSkill(side, id)) return { ok: false, reason: "not usable" };
+  /** All shared usability rules for one of the player's slots. */
+  private slotUsable(slot: SkillSlot): boolean {
     const st = this.state;
-    const sk = side === "player" ? st.skills[id] : st.enemySkills[id];
+    const id = slot.id;
+    if (slot.cooldown > 0) return false;
+    if (slot.charges === 0) return false;
+    if (id === "phoenix") return false; // passive charm — it triggers itself
+    if (st.mustShoot && id !== "coffee") return false;
+    if (st.phase !== "playerTurn" && st.phase !== "enemyTurn") return false;
+    if (st.turn !== "player") return false;
+    if (id === "coffee" && st.hp.player >= st.maxHp.player) return false;
+    if (id === "cuffs" && st.enemySkipTurns > 0) return false;
+    if (id === "voodoo" && st.voodooTurns.player > 0) return false;
+    if (id === "eject" && st.cylinder.length === 0) return false;
+    if (id === "reroll" && (st.usedRerollThisTurn || st.cylinder.length === 0)) return false;
+    if (id === "rewind" && !st.lastShot) return false; // nothing to undo
+    if (id === "gamble" && st.hp.player <= 0) return false;
+    return true;
+  }
+
+  useSkill(side: Side, ref: SkillId | number, preset: { win?: boolean } = {}): SkillOutcome {
+    if (!this.canUseSkill(side, ref)) return { ok: false, reason: "not usable" };
+    const st = this.state;
+    let id: SkillId;
+    let sk: SkillSlot | SkillState;
+    if (side === "player") {
+      const slot = this.playerSlot(ref)!;
+      id = slot.id;
+      sk = slot;
+    } else {
+      id = ref as SkillId;
+      sk = st.enemySkills[id];
+    }
     // TRIAL skills burn their single charge on any successful use
     if (sk.trial && sk.charges > 0) sk.charges -= 1;
     switch (id) {
@@ -486,9 +581,10 @@ export class RouletteLogic {
       }
       case "gamble": {
         // THE COIN: heads +1 HP, tails -1 HP. It can absolutely kill you.
+        // The engine may PRE-ROLL the flip so the 3D coin lands honestly.
         if (!sk.trial) sk.charges -= 1;
         sk.cooldown = SKILL_CD.gamble;
-        const win = Math.random() < 0.5;
+        const win = preset.win ?? Math.random() < 0.5;
         let died = false;
         if (win) {
           this.healSide(side, 1);
@@ -578,13 +674,13 @@ export class RouletteLogic {
     if (out.damageTo) {
       // PHOENIX charm: the blow that would kill the player burns the charm
       // instead and leaves them standing at 1 HP.
+      const phoenixSlot = st.skills.find((s) => s.id === "phoenix" && s.charges > 0);
       if (
         out.damageTo === "player" &&
         st.hp.player - 1 <= 0 &&
-        st.skills.phoenix.owned &&
-        st.skills.phoenix.charges > 0
+        phoenixSlot
       ) {
-        st.skills.phoenix.charges -= 1;
+        phoenixSlot.charges -= 1;
         st.hp.player = 1;
         out.phoenixSaved = true;
       } else {
@@ -609,9 +705,9 @@ export class RouletteLogic {
 
   /** Script/mutator FORCED skill effect: applies the effect with no
    *  turn/cooldown checks (the custom rules are above the law). */
-  forceSkill(id: SkillId, target: Side): { win?: boolean; died?: boolean; revealed?: ShellType | null } {
+  forceSkill(id: SkillId, target: Side, preset: { win?: boolean } = {}): { win?: boolean; died?: boolean; revealed?: ShellType | null } {
     const st = this.state;
-    const skTarget = target === "player" ? st.skills[id] : st.enemySkills[id];
+    const skTarget = target === "player" ? st.skills.find((s) => s.id === id) : st.enemySkills[id];
     switch (id) {
       case "cuffs":
         if (target === "player") st.playerSkipTurns += 1;
@@ -659,10 +755,18 @@ export class RouletteLogic {
       case "voodoo":
         st.voodooTurns[target] = 2;
         return {};
-      case "phoenix":
-        skTarget.owned = true;
-        skTarget.charges = Math.max(1, skTarget.charges);
+      case "phoenix": {
+        if (target === "player") {
+          const slot = st.skills.find((s) => s.id === "phoenix");
+          if (slot) slot.charges = Math.max(1, slot.charges);
+          else this.grantSkill("player", "phoenix");
+        } else {
+          const sk = st.enemySkills.phoenix;
+          sk.owned = true;
+          sk.charges = Math.max(1, sk.charges);
+        }
         return {};
+      }
       case "rewind": {
         const last = st.lastShot;
         if (!last) return {};
@@ -677,7 +781,7 @@ export class RouletteLogic {
         return {};
       }
       case "gamble": {
-        const win = Math.random() < 0.5;
+        const win = preset.win ?? Math.random() < 0.5;
         let died = false;
         if (win) this.healSide(target, 1);
         else died = this.damageSide(target, 1);
@@ -714,9 +818,13 @@ export class RouletteLogic {
    *  tick the fog-of-war countdown, and maybe make the enemy misremember. */
   startTurnTick() {
     const st = this.state;
-    const sks = st.turn === "player" ? st.skills : st.enemySkills;
-    for (const id of Object.keys(sks) as SkillId[]) {
-      if (sks[id].cooldown > 0) sks[id].cooldown -= 1;
+    // player slots tick individually — each duplicate cools down on its own
+    for (const slot of st.skills) {
+      if (slot.cooldown > 0) slot.cooldown -= 1;
+    }
+    const esks = st.enemySkills;
+    for (const id of Object.keys(esks) as SkillId[]) {
+      if (esks[id].cooldown > 0) esks[id].cooldown -= 1;
     }
     if (st.countdown > 0) st.countdown -= 1;
     this.lastSlip = false;

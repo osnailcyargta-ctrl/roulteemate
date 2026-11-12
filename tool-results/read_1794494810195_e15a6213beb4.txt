@@ -1,0 +1,897 @@
+     1→     1→/**
+     2→     2→ * logic.ts — core rules of ULTIMATE ROULETTE (pure logic, no rendering).
+     3→     3→ *
+     4→     4→ * Concept: a 6-chamber revolver loaded with LIVE/BLANK shells. Both sides
+     5→     5→ * know the counts, never the order. Every shot advances the cylinder.
+     6→     6→ * - Shoot SELF + BLANK  -> you automatically fire ONE free shot at the enemy.
+     7→     7→ * - Shoot SELF + LIVE   -> you take the damage, turn passes.
+     8→     8→ * - Shoot ENEMY + LIVE  -> enemy takes the damage, turn passes.
+     9→     9→ * - Shoot ENEMY + BLANK -> turn passes.
+    10→    10→ *
+    11→    11→ * FOG OF WAR: the honest LIVE/BLANK board only stays up for 3 turns per
+    12→    12→ * reload, then it fades — from then on BOTH sides run on real memory.
+    13→    13→ * The enemy never reads the cylinder; it tracks what it has observed and
+    14→    14→ * (on lower difficulties) misremembers from time to time.
+    15→    15→ *
+    16→    16→ * HP: EASY you 6 vs 5 · NORMAL 5 vs 5 · INSANE you 4 vs his 5.
+    17→    17→ *
+    18→    18→ * SKILLS (player starts with exactly 2 from the opening dice and can buy
+    19→    19→ * 1-use SHOP TRIALS up to 4 held skills; the enemy owns 1 on EASY, 2 on
+    20→    20→ * NORMAL and 3 on INSANE):
+    21→    21→ * - REROLL   : rerandomize the current shell once, then you MUST shoot. CD 2 turns.
+    22→    22→ * - VOODOO   : 1x per game, active for 2 turns. While cursed, ANY live hit the
+    23→    23→ *              owner would take is REFLECTED to the opponent — even a live
+    24→    24→ *              round fired at yourself. Bonus curse: shooting yourself with a
+    25→    25→ *              BLANK rerolls the shell and forces one shot at the opponent.
+    26→    26→ * - PEEK     : look at the current shell. CD 3 turns.
+    27→    27→ * - EJECT    : eject the current shell without firing (free action). CD 3 turns.
+    28→    28→ * - COFFEE   : +1 HP (up to max). 2 charges per game.
+    29→    29→ * - CUFFS    : the enemy skips their next turn. 1 charge per game.
+    30→    30→ */
+    31→    31→
+    32→    32→import type { SkillId } from "./doodle";
+    33→    33→
+    34→    34→export type ShellType = "live" | "blank";
+    35→    35→export type Side = "player" | "enemy";
+    36→    36→export type Difficulty = "easy" | "normal" | "insane";
+    37→    37→export type Mode = "standard" | "endless";
+    38→    38→
+    39→    39→/** What the last fired shell did — the REWIND skill needs this to undo it. */
+    40→    40→export interface LastShot {
+    41→    41→  shell: ShellType;
+    42→    42→  damageTo: Side | null;
+    43→    43→  reflected: boolean;
+    44→    44→  /** Cash the engine paid out for this shot (refunded by rewind). */
+    45→    45→  moneyGain: number;
+    46→    46→}
+    47→    47→
+    48→    48→export interface SkillState {
+    49→    49→  owned: boolean;
+    50→    50→  charges: number; // for charge-based skills; -1 = cooldown-based
+    51→    51→  cooldown: number; // turns left before usable again
+    52→    52→  maxCharges: number;
+    53→    53→  trial?: boolean; // shop trial: one single use, then the slot fades away
+    54→    54→}
+    55→    55→
+    56→    56→export type Phase =
+    57→    57→  | "menu"
+    58→    58→  | "dice"
+    59→    59→  | "reloading"
+    60→    60→  | "shop"
+    61→    61→  | "playerTurn"
+    62→    62→  | "enemyTurn"
+    63→    63→  | "gameover"
+    64→    64→  | "victory";
+    65→    65→
+    66→    66→export interface GameState {
+    67→    67→  phase: Phase;
+    68→    68→  round: number;
+    69→    69→  difficulty: Difficulty;
+    70→    70→  mode: Mode; // endless: the DEALER never dies — his HP becomes a SCORE counter
+    71→    71→  score: number; // ENDLESS: +1 every damage the DEALER takes, -1 when he heals (can go negative)
+    72→    72→  maxHp: Record<Side, number>;
+    73→    73→  hp: Record<Side, number>;
+    74→    74→  cylinder: ShellType[]; // index 0 = next shell
+    75→    75→  lastShot: LastShot | null; // the most recent trigger pull (for REWIND)
+    76→    76→  turn: Side;
+    77→    77→  skills: Record<SkillId, SkillState>; // player
+    78→    78→  enemySkills: Record<SkillId, SkillState>; // enemy
+    79→    79→  voodooTurns: Record<Side, number>; // remaining voodoo duration (0 = off)
+    80→    80→  enemySkipTurns: number;
+    81→    81→  playerSkipTurns: number;
+    82→    82→  mustShoot: boolean; // true after reroll
+    83→    83→  usedRerollThisTurn: boolean;
+    84→    84→  countdown: number; // turns left before the LIVE/BLANK board fades out
+    85→    85→}
+    86→    86→
+    87→    87→export interface ShotOutcome {
+    88→    88→  shooter: Side;
+    89→    89→  target: Side; // aim target
+    90→    90→  shell: ShellType; // shell that came out
+    91→    91→  damageTo: Side | null;
+    92→    92→  reflected: boolean; // damage reflected by voodoo
+    93→    93→  bonusShot: boolean; // self-shot blank -> shooter auto-fires once at the opponent
+    94→    94→  voodooReroll: boolean; // self-shot blank while cursed -> fresh shell + forced shot
+    95→    95→  phoenixSaved: boolean; // the phoenix charm burned instead of the player
+    96→    96→  death: Side | null;
+    97→    97→  forced: boolean; // this shot was forced (from the voodoo curse)
+    98→    98→}
+    99→    99→
+   100→   100→export interface SkillOutcome {
+   101→   101→  ok: boolean;
+   102→   102→  reason?: string;
+   103→   103→  revealed?: ShellType | null; // peek / eject
+   104→   104→  healed?: boolean;
+   105→   105→  rerolled?: boolean;
+   106→   106→  cuffsApplied?: boolean;
+   107→   107→  ejected?: ShellType | null;
+   108→   108→  queue?: (ShellType | null)[]; // third eye: the next shells in order
+   109→   109→  rewound?: LastShot | null; // rewind: the shot that was undone
+   110→   110→  gambleWin?: boolean; // gamble: true = heads (+1 HP), false = tails (-1 HP)
+   111→   111→  died?: boolean; // gamble tails at 1 HP — the coin killed its own flipper
+   112→   112→}
+   113→   113→
+   114→   114→const CHAMBER_SIZE = 6;
+   115→   115→
+   116→   116→export function opponentOf(side: Side): Side {
+   117→   117→  return side === "player" ? "enemy" : "player";
+   118→   118→}
+   119→   119→
+   120→   120→function emptySkills(): Record<SkillId, SkillState> {
+   121→   121→  return {
+   122→   122→    reroll: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
+   123→   123→    voodoo: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
+   124→   124→    peek: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
+   125→   125→    eject: { owned: false, charges: -1, cooldown: 0, maxCharges: -1 },
+   126→   126→    coffee: { owned: false, charges: 0, cooldown: 0, maxCharges: 2 },
+   127→   127→    cuffs: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
+   128→   128→    phoenix: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
+   129→   129→    thirdEye: { owned: false, charges: 0, cooldown: 0, maxCharges: 1 },
+   130→   130→    rewind: { owned: false, charges: 0, cooldown: 0, maxCharges: 3 },
+   131→   131→    gamble: { owned: false, charges: 0, cooldown: 0, maxCharges: 3 },
+   132→   132→  };
+   133→   133→}
+   134→   134→
+   135→   135→export const SKILL_CD: Record<SkillId, number> = {
+   136→   136→  reroll: 2,
+   137→   137→  voodoo: 0,
+   138→   138→  peek: 3,
+   139→   139→  eject: 3,
+   140→   140→  coffee: 0,
+   141→   141→  cuffs: 0,
+   142→   142→  phoenix: 0,
+   143→   143→  thirdEye: 0,
+   144→   144→  rewind: 2,
+   145→   145→  gamble: 2,
+   146→   146→};
+   147→   147→
+   148→   148→/** How many skills the ENEMY gets per difficulty. */
+   149→   149→export function enemySkillCount(diff: Difficulty): number {
+   150→   150→  return diff === "easy" ? 1 : diff === "normal" ? 2 : 3;
+   151→   151→}
+   152→   152→
+   153→   153→export interface LogicOverrides {
+   154→   154→  /** MUTATORS: custom HP for both sides. */
+   155→   155→  hpPlayer?: number;
+   156→   156→  hpEnemy?: number;
+   157→   157→}
+   158→   158→
+   159→   159→export class RouletteLogic {
+   160→   160→  state: GameState;
+   161→   161→  /** AI-only knowledge of the current shell (from its own peek). */
+   162→   162→  aiKnown: ShellType | null = null;
+   163→   163→  /** Player knowledge of the current shell (peek / third eye slot 0). */
+   164→   164→  playerKnown: ShellType | null = null;
+   165→   165→  /** Ordered knowledge of the NEXT shells (third eye). null = unknown slot. */
+   166→   166→  playerKnownQueue: (ShellType | null)[] = [];
+   167→   167→  /** The enemy's REAL memory of the remaining shells — it never cheats. */
+   168→   168→  aiMem: { live: number; total: number } = { live: 0, total: 0 };
+   169→   169→  /** True when the enemy misremembered at the start of its turn. */
+   170→   170→  lastSlip = false;
+   171→   171→
+   172→   172→  constructor(
+   173→   173→    difficulty: Difficulty = "normal",
+   174→   174→    mode: Mode = "standard",
+   175→   175→    overrides: LogicOverrides = {},
+   176→   176→  ) {
+   177→   177→    this.state = this.freshState(difficulty, mode, overrides);
+   178→   178→  }
+   179→   179→
+   180→   180→  freshState(difficulty: Difficulty, mode: Mode = "standard", overrides: LogicOverrides = {}): GameState {
+   181→   181→    // The DEALER always sits at 5 HP in standard play (ENDLESS replaces it
+   182→   182→    // with the SCORE counter) — mutators may override both sides.
+   183→   183→    const base: Record<Side, number> =
+   184→   184→      difficulty === "easy"
+   185→   185→        ? { player: 6, enemy: 5 }
+   186→   186→        : difficulty === "normal"
+   187→   187→          ? { player: 5, enemy: 5 }
+   188→   188→          : mode === "endless"
+   189→   189→            ? { player: 5, enemy: 5 } // ENDLESS: you need staying power
+   190→   190→            : { player: 4, enemy: 5 }; // INSANE: fewer hearts, same dealer
+   191→   191→    const maxHp: Record<Side, number> = {
+   192→   192→      player: overrides.hpPlayer ?? base.player,
+   193→   193→      enemy: overrides.hpEnemy ?? base.enemy,
+   194→   194→    };
+   195→   195→    return {
+   196→   196→      phase: "dice",
+   197→   197→      round: 0,
+   198→   198→      difficulty,
+   199→   199→      mode,
+   200→   200→      score: 0,
+   201→   201→      maxHp,
+   202→   202→      hp: { player: maxHp.player, enemy: maxHp.enemy },
+   203→   203→      cylinder: [],
+   204→   204→      lastShot: null,
+   205→   205→      turn: "player",
+   206→   206→      skills: emptySkills(),
+   207→   207→      enemySkills: emptySkills(),
+   208→   208→      voodooTurns: { player: 0, enemy: 0 },
+   209→   209→      enemySkipTurns: 0,
+   210→   210→      playerSkipTurns: 0,
+   211→   211→      mustShoot: false,
+   212→   212→      usedRerollThisTurn: false,
+   213→   213→      countdown: 0,
+   214→   214→    };
+   215→   215→  }
+   216→   216→
+   217→   217→  /* ---------------- cylinder ---------------- */
+   218→   218→
+   219→   219→  loadCylinder() {
+   220→   220→    const r = this.state.round;
+   221→   221→    let liveCount: number;
+   222→   222→    if (r <= 1) liveCount = 2 + (Math.random() < 0.5 ? 1 : 0);
+   223→   223→    else if (r === 2) liveCount = 3 + (Math.random() < 0.5 ? 1 : 0);
+   224→   224→    else liveCount = 4 + (Math.random() < 0.4 ? 1 : 0);
+   225→   225→    liveCount = Math.min(5, Math.max(2, liveCount));
+   226→   226→    const shells: ShellType[] = [];
+   227→   227→    for (let i = 0; i < liveCount; i++) shells.push("live");
+   228→   228→    while (shells.length < CHAMBER_SIZE) shells.push("blank");
+   229→   229→    // Fisher-Yates shuffle
+   230→   230→    for (let i = shells.length - 1; i > 0; i--) {
+   231→   231→      const j = Math.floor(Math.random() * (i + 1));
+   232→   232→      [shells[i], shells[j]] = [shells[j], shells[i]];
+   233→   233→    }
+   234→   234→    this.state.cylinder = shells;
+   235→   235→    this.playerKnown = null;
+   236→   236→    this.aiKnown = null;
+   237→   237→    this.playerKnownQueue = [];
+   238→   238→    this.state.countdown = 4; // the honest board survives the first 3 turns
+   239→   239→    this.state.lastShot = null; // a fresh magazine erases history (no rewind across reloads)
+   240→   240→    this.aiMem = { live: liveCount, total: shells.length };
+   241→   241→  }
+   242→   242→
+   243→   243→  get totalRemaining() {
+   244→   244→    return this.state.cylinder.length;
+   245→   245→  }
+   246→   246→
+   247→   247→  get liveRemaining() {
+   248→   248→    return this.state.cylinder.filter((s) => s === "live").length;
+   249→   249→  }
+   250→   250→
+   251→   251→  get blankRemaining() {
+   252→   252→    return this.state.cylinder.filter((s) => s === "blank").length;
+   253→   253→  }
+   254→   254→
+   255→   255→  get isEmpty() {
+   256→   256→    return this.state.cylinder.length === 0;
+   257→   257→  }
+   258→   258→
+   259→   259→  /* ---------------- skill grants (dice) ---------------- */
+   260→   260→  /** The dice grants a skill. If already owned: charge skills +1 charge
+   261→   261→   *  (up to cap), cooldown skills get their cooldown reset. */
+   262→   262→  grantSkill(side: Side, id: SkillId) {
+   263→   263→    const sk = side === "player" ? this.state.skills[id] : this.state.enemySkills[id];
+   264→   264→    sk.owned = true;
+   265→   265→    if (sk.charges >= 0) {
+   266→   266→      sk.charges = Math.min(sk.maxCharges, sk.charges + 1);
+   267→   267→    } else {
+   268→   268→      sk.cooldown = 0;
+   269→   269→    }
+   270→   270→  }
+   271→   271→
+   272→   272→  /** SHOP purchase: a TRIAL skill — one single use, then its slot fades. */
+   273→   273→  grantTrial(side: Side, id: SkillId) {
+   274→   274→    const sk = side === "player" ? this.state.skills[id] : this.state.enemySkills[id];
+   275→   275→    sk.owned = true;
+   276→   276→    sk.trial = true;
+   277→   277→    sk.maxCharges = 1;
+   278→   278→    sk.charges = 1;
+   279→   279→    sk.cooldown = 0;
+   280→   280→  }
+   281→   281→
+   282→   282→  /* ---------------- fog of war (real memory) ---------------- */
+   283→   283→
+   284→   284→  get countsPublic() {
+   285→   285→    return this.state.countdown > 0 && this.state.cylinder.length > 0;
+   286→   286→  }
+   287→   287→
+   288→   288→  private clampMem(v: number) {
+   289→   289→    return Math.min(Math.max(0, v), Math.max(0, this.aiMem.total));
+   290→   290→  }
+   291→   291→
+   292→   292→  /** A shell left the cylinder in full view (fired or ejected). */
+   293→   293→  observeShell(kind: ShellType) {
+   294→   294→    if (this.countsPublic) {
+   295→   295→      this.resyncMem();
+   296→   296→      return;
+   297→   297→    }
+   298→   298→    this.aiMem.total = Math.max(0, this.aiMem.total - 1);
+   299→   299→    this.aiMem.live =
+   300→   300→      kind === "live"
+   301→   301→        ? Math.max(0, this.aiMem.live - 1)
+   302→   302→        : Math.min(this.aiMem.live, this.aiMem.total); // a blank proves past beliefs too generous
+   303→   303→  }
+   304→   304→
+   305→   305→  /** While the board is public both sides track it perfectly. */
+   306→   306→  resyncMem() {
+   307→   307→    this.aiMem = { live: this.liveRemaining, total: this.totalRemaining };
+   308→   308→  }
+   309→   309→
+   310→   310→  /** An unknown fresh shell entered the chamber (voodoo curse reroll). */
+   311→   311→  noteFreshShell() {
+   312→   312→    if (this.countsPublic) {
+   313→   313→      this.resyncMem();
+   314→   314→      return;
+   315→   315→    }
+   316→   316→    this.aiMem.total += 1;
+   317→   317→    this.aiMem.live = this.clampMem(this.aiMem.live + 0.5);
+   318→   318→  }
+   319→   319→
+   320→   320→  /** The chamber was rerolled: the old shell leaves, a fresh 50/50 enters. */
+   321→   321→  noteReroll(oldKnown: ShellType | null) {
+   322→   322→    if (this.countsPublic) {
+   323→   323→      this.resyncMem();
+   324→   324→      return;
+   325→   325→    }
+   326→   326→    const oldP =
+   327→   327→      oldKnown === "live" ? 1 : oldKnown === "blank" ? 0 : this.aiMem.total > 0 ? this.aiMem.live / this.aiMem.total : 0.5;
+   328→   328→    this.aiMem.live = this.clampMem(this.aiMem.live - oldP + 0.5);
+   329→   329→  }
+   330→   330→
+   331→   331→  /* ---------------- endless scoring ---------------- */
+   332→   332→
+   333→   333→  /** ENDLESS: the DEALER's HP is replaced by a SCORE counter.
+   334→   334→   *  Every damage he takes = +1 score, every heal = -1 score.
+   335→   335→   *  The score may go negative — nobody is stopping you from bullying him. */
+   336→   336→  addScore(delta: number) {
+   337→   337→    this.state.score += delta;
+   338→   338→  }
+   339→   339→
+   340→   340→  /** Apply damage to a side. In ENDLESS, hurting the DEALER feeds the
+   341→   341→   *  score instead of his HP — he simply cannot die. */
+   342→   342→  damageSide(side: Side, amount: number): boolean {
+   343→   343→    const st = this.state;
+   344→   344→    if (amount <= 0) return false;
+   345→   345→    if (side === "enemy" && st.mode === "endless") {
+   346→   346→      st.score += amount; // +1 score per point of damage (can pierce zero, go negative)
+   347→   347→      return false; // never a death
+   348→   348→    }
+   349→   349→    st.hp[side] = Math.max(0, st.hp[side] - amount);
+   350→   350→    return st.hp[side] <= 0;
+   351→   351→  }
+   352→   352→
+   353→   353→  /** Heal a side. In ENDLESS, a healing DEALER LOSES score (may go negative). */
+   354→   354→  healSide(side: Side, amount: number): boolean {
+   355→   355→    const st = this.state;
+   356→   356→    if (amount <= 0) return false;
+   357→   357→    if (side === "enemy" && st.mode === "endless") {
+   358→   358→      st.score -= amount;
+   359→   359→      return false;
+   360→   360→    }
+   361→   361→    const before = st.hp[side];
+   362→   362→    st.hp[side] = Math.min(st.maxHp[side], st.hp[side] + amount);
+   363→   363→    return st.hp[side] > before; // true when the heal actually did something
+   364→   364→  }
+   365→   365→
+   366→   366→  /* ---------------- skills ---------------- */
+   367→   367→
+   368→   368→  canUseSkill(side: Side, id: SkillId): boolean {
+   369→   369→    const st = this.state;
+   370→   370→    const sk = side === "player" ? st.skills[id] : st.enemySkills[id];
+   371→   371→    if (!sk.owned) return false;
+   372→   372→    if (sk.cooldown > 0) return false;
+   373→   373→    if (sk.charges === 0) return false;
+   374→   374→    if (id === "phoenix") return false; // passive charm — it triggers itself
+   375→   375→    if (side === "player" && st.mustShoot && id !== "coffee") return false;
+   376→   376→    if (st.phase !== "playerTurn" && st.phase !== "enemyTurn") return false;
+   377→   377→    if (side !== st.turn) return false;
+   378→   378→    if (id === "coffee" && st.hp[side] >= st.maxHp[side]) return false;
+   379→   379→    if (id === "cuffs" && (side === "player" ? st.enemySkipTurns : st.playerSkipTurns) > 0)
+   380→   380→      return false;
+   381→   381→    if (id === "voodoo" && st.voodooTurns[side] > 0) return false;
+   382→   382→    if (id === "eject" && st.cylinder.length === 0) return false;
+   383→   383→    if (id === "reroll" && (st.usedRerollThisTurn || st.cylinder.length === 0)) return false;
+   384→   384→    if (id === "rewind" && !st.lastShot) return false; // nothing to undo
+   385→   385→    if (id === "gamble" && st.hp[side] <= 0) return false;
+   386→   386→    return true;
+   387→   387→  }
+   388→   388→
+   389→   389→  useSkill(side: Side, id: SkillId): SkillOutcome {
+   390→   390→    if (!this.canUseSkill(side, id)) return { ok: false, reason: "not usable" };
+   391→   391→    const st = this.state;
+   392→   392→    const sk = side === "player" ? st.skills[id] : st.enemySkills[id];
+   393→   393→    // TRIAL skills burn their single charge on any successful use
+   394→   394→    if (sk.trial && sk.charges > 0) sk.charges -= 1;
+   395→   395→    switch (id) {
+   396→   396→      case "reroll": {
+   397→   397→        // pure reroll: random result, may repeat itself
+   398→   398→        this.noteReroll(this.aiKnown);
+   399→   399→        const next: ShellType = Math.random() < 0.5 ? "live" : "blank";
+   400→   400→        st.cylinder[0] = next;
+   401→   401→        sk.cooldown = SKILL_CD.reroll;
+   402→   402→        st.mustShoot = true;
+   403→   403→        st.usedRerollThisTurn = true;
+   404→   404→        this.playerKnownQueue = this.playerKnownQueue.length
+   405→   405→          ? [null, ...this.playerKnownQueue.slice(1)]
+   406→   406→          : [];
+   407→   407→        this.playerKnown = this.playerKnownQueue[0] ?? null;
+   408→   408→        this.aiKnown = null;
+   409→   409→        return { ok: true, rerolled: true };
+   410→   410→      }
+   411→   411→      case "peek": {
+   412→   412→        const cur = st.cylinder[0] ?? null;
+   413→   413→        sk.cooldown = SKILL_CD.peek;
+   414→   414→        if (side === "player") {
+   415→   415→          if (this.playerKnownQueue.length) this.playerKnownQueue[0] = cur;
+   416→   416→          else this.playerKnownQueue = [cur];
+   417→   417→          this.playerKnown = cur;
+   418→   418→        } else {
+   419→   419→          this.aiKnown = cur;
+   420→   420→        }
+   421→   421→        return { ok: true, revealed: cur };
+   422→   422→      }
+   423→   423→      case "thirdEye": {
+   424→   424→        // reveal the NEXT 3 shells in order; knowledge persists as they fire
+   425→   425→        const q: (ShellType | null)[] = [];
+   426→   426→        for (let i = 0; i < 3 && i < st.cylinder.length; i++) q.push(st.cylinder[i]);
+   427→   427→        this.playerKnownQueue = q;
+   428→   428→        this.playerKnown = q[0] ?? null;
+   429→   429→        return { ok: true, revealed: q[0] ?? null, queue: q };
+   430→   430→      }
+   431→   431→      case "phoenix": {
+   432→   432→        // passive charm — it can never be cast manually (canUseSkill blocks it)
+   433→   433→        return { ok: false, reason: "passive" };
+   434→   434→      }
+   435→   435→      case "eject": {
+   436→   436→        const cur = st.cylinder.shift() ?? null;
+   437→   437→        sk.cooldown = SKILL_CD.eject;
+   438→   438→        this.observeShell(cur ?? "blank"); // the ejected shell is shown to both
+   439→   439→        this.playerKnownQueue = this.playerKnownQueue.slice(1);
+   440→   440→        this.playerKnown = this.playerKnownQueue[0] ?? null;
+   441→   441→        this.aiKnown = null;
+   442→   442→        return { ok: true, ejected: cur };
+   443→   443→      }
+   444→   444→      case "coffee": {
+   445→   445→        this.healSide(side, 1);
+   446→   446→        if (!sk.trial) sk.charges -= 1;
+   447→   447→        return { ok: true, healed: true };
+   448→   448→      }
+   449→   449→      case "cuffs": {
+   450→   450→        if (!sk.trial) sk.charges -= 1;
+   451→   451→        if (side === "player") st.enemySkipTurns += 1;
+   452→   452→        else st.playerSkipTurns += 1;
+   453→   453→        return { ok: true, cuffsApplied: true };
+   454→   454→      }
+   455→   455→      case "voodoo": {
+   456→   456→        if (!sk.trial) sk.charges -= 1;
+   457→   457→        st.voodooTurns[side] = 2;
+   458→   458→        return { ok: true };
+   459→   459→      }
+   460→   460→      case "rewind": {
+   461→   461→        // TIME FLOWS BACKWARDS: the last fired shell returns to the chamber
+   462→   462→        // and its whole result is undone — HP damage healed, cash refunded,
+   463→   463→        // the chamber exactly as it was before the trigger was pulled.
+   464→   464→        const last = st.lastShot;
+   465→   465→        if (!last) return { ok: false, reason: "nothing to rewind" };
+   466→   466→        st.cylinder.unshift(last.shell);
+   467→   467→        if (last.damageTo) {
+   468→   468→          if (last.damageTo === "enemy" && st.mode === "endless") {
+   469→   469→            st.score -= 1; // even the score forgets it happened
+   470→   470→          } else {
+   471→   471→            st.hp[last.damageTo] = Math.min(st.maxHp[last.damageTo], st.hp[last.damageTo] + 1);
+   472→   472→          }
+   473→   473→        }
+   474→   474→        // the AI's memory gets its shell back too
+   475→   475→        this.aiMem.total += 1;
+   476→   476→        if (last.shell === "live") this.aiMem.live = Math.min(this.aiMem.live + 1, this.aiMem.total);
+   477→   477→        else this.aiMem.live = this.clampMem(this.aiMem.live);
+   478→   478→        // the player SAW that shell fire — the knowledge walks back in
+   479→   479→        this.playerKnownQueue = [last.shell, ...this.playerKnownQueue];
+   480→   480→        this.playerKnown = last.shell;
+   481→   481→        this.aiKnown = null;
+   482→   482→        st.lastShot = null;
+   483→   483→        sk.cooldown = SKILL_CD.rewind;
+   484→   484→        if (!sk.trial) sk.charges -= 1;
+   485→   485→        return { ok: true, rewound: last };
+   486→   486→      }
+   487→   487→      case "gamble": {
+   488→   488→        // THE COIN: heads +1 HP, tails -1 HP. It can absolutely kill you.
+   489→   489→        if (!sk.trial) sk.charges -= 1;
+   490→   490→        sk.cooldown = SKILL_CD.gamble;
+   491→   491→        const win = Math.random() < 0.5;
+   492→   492→        let died = false;
+   493→   493→        if (win) {
+   494→   494→          this.healSide(side, 1);
+   495→   495→        } else {
+   496→   496→          died = this.damageSide(side, 1);
+   497→   497→        }
+   498→   498→        return { ok: true, gambleWin: win, died: died || st.hp[side] <= 0 };
+   499→   499→      }
+   500→   500→    }
+   501→   501→  }
+   502→   502→
+   503→   503→  /* ---------------- shooting ---------------- */
+   504→   504→
+   505→   505→  canShoot(side: Side): boolean {
+   506→   506→    const st = this.state;
+   507→   507→    return st.turn === side && st.cylinder.length > 0;
+   508→   508→  }
+   509→   509→
+   510→   510→  /** Resolve ONE trigger pull. `forced` = the mandatory shot from the voodoo curse. */
+   511→   511→  shoot(shooter: Side, target: Side, forced = false): ShotOutcome {
+   512→   512→    const st = this.state;
+   513→   513→    const shell = st.cylinder.shift()!;
+   514→   514→    this.observeShell(shell); // the shell leaving the gun is public knowledge
+   515→   515→    this.playerKnownQueue = this.playerKnownQueue.slice(1);
+   516→   516→    this.playerKnown = this.playerKnownQueue[0] ?? null;
+   517→   517→    this.aiKnown = null;
+   518→   518→
+   519→   519→    const out: ShotOutcome = {
+   520→   520→      shooter,
+   521→   521→      target,
+   522→   522→      shell,
+   523→   523→      damageTo: null,
+   524→   524→      reflected: false,
+   525→   525→      bonusShot: false,
+   526→   526→      voodooReroll: false,
+   527→   527→      phoenixSaved: false,
+   528→   528→      death: null,
+   529→   529→      forced,
+   530→   530→    };
+   531→   531→
+   532→   532→    const shooterVoodoo = st.voodooTurns[shooter] > 0;
+   533→   533→    const targetIsSelf = target === shooter;
+   534→   534→    const targetVoodoo = st.voodooTurns[target] > 0;
+   535→   535→
+   536→   536→    if (targetIsSelf) {
+   537→   537→      if (shell === "live") {
+   538→   538→        // live to your own head
+   539→   539→        if (shooterVoodoo) {
+   540→   540→          // VOODOO REFLECTION: even your own bullet cannot touch you —
+   541→   541→          // the pain crawls into the opponent instead.
+   542→   542→          out.reflected = true;
+   543→   543→          out.damageTo = opponentOf(shooter);
+   544→   544→        } else {
+   545→   545→          out.damageTo = shooter;
+   546→   546→        }
+   547→   547→      } else {
+   548→   548→        // blank to your own head
+   549→   549→        if (shooterVoodoo && !forced) {
+   550→   550→          // VOODOO CURSE: the blank shell is rerolled and you MUST fire once
+   551→   551→          // more — aimed at the opponent. The fresh shell is pushed on top.
+   552→   552→          const fresh: ShellType = Math.random() < 0.5 ? "live" : "blank";
+   553→   553→          st.cylinder.unshift(fresh);
+   554→   554→          this.noteFreshShell();
+   555→   555→          this.playerKnownQueue = [null, ...this.playerKnownQueue];
+   556→   556→          this.playerKnown = null;
+   557→   557→          out.voodooReroll = true;
+   558→   558→          st.lastShot = null; // a cursed shot tears the timeline — no rewind
+   559→   559→          return out;
+   560→   560→        }
+   561→   561→        // GLOBAL RULE: self-shot blank -> one automatic free shot at the enemy.
+   562→   562→        out.bonusShot = !forced;
+   563→   563→      }
+   564→   564→    } else {
+   565→   565→      // shooting the opponent
+   566→   566→      if (shell === "live") {
+   567→   567→        if (targetVoodoo) {
+   568→   568→          // REFLECTED by the target's voodoo
+   569→   569→          out.reflected = true;
+   570→   570→          out.damageTo = shooter;
+   571→   571→        } else {
+   572→   572→          out.damageTo = target;
+   573→   573→        }
+   574→   574→      }
+   575→   575→      // blank at the opponent: no damage
+   576→   576→    }
+   577→   577→
+   578→   578→    if (out.damageTo) {
+   579→   579→      // PHOENIX charm: the blow that would kill the player burns the charm
+   580→   580→      // instead and leaves them standing at 1 HP.
+   581→   581→      if (
+   582→   582→        out.damageTo === "player" &&
+   583→   583→        st.hp.player - 1 <= 0 &&
+   584→   584→        st.skills.phoenix.owned &&
+   585→   585→        st.skills.phoenix.charges > 0
+   586→   586→      ) {
+   587→   587→        st.skills.phoenix.charges -= 1;
+   588→   588→        st.hp.player = 1;
+   589→   589→        out.phoenixSaved = true;
+   590→   590→      } else {
+   591→   591→        const dead = this.damageSide(out.damageTo, 1);
+   592→   592→        // ENDLESS: hurting the DEALER only feeds the score — nobody dies
+   593→   593→        if (dead) out.death = out.damageTo;
+   594→   594→      }
+   595→   595→    }
+   596→   596→
+   597→   597→    // remember this trigger pull so REWIND can walk it backwards
+   598→   598→    st.lastShot = {
+   599→   599→      shell: out.shell,
+   600→   600→      damageTo: out.damageTo,
+   601→   601→      reflected: out.reflected,
+   602→   602→      moneyGain: 0, // the engine fills in the cash payout it gave
+   603→   603→    };
+   604→   604→
+   605→   605→    return out;
+   606→   606→  }
+   607→   607→
+   608→   608→  /* ---------------- turn flow ---------------- */
+   609→   609→
+   610→   610→  /** Script/mutator FORCED skill effect: applies the effect with no
+   611→   611→   *  turn/cooldown checks (the custom rules are above the law). */
+   612→   612→  forceSkill(id: SkillId, target: Side): { win?: boolean; died?: boolean; revealed?: ShellType | null } {
+   613→   613→    const st = this.state;
+   614→   614→    const skTarget = target === "player" ? st.skills[id] : st.enemySkills[id];
+   615→   615→    switch (id) {
+   616→   616→      case "cuffs":
+   617→   617→        if (target === "player") st.playerSkipTurns += 1;
+   618→   618→        else st.enemySkipTurns += 1;
+   619→   619→        return {};
+   620→   620→      case "coffee":
+   621→   621→        this.healSide(target, 1);
+   622→   622→        return {};
+   623→   623→      case "reroll": {
+   624→   624→        const next: ShellType = Math.random() < 0.5 ? "live" : "blank";
+   625→   625→        if (st.cylinder.length) st.cylinder[0] = next;
+   626→   626→        this.playerKnownQueue = this.playerKnownQueue.length ? [null, ...this.playerKnownQueue.slice(1)] : [];
+   627→   627→        this.playerKnown = this.playerKnownQueue[0] ?? null;
+   628→   628→        this.aiKnown = null;
+   629→   629→        return {};
+   630→   630→      }
+   631→   631→      case "peek": {
+   632→   632→        const cur = st.cylinder[0] ?? null;
+   633→   633→        if (target === "player") {
+   634→   634→          if (this.playerKnownQueue.length) this.playerKnownQueue[0] = cur;
+   635→   635→          else this.playerKnownQueue = [cur];
+   636→   636→          this.playerKnown = cur;
+   637→   637→        } else {
+   638→   638→          this.aiKnown = cur;
+   639→   639→        }
+   640→   640→        return { revealed: cur };
+   641→   641→      }
+   642→   642→      case "thirdEye": {
+   643→   643→        const q: (ShellType | null)[] = [];
+   644→   644→        for (let i = 0; i < 3 && i < st.cylinder.length; i++) q.push(st.cylinder[i]);
+   645→   645→        if (target === "player") {
+   646→   646→          this.playerKnownQueue = q;
+   647→   647→          this.playerKnown = q[0] ?? null;
+   648→   648→        }
+   649→   649→        return { revealed: q[0] ?? null };
+   650→   650→      }
+   651→   651→      case "eject": {
+   652→   652→        const cur = st.cylinder.shift() ?? null;
+   653→   653→        this.observeShell(cur ?? "blank");
+   654→   654→        this.playerKnownQueue = this.playerKnownQueue.slice(1);
+   655→   655→        this.playerKnown = this.playerKnownQueue[0] ?? null;
+   656→   656→        this.aiKnown = null;
+   657→   657→        return { revealed: cur };
+   658→   658→      }
+   659→   659→      case "voodoo":
+   660→   660→        st.voodooTurns[target] = 2;
+   661→   661→        return {};
+   662→   662→      case "phoenix":
+   663→   663→        skTarget.owned = true;
+   664→   664→        skTarget.charges = Math.max(1, skTarget.charges);
+   665→   665→        return {};
+   666→   666→      case "rewind": {
+   667→   667→        const last = st.lastShot;
+   668→   668→        if (!last) return {};
+   669→   669→        st.cylinder.unshift(last.shell);
+   670→   670→        if (last.damageTo) {
+   671→   671→          if (last.damageTo === "enemy" && st.mode === "endless") st.score -= 1;
+   672→   672→          else st.hp[last.damageTo] = Math.min(st.maxHp[last.damageTo], st.hp[last.damageTo] + 1);
+   673→   673→        }
+   674→   674→        this.aiMem.total += 1;
+   675→   675→        if (last.shell === "live") this.aiMem.live = Math.min(this.aiMem.live + 1, this.aiMem.total);
+   676→   676→        st.lastShot = null;
+   677→   677→        return {};
+   678→   678→      }
+   679→   679→      case "gamble": {
+   680→   680→        const win = Math.random() < 0.5;
+   681→   681→        let died = false;
+   682→   682→        if (win) this.healSide(target, 1);
+   683→   683→        else died = this.damageSide(target, 1);
+   684→   684→        return { win, died: died || st.hp[target] <= 0 };
+   685→   685→      }
+   686→   686→      default:
+   687→   687→        return {};
+   688→   688→    }
+   689→   689→  }
+   690→   690→
+   691→   691→  /** End the current side's turn: tick voodoo down, pass to the opponent.
+   692→   692→   *  Skips (cuffs) & cooldowns are processed when a turn STARTS. */
+   693→   693→  endTurnAndPass(): Side {
+   694→   694→    const st = this.state;
+   695→   695→    // the active side's voodoo ticks down at the end of its own turn
+   696→   696→    if (st.voodooTurns[st.turn] > 0) st.voodooTurns[st.turn] -= 1;
+   697→   697→    st.mustShoot = false;
+   698→   698→    st.usedRerollThisTurn = false;
+   699→   699→
+   700→   700→    let next: Side = opponentOf(st.turn);
+   701→   701→    // skips from cuffs
+   702→   702→    if (next === "enemy" && st.enemySkipTurns > 0) {
+   703→   703→      st.enemySkipTurns -= 1;
+   704→   704→      next = "player";
+   705→   705→    } else if (next === "player" && st.playerSkipTurns > 0) {
+   706→   706→      st.playerSkipTurns -= 1;
+   707→   707→      next = "enemy";
+   708→   708→    }
+   709→   709→    st.turn = next;
+   710→   710→    return next;
+   711→   711→  }
+   712→   712→
+   713→   713→  /** Called when a new turn starts: tick the owner's skill cooldowns down,
+   714→   714→   *  tick the fog-of-war countdown, and maybe make the enemy misremember. */
+   715→   715→  startTurnTick() {
+   716→   716→    const st = this.state;
+   717→   717→    const sks = st.turn === "player" ? st.skills : st.enemySkills;
+   718→   718→    for (const id of Object.keys(sks) as SkillId[]) {
+   719→   719→      if (sks[id].cooldown > 0) sks[id].cooldown -= 1;
+   720→   720→    }
+   721→   721→    if (st.countdown > 0) st.countdown -= 1;
+   722→   722→    this.lastSlip = false;
+   723→   723→    // FOG OF WAR: once the board has faded, the enemy runs on real memory —
+   724→   724→    // and on lower difficulties it sometimes loses count.
+   725→   725→    if (st.turn === "enemy" && st.countdown <= 0 && st.cylinder.length > 0) {
+   726→   726→      const slip = st.difficulty === "easy" ? 0.25 : st.difficulty === "normal" ? 0.08 : 0;
+   727→   727→      if (Math.random() < slip) {
+   728→   728→        const dir = Math.random() < 0.5 ? -1 : 1;
+   729→   729→        this.aiMem.live = Math.min(Math.max(0, this.aiMem.live + dir), Math.max(0, this.aiMem.total));
+   730→   730→        this.lastSlip = true;
+   731→   731→      }
+   732→   732→    }
+   733→   733→  }
+   734→   734→
+   735→   735→  setPhase(p: Phase) {
+   736→   736→    this.state.phase = p;
+   737→   737→  }
+   738→   738→}
+   739→   739→
+   740→   740→export const SKILL_POOL: SkillId[] = [
+   741→   741→  "reroll",
+   742→   742→  "voodoo",
+   743→   743→  "peek",
+   744→   744→  "eject",
+   745→   745→  "coffee",
+   746→   746→  "cuffs",
+   747→   747→  "phoenix",
+   748→   748→  "thirdEye",
+   749→   749→];
+   750→   750→
+   751→   751→/* ---------------- AI ---------------- */
+   752→   752→
+   753→   753→export interface AIDecision {
+   754→   754→  kind: "skill" | "shoot";
+   755→   755→  skill?: SkillId;
+   756→   756→  target?: Side;
+   757→   757→}
+   758→   758→
+   759→   759→/** The enemy brain. `smart` 0..1 scales with difficulty.
+   760→   760→ *  NORMAL (0.8) and INSANE (0.95) genuinely play their skills and reason
+   761→   761→ *  about the odds; EASY (0.55) is sloppy and forgetful. */
+   762→   762→export class EnemyAI {
+   763→   763→  constructor(private logic: RouletteLogic, public smart: number) {}
+   764→   764→
+   765→   765→  /** Probability the current shell is live, from the AI's REAL memory only. */
+   766→   766→  private pLiveBelief(): number {
+   767→   767→    const mem = this.logic.aiMem;
+   768→   768→    return mem.total > 0 ? Math.min(1, Math.max(0, mem.live / mem.total)) : 0;
+   769→   769→  }
+   770→   770→
+   771→   771→  /** One AI step: use 1 skill OR shoot. */
+   772→   772→  decide(): AIDecision {
+   773→   773→    const st = this.logic.state;
+   774→   774→    const sk = st.enemySkills;
+   775→   775→    const hp = st.hp.enemy;
+   776→   776→    const playerHp = st.hp.player;
+   777→   777→    const known = this.logic.aiKnown;
+   778→   778→    const total = this.logic.aiMem.total;
+   779→   779→    const ownVoodoo = st.voodooTurns.enemy > 0;
+   780→   780→    const playerVoodoo = st.voodooTurns.player > 0;
+   781→   781→    const rng = Math.random();
+   782→   782→    const smart = this.smart;
+   783→   783→    const eager = smart >= 0.75; // NORMAL & INSANE actually play their cards
+   784→   784→
+   785→   785→    // While its OWN voodoo is up, shooting yourself is pure profit:
+   786→   786→    // a live shell reflects into the player, a blank pays a free shot.
+   787→   787→    if (ownVoodoo && total > 0) return { kind: "shoot", target: "enemy" };
+   788→   788→
+   789→   789→    // 1. Coffee when dying
+   790→   790→    if (sk.coffee.owned && sk.coffee.charges > 0 && hp <= 2 && rng < 0.6 + smart * 0.4 && this.logic.canUseSkill("enemy", "coffee")) {
+   791→   791→      return { kind: "skill", skill: "coffee" };
+   792→   792→    }
+   793→   793→
+   794→   794→    // 2. Voodoo — cast it EARLY, before the violence starts: while cursed the
+   795→   795→    //    enemy can self-fish risk-free and every hit on it crawls back.
+   796→   796→    if (
+   797→   797→      sk.voodoo.owned &&
+   798→   798→      sk.voodoo.charges > 0 &&
+   799→   799→      st.voodooTurns.enemy === 0 &&
+   800→   800→      (hp <= 2 || (total >= 2 && playerHp >= 2 && rng < 0.25 + smart * 0.45)) &&
+   801→   801→      this.logic.canUseSkill("enemy", "voodoo")
+   802→   802→    ) {
+   803→   803→      return { kind: "skill", skill: "voodoo" };
+   804→   804→    }
+   805→   805→
+   806→   806→    // 3. Peek when unsure — the eager brain inspects almost every chance it gets.
+   807→   807→    if (
+   808→   808→      known === null &&
+   809→   809→      sk.peek.owned &&
+   810→   810→      sk.peek.cooldown === 0 &&
+   811→   811→      total >= 2 &&
+   812→   812→      this.logic.canUseSkill("enemy", "peek") &&
+   813→   813→      rng < (eager ? 0.92 : 0.35) &&
+   814→   814→      ((this.pLiveBelief() > 0.15 && this.pLiveBelief() < 0.92) || playerVoodoo)
+   815→   815→    ) {
+   816→   816→      return { kind: "skill", skill: "peek" };
+   817→   817→    }
+   818→   818→
+   819→   819→    // 4. A known live shell is only a liability when firing it feeds the
+   820→   820→    //    player's curse: eject it (an empty cylinder forces a fresh reload).
+   821→   821→    if (
+   822→   822→      known === "live" &&
+   823→   823→      playerVoodoo &&
+   824→   824→      !ownVoodoo &&
+   825→   825→      sk.eject.owned &&
+   826→   826→      sk.eject.cooldown === 0 &&
+   827→   827→      this.logic.canUseSkill("enemy", "eject") &&
+   828→   828→      rng < 0.55 + smart * 0.45
+   829→   829→    ) {
+   830→   830→      return { kind: "skill", skill: "eject" };
+   831→   831→    }
+   832→   832→
+   833→   833→    // 5. Reroll a known BLANK when the magazine is live-heavy — spin for blood.
+   834→   834→    if (
+   835→   835→      known === "blank" &&
+   836→   836→      sk.reroll.owned &&
+   837→   837→      sk.reroll.cooldown === 0 &&
+   838→   838→      !st.usedRerollThisTurn &&
+   839→   839→      total >= 2 &&
+   840→   840→      this.pLiveBelief() >= 0.4 &&
+   841→   841→      this.logic.canUseSkill("enemy", "reroll") &&
+   842→   842→      rng < 0.25 + smart * 0.55
+   843→   843→    ) {
+   844→   844→      return { kind: "skill", skill: "reroll" };
+   845→   845→    }
+   846→   846→
+   847→   847→    // 5b. Same when the shell is live but the player's curse blocks firing it
+   848→   848→    //     and no eject is available.
+   849→   849→    if (
+   850→   850→      known === "live" &&
+   851→   851→      playerVoodoo &&
+   852→   852→      !ownVoodoo &&
+   853→   853→      !sk.eject.owned &&
+   854→   854→      sk.reroll.owned &&
+   855→   855→      sk.reroll.cooldown === 0 &&
+   856→   856→      !st.usedRerollThisTurn &&
+   857→   857→      this.logic.canUseSkill("enemy", "reroll") &&
+   858→   858→      rng < 0.5 + smart * 0.5
+   859→   859→    ) {
+   860→   860→      return { kind: "skill", skill: "reroll" };
+   861→   861→    }
+   862→   862→
+   863→   863→    // 6. Cuffs to hold down a strong player
+   864→   864→    if (
+   865→   865→      sk.cuffs.owned &&
+   866→   866→      sk.cuffs.charges > 0 &&
+   867→   867→      this.logic.canUseSkill("enemy", "cuffs") &&
+   868→   868→      ((playerHp <= 2 && rng < 0.5 + smart * 0.4) ||
+   869→   869→        (hp === 1 && rng < 0.85) ||
+   870→   870→        (eager && playerHp <= 3 && hp <= 3 && this.pLiveBelief() >= 0.5 && rng < 0.3))
+   871→   871→    ) {
+   872→   872→      return { kind: "skill", skill: "cuffs" };
+   873→   873→    }
+   874→   874→
+   875→   875→    // 7. Shooting decision
+   876→   876→    const pRaw = known !== null ? (known === "live" ? 1 : 0) : this.pLiveBelief();
+   877→   877→    // the weaker brain misjudges the odds more
+   878→   878→    const p = Math.min(1, Math.max(0, pRaw + (Math.random() - 0.5) * 2 * (1 - smart) * 0.25));
+   879→   879→
+   880→   880→    if (known === "live") {
+   881→   881→      // the player's curse makes any shot at them self-harm — bite the bullet
+   882→   882→      return { kind: "shoot", target: playerVoodoo && !ownVoodoo ? "enemy" : "player" };
+   883→   883→    }
+   884→   884→    if (known === "blank") {
+   885→   885→      // self-shot blank = one free shot at the player (when shells remain)
+   886→   886→      return total >= 2 ? { kind: "shoot", target: "enemy" } : { kind: "shoot", target: "player" };
+   887→   887→    }
+   888→   888→
+   889→   889→    // unknown shell: a healthy Dealer gambles on the free-shot fish; a hurt
+   890→   890→    // one plays it straight. hp >= 4 relative to the player's = brave.
+   891→   891→    const brave = hp - playerHp >= 1 || hp >= 4;
+   892→   892→    if (p >= 0.5) return { kind: "shoot", target: "player" };
+   893→   893→    if (p <= (brave ? 0.45 : 0.3) && total >= 2 && hp >= 2) return { kind: "shoot", target: "enemy" };
+   894→   894→    return { kind: "shoot", target: "player" };
+   895→   895→  }
+   896→   896→}
+   897→   897→

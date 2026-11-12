@@ -4,9 +4,10 @@
  * GameShell — React layer for ROULTEEMATE.
  * Mounts the engine (Three.js) plus all doodle overlays: the animated
  * main menu (title top-left, 3 buttons bottom-left), settings (incl.
- * language & mutators), the CUSTOM TABLE popup, HP, shell counter,
- * skill bar, toasts, banner, rules, win/lose screens, coin flip and
- * rewind 2D overlays, and the low-HP blood vignette.
+ * language & mutators), the CUSTOM TABLE popup (ENGINE C code editor),
+ * HP, shell counter, skill bar (separate slots per duplicate), toasts,
+ * banner, rules, win/lose screens, the REWIND 2D overlay and the low-HP
+ * blood vignette. The GAMBLE coin is fully 3D inside the scene.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -18,7 +19,6 @@ import {
   SKILL_META,
   dataURL,
   texBulletPip,
-  texCoin,
   texDiffIcon,
   texHeart,
   texSkillIcon,
@@ -28,7 +28,7 @@ import {
 } from "@/game/doodle";
 import { setLang, t, type Lang } from "@/game/i18n";
 import { mutDefaultsFor, type MutConfig } from "@/game/mutator";
-import { parseScript } from "@/game/script";
+import { compileScript } from "@/game/script";
 import type { Difficulty } from "@/game/logic";
 import type { ShellType } from "@/game/logic";
 import { gameAudio } from "@/game/audio";
@@ -97,44 +97,39 @@ const fmtTime = (ms: number) => {
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 };
 
-const SYNTAX_HELP = `# variable (int / float / string)
-shots = 0
-ratio = 2.5
-mood = "angry"
+const SYNTAX_HELP = `ENGINE C — your script is COMPILED TO WEBASSEMBLY
+and executed natively by the browser. Not a JS interpreter.
 
-# condition + command
-if hp dealer <= 2 run skill cuffs to player
-if hp player == 3 {
-  heal player 1
-} else {
-  damage dealer 1
-}
+// globals (int / float) — shared by every hook
+int bonus = 0;
+float scale = 1.5;
 
-# loop (negative = infinite, needs break)
-repeat 3 heal player 1
-repeat -1 {
-  if hp dealer <= 2 {
-    run skill coffee to dealer
-    break
-  }
-  add shots 1
-}
+// event hooks
+every (setup)               { ... }  // once, at table start
+every (turn)                { ... }  // any turn starts
+every (round)               { ... }  // new round after a reload
+every (hit)                 { ... }  // any trigger pull
+every (player_take_damage)  { ... }
+every (dealer_take_damage)  { ... }
+every (skill)               { ... }  // any skill used
 
-# events
-every hit { ... }
-every player take damage { ... }
-every dealer take damage { ... }
-every skill cuffs used { ... }
-every skill all used { ... }
-every turn { ... }
-every round { ... }
+// statements
+if (hp(DEALER) <= 2) { run_skill("cuffs", DEALER); }
+else { heal(PLAYER, 1); }
+while (hp(PLAYER) < 5) { heal(PLAYER, 1); break; }
+repeat (3) { damage(DEALER, 1); }      // repeat (0) or (-2) = infinite
+bonus += 1;   bonus -= 1;   bonus = bonus * 2 + 1;
 
-# commands
-run skill <name|all> to <player|dealer>
-heal <player|dealer> <n>
-damage <player|dealer> <n>
-set <var> = <value>   ·  add <var> <n>  ·  sub <var> <n>
-print <text|var>      ·  break`;
+// builtins
+heal(PLAYER | DEALER, n)      damage(PLAYER | DEALER, n)
+run_skill("cuffs", PLAYER | DEALER)   // any skill id works
+hp(PLAYER | DEALER)   score()   round()   rand(n)   last_skill()
+print(x)   print("text")   say("text")
+
+// constants: PLAYER = 0, DEALER = 1,
+// SKILL_REROLL SKILL_VOODOO SKILL_PEEK SKILL_EJECT SKILL_COFFEE
+// SKILL_CUFFS SKILL_PHOENIX SKILL_THIRDEYE SKILL_REWIND SKILL_GAMBLE
+// last_skill() == SKILL_GAMBLE fires inside every (skill) { ... }`;
 
 export default function GameShell() {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -155,8 +150,7 @@ export default function GameShell() {
   const [revealQueue, setRevealQueue] = useState<(ShellType | null)[] | null>(null);
   const [times, setTimes] = useState<{ roundMs: number; totalMs: number }>({ roundMs: 0, totalMs: 0 });
   const [shopTip, setShopTip] = useState<{ id: SkillId | "bell"; xPct: number; yPct: number } | null>(null);
-  /* 2D overlays: GAMBLE coin flip + REWIND un-shot */
-  const [coin, setCoin] = useState<"spin" | "win" | "lose" | null>(null);
+  /* 2D overlay: REWIND un-shot (the GAMBLE coin is fully 3D in the scene) */
   const [rewinding, setRewinding] = useState(false);
 
   /* ---------- MAIN MENU screens ---------- */
@@ -167,9 +161,12 @@ export default function GameShell() {
   /* ---------- MUTATOR popup ---------- */
   const [mutOpen, setMutOpen] = useState(false);
   const [mutCfg, setMutCfg] = useState<MutConfig | null>(null);
-  const [ruleText, setRuleText] = useState("");
-  const [ruleErrors, setRuleErrors] = useState<string[]>([]);
   const [showSyntax, setShowSyntax] = useState(false);
+  /** live ENGINE C compile of the code in the editor */
+  const compiled = useMemo(
+    () => compileScript(mutCfg?.rules ?? ""),
+    [mutCfg?.rules],
+  );
   /* ---------- FPS meter ---------- */
   const [fps, setFps] = useState(0);
 
@@ -237,8 +234,6 @@ export default function GameShell() {
       diffNormal: dataURL("diff-normal", texDiffIcon("normal")),
       diffInsane: dataURL("diff-insane", texDiffIcon("insane")),
       diffEndless: dataURL("diff-endless", texDiffIcon("endless")),
-      coinHeads: dataURL("coin-heads", texCoin("heads")),
-      coinTails: dataURL("coin-tails", texCoin("tails")),
     };
   }, [ready]);
 
@@ -308,12 +303,6 @@ export default function GameShell() {
       case "shopTip":
         setShopTip(e.id ? { id: e.id, xPct: e.xPct, yPct: e.yPct } : null);
         break;
-      case "coinFlip":
-        // pure 2D doodle animation: coin spins, lands, result stamp
-        setCoin("spin");
-        setTimeout(() => setCoin(e.win ? "win" : "lose"), 1500);
-        setTimeout(() => setCoin(null), 2500);
-        break;
       case "rewindFx":
         setRewinding(true);
         setTimeout(() => setRewinding(false), 1500);
@@ -367,9 +356,9 @@ export default function GameShell() {
       else if (k === "h") setShowHelp((v) => !v);
       else if (k === "m") toggleMute();
       else if (/^[1-4]$/.test(k)) {
-        const owned = snap.skills.filter((s) => s.owned && s.ghostTurns <= 0);
+        const owned = snap.skills.filter((s) => s.ghostTurns <= 0);
         const target = owned[parseInt(k) - 1];
-        if (target) void eng.playerUseSkill(target.id);
+        if (target) void eng.playerUseSkill(target.uid);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -388,25 +377,11 @@ export default function GameShell() {
 
   /* ---------- mutator helpers ---------- */
   const openMutator = useCallback(() => {
-    setMutCfg(mutDefaultsFor(baseDiffOf(diff), modeOf(diff) as "standard" | "endless", ALL_SKILL_IDS));
-    setRuleText("");
-    setRuleErrors([]);
+    // keep whatever the player already configured (rules survive reopening);
+    // first open starts from the table's defaults
+    setMutCfg((prev) => prev ?? mutDefaultsFor(baseDiffOf(diff), modeOf(diff) as "standard" | "endless", ALL_SKILL_IDS));
     setMutOpen(true);
   }, [diff]);
-
-  const addRule = () => {
-    const src = ruleText.trim();
-    if (!src) return;
-    const res = parseScript(src);
-    if (res.errors.length) {
-      setRuleErrors(res.errors.slice(0, 5));
-      return;
-    }
-    setRuleErrors([]);
-    setMutCfg((c) => (c ? { ...c, rules: [...c.rules, src] } : c));
-    setRuleText("");
-    gameAudio.stamp();
-  };
 
   const togglePoolCard = (id: SkillId) => {
     setMutCfg((c) => {
@@ -429,6 +404,7 @@ export default function GameShell() {
 
   const launchCustomTable = () => {
     if (!mutCfg) return;
+    if (!compiled.ok) return; // never sit down with a broken script
     gameAudio.ensure();
     gameAudio.click();
     setMutOpen(false);
@@ -703,15 +679,16 @@ export default function GameShell() {
             </div>
           )}
 
-          {/* skill bar (dice skills + shop trials; spent trials dissolve away) */}
+          {/* skill bar — each slot is its OWN entry: duplicates appear twice,
+              each with its own charges & cooldown counter */}
           <div className="absolute bottom-[104px] left-1/2 z-30 flex -translate-x-1/2 items-end gap-1.5 sm:bottom-3 sm:gap-2">
             {snap.skills
-              .filter((s) => s.owned)
+              .filter((s) => s.ghostTurns > 0 || s.charges !== 0 || s.cooldown > 0 || !s.trial)
               .map((s, idx) => {
                 const ghost = s.ghostTurns > 0;
                 return (
                   <button
-                    key={s.id}
+                    key={s.uid}
                     className={`doodle-btn relative flex h-16 w-16 flex-col items-center justify-center gap-0.5 sm:h-[74px] sm:w-[74px] ${
                       ghost ? "ghost-skill" : s.usable ? "" : "opacity-60"
                     }`}
@@ -725,7 +702,7 @@ export default function GameShell() {
                         : undefined
                     }
                     disabled={!s.usable || ghost}
-                    onClick={() => void engineRef.current?.playerUseSkill(s.id)}
+                    onClick={() => void engineRef.current?.playerUseSkill(s.uid)}
                     title={SKILL_META[s.id].desc}
                   >
                     <img src={s.icon} alt={s.id} className="h-8 w-8 sm:h-9 sm:w-9" />
@@ -860,29 +837,8 @@ export default function GameShell() {
         )}
       </div>
 
-      {/* GAMBLE: the 2D coin flip */}
-      <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
-        {assets && coin && (
-          <div className="pop-in flex flex-col items-center gap-3">
-            <div className="coin-wrap">
-              <img
-                src={coin === "lose" ? assets.coinTails : assets.coinHeads}
-                alt="coin"
-                className={`h-44 w-44 ${coin === "spin" ? "coin-spinning" : "coin-landed"}`}
-              />
-            </div>
-            {coin !== "spin" && (
-              <div
-                className={`stamp-in doodle-box px-6 py-2 font-marker text-3xl rotate-[-2deg] ${
-                  coin === "win" ? "text-[#3f6b3d]" : "text-[#8f2418]"
-                }`}
-              >
-                {coin === "win" ? t("heads") : t("tails")}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+      {/* GAMBLE: the coin is now a REAL semi-3D object inside the scene —
+          no 2D overlay anymore. The result is shown via toasts + HP pops. */}
 
       {/* REWIND: the 2D un-shot (tape arrows + shell crawling back) */}
       <div className="pointer-events-none absolute inset-0 z-40 overflow-hidden">
@@ -1337,71 +1293,66 @@ export default function GameShell() {
                   </button>
                 </div>
 
-                {/* custom rules */}
+                {/* custom rules — one ENGINE C program, compiled live */}
                 <div className="mt-4">
                   <div className="flex items-center justify-between">
-                    <div className="font-marker text-lg">{t("mutRules")}</div>
+                    <div>
+                      <div className="font-marker text-lg">{t("mutRules")}</div>
+                      <div className="font-hand-sc text-[11px] text-[#4a4036]">{t("mutEngineCSub")}</div>
+                    </div>
                     <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs" onClick={() => setShowSyntax((v) => !v)}>
                       {t("mutSyntaxTitle")} {showSyntax ? "▲" : "▼"}
                     </button>
                   </div>
                   {showSyntax && (
-                    <pre className="expand-in mt-1 max-h-44 overflow-auto rounded-lg border-2 border-[#221a12]/30 bg-[#efe7d2] p-2 font-mono text-[11px] leading-tight text-[#221a12]">
+                    <pre className="expand-in mt-1 max-h-52 overflow-auto rounded-lg border-2 border-[#221a12]/30 bg-[#efe7d2] p-2 font-mono text-[11px] leading-tight text-[#221a12]">
                       {SYNTAX_HELP}
                     </pre>
                   )}
                   <textarea
-                    value={ruleText}
-                    onChange={(e) => setRuleText(e.target.value)}
+                    value={mutCfg.rules}
+                    onChange={(e) => setMutCfg({ ...mutCfg, rules: e.target.value })}
                     placeholder={t("mutRulePh")}
                     spellCheck={false}
-                    className="doodle-box mt-2 h-28 w-full resize-y bg-[#efe7d2] p-2 font-mono text-[13px] leading-snug"
+                    className="doodle-box mt-2 h-56 w-full resize-y bg-[#efe7d2] p-2 font-mono text-[12px] leading-snug"
                   />
-                  {ruleErrors.length > 0 && (
-                    <div className="mt-1 font-hand-sc text-xs text-[#8f2418]">
-                      {ruleErrors.map((e, i) => (
+                  {/* live compile status */}
+                  {compiled.ok ? (
+                    <div className="mt-1.5 font-hand-sc text-xs text-[#3f6b3d]">
+                      {compiled.hooks.length
+                        ? t("mutCompileOk", { a: compiled.hooks.join(", ") })
+                        : t("mutHookNone")}
+                    </div>
+                  ) : (
+                    <div className="mt-1.5 font-hand-sc text-xs text-[#8f2418]">
+                      {compiled.errors.slice(0, 5).map((e, i) => (
                         <div key={i}>{e}</div>
                       ))}
                     </div>
                   )}
-                  <div className="mt-1.5 flex items-center gap-2">
-                    <button className="doodle-btn px-3 py-1 font-marker text-sm" onClick={addRule}>
-                      + {t("mutAddRule")}
+                  {mutCfg.rules.trim() && compiled.ok && (
+                    <button
+                      className="doodle-btn mt-1.5 px-3 py-0.5 font-hand-sc text-xs"
+                      onClick={() => {
+                        setMutCfg({ ...mutCfg, rules: "" });
+                        gameAudio.click();
+                      }}
+                    >
+                      {t("mutClearAll")}
                     </button>
-                    {mutCfg.rules.length > 0 && (
-                      <button
-                        className="doodle-btn px-3 py-1 font-hand-sc text-sm"
-                        onClick={() => setMutCfg({ ...mutCfg, rules: [] })}
-                      >
-                        {t("mutClearAll")}
-                      </button>
-                    )}
-                    <span className="font-hand-sc text-xs text-[#4a4036]">
-                      {mutCfg.rules.length ? `${mutCfg.rules.length} ${t("mutRuleCount")}` : t("mutNoRules")}
-                    </span>
-                  </div>
-                  {mutCfg.rules.length > 0 && (
-                    <div className="mt-1.5 flex flex-col gap-1">
-                      {mutCfg.rules.map((r, i) => (
-                        <div key={i} className="flex items-center gap-2 rounded-lg border-2 border-[#221a12]/20 bg-[#efe7d2] px-2 py-1">
-                          <span className="font-marker text-sm text-[#8f5bd4]">#{i + 1}</span>
-                          <code className="flex-1 truncate font-mono text-[11px]">{r.split("\n")[0]}</code>
-                          <button
-                            className="doodle-btn px-1.5 py-0.5 font-hand-sc text-[11px]"
-                            onClick={() => setMutCfg({ ...mutCfg, rules: mutCfg.rules.filter((_, k) => k !== i) })}
-                          >
-                            X
-                          </button>
-                        </div>
-                      ))}
-                    </div>
                   )}
                 </div>
 
                 <div className="mt-5 flex flex-col items-center gap-1.5">
-                  <button className="doodle-btn doodle-red px-10 py-3 font-marker text-2xl menu-btn" onClick={launchCustomTable}>
+                  <button
+                    className={`doodle-btn doodle-red px-10 py-3 font-marker text-2xl menu-btn ${compiled.ok ? "" : "opacity-50"}`}
+                    disabled={!compiled.ok}
+                    title={compiled.ok ? undefined : t("mutParseErr")}
+                    onClick={launchCustomTable}
+                  >
                     {t("mutStartBtn")}
                   </button>
+                  {!compiled.ok && <div className="font-hand-sc text-xs text-[#8f2418]">{t("mutParseErr")}</div>}
                 </div>
               </div>
             </div>

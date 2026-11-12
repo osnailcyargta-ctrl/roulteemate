@@ -18,6 +18,7 @@ import {
   type ShotOutcome,
   type Side,
   type SkillOutcome,
+  type SkillSlot,
   type ShellType,
 } from "./logic";
 import {
@@ -35,14 +36,14 @@ import { gameAudio } from "./audio";
 import { pick } from "./taunts";
 import { t } from "./i18n";
 import { MUT_DEFAULTS, type MutConfig } from "./mutator";
-import { ScriptRuntime, parseScript, type Program, type ScriptEvent } from "./script";
+import { compileScript, ScriptRuntime, type ScriptEventName, type ScriptHost } from "./script";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 
 export interface HudSkillSlot {
+  uid: number; // one inventory slot — duplicates are SEPARATE slots
   id: SkillId;
-  owned: boolean;
   charges: number;
   cooldown: number;
   usable: boolean;
@@ -92,7 +93,6 @@ export type HudEvent =
   | { type: "skillFlash"; id: SkillId }
   | { type: "reloadStep"; loaded: number; total: number }
   | { type: "shopTip"; id: SkillId | "bell" | null; xPct: number; yPct: number }
-  | { type: "coinFlip"; win: boolean }
   | { type: "rewindFx" };
 
 const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.95 };
@@ -157,7 +157,7 @@ export class GameEngine {
   private shopOffers: ShopOffer[] = [];
   private hoverId: SkillId | "bell" | null = null;
   /** Trial skills that were spent and are now fading away (2 turns). */
-  private ghosts: { id: SkillId; turns: number }[] = [];
+  private ghosts: { uid: number; id: SkillId; turns: number }[] = [];
   private shopResolve: (() => void) | null = null;
   private tStart = 0;
   private tRoundStart = 0;
@@ -212,19 +212,16 @@ export class GameEngine {
       countdown: st.countdown,
       countsPublic: this.logic.countsPublic,
       turn: st.phase === "playerTurn" ? "player" : st.phase === "enemyTurn" ? "enemy" : null,
-      skills: ALL_SKILL_IDS.map((id) => {
-        const sk = st.skills[id];
-        return {
-          id,
-          owned: sk.owned,
-          charges: sk.charges,
-          cooldown: sk.cooldown,
-          usable: this.logic.canUseSkill("player", id) && !this.busy,
-          icon: dataURL(`icon-${id}`, texSkillIcon(id)),
-          trial: !!sk.trial,
-          ghostTurns: this.ghosts.find((g) => g.id === id)?.turns ?? 0,
-        };
-      }),
+      skills: st.skills.map((slot) => ({
+        uid: slot.uid,
+        id: slot.id,
+        charges: slot.charges,
+        cooldown: slot.cooldown,
+        usable: this.logic.canUseSkill("player", slot.uid) && !this.busy,
+        icon: dataURL(`icon-${slot.id}`, texSkillIcon(slot.id)),
+        trial: !!slot.trial,
+        ghostTurns: this.ghosts.find((g) => g.uid === slot.uid)?.turns ?? 0,
+      })),
       enemySkills: SKILL_IDS.filter((id) => st.enemySkills[id].owned).map((id) => ({
         id,
         icon: dataURL(`icon-${id}`, texSkillIcon(id)),
@@ -291,14 +288,14 @@ export class GameEngine {
 
   /* ---------------- main flow ---------------- */
 
-  /** Which cards are legally available on THIS table?
-   *  EPIC needs NORMAL or above; LEGEND needs INSANE / ENDLESS AND the
-   *  allow-legend switch. The mutator card pool gates everything further. */
+  /** The SHOP pool for this table. EPIC cards live here ONLY — and only on
+   *  NORMAL and above. LEGEND needs INSANE / ENDLESS (+ the allow-legend
+   *  switch). The mutator card pool gates everything further. */
   private poolFor(diff: Difficulty, mode: Mode): SkillId[] {
     const mut = this.mut;
     let pool = ALL_SKILL_IDS;
     if (mut) pool = pool.filter((id) => mut.pool.includes(id));
-    const epicOk = diff !== "easy";
+    const epicOk = diff !== "easy"; // EPIC: shop-only, NORMAL+
     const legendOk = (diff === "insane" || mode === "endless") && (mut ? mut.allowLegend : true);
     return pool.filter((id) => {
       const r = RARITY[id];
@@ -308,18 +305,23 @@ export class GameEngine {
     });
   }
 
-  /** The dice pool: legends are NEVER rolled (shop only). */
+  /** The DICE pool: strictly BASE cards. The dice NEVER hands out EPIC or
+   *  LEGEND — epic cards are bought in the shop on NORMAL+ tables only. */
   private dicePool(): SkillId[] {
     return this.poolFor(
       this.logic.state.difficulty,
       this.logic.state.mode,
-    ).filter((id) => RARITY[id] !== "legend");
+    ).filter((id) => RARITY[id] === "base");
   }
 
-  /** Draw n skills from the pool; duplicates allowed stack charges instead. */
+  /** Draw n skills from the pool. The DEALER keeps the stacking record;
+   *  the player's dice grants go through diceIntro (which manages slots). */
   private drawSkills(side: Side, pool: SkillId[], n: number) {
     const allowDup = this.mut?.allowDup ?? false;
-    const bag = allowDup ? pool : pool.filter((id) => !this.logic.state[side === "player" ? "skills" : "enemySkills"][id].owned);
+    const st = this.logic.state;
+    const bag = allowDup
+      ? pool
+      : pool.filter((id) => !st.enemySkills[id].owned || side === "player");
     const src = bag.length ? bag : pool;
     for (let k = 0; k < n; k++) {
       const id = src[Math.floor(Math.random() * src.length)];
@@ -353,7 +355,7 @@ export class GameEngine {
       this.logic = new RouletteLogic(baseDiff, mode);
     }
     this.ai = new EnemyAI(this.logic, SMART[this.mut?.ai ?? baseDiff]);
-    this.setupScripts();
+    await this.setupScripts();
     this.scene.clearSpentShells();
     this.scene.dealerCuffed(false);
     this.scene.dollyHome();
@@ -372,25 +374,17 @@ export class GameEngine {
     await this.playerTurnStart();
   }
 
-  /** Compile the mutator's custom-effect scripts and wire their hooks. */
-  private setupScripts() {
-    const rules = this.mut?.rules ?? [];
+  /** Compile the mutator's ENGINE C program to WebAssembly and wire it up.
+   *  The script runs NATIVELY in the browser's WASM engine — not in JS. */
+  private async setupScripts() {
+    const src = this.mut?.rules ?? "";
     this.script = null;
-    if (!rules.length) return;
-    let program: Program | null = null;
-    const errors: string[] = [];
-    for (const src of rules) {
-      const res = parseScript(src);
-      errors.push(...res.errors);
-      if (res.errors.length) continue;
-      if (!program) program = { setup: [], handlers: [] };
-      program.setup.push(...res.program.setup);
-      program.handlers.push(...res.program.handlers);
-    }
-    for (const e of errors.slice(0, 4)) this.toast(`[rule] ${e}`, "bad");
-    if (!program) return;
-    const rt = new ScriptRuntime(program, {
-      runSkill: (id, target) => this.forceSkillFx(id, target),
+    if (!src.trim()) return;
+    const compiled = compileScript(src);
+    for (const e of compiled.errors.slice(0, 4)) this.toast(`[ENGINE C] ${e}`, "bad");
+    if (!compiled.ok || !compiled.bytes) return;
+    const host: ScriptHost = {
+      runSkill: (id, target) => void this.forceSkillFx(id, target),
       heal: (side, n) => {
         const did = this.logic.healSide(side, n);
         if (did) this.onEvent({ type: "dmgPop", side, text: `+${n} HP`, tone: "reflect" });
@@ -408,10 +402,19 @@ export class GameEngine {
         }
       },
       say: (text) => this.toast(text, "info"),
-    });
-    rt.stateRef = () => ({ hp: this.logic.state.hp, score: this.logic.state.score, round: this.logic.state.round });
-    this.script = rt;
-    rt.setup();
+      stateRef: () => ({
+        hp: this.logic.state.hp,
+        score: this.logic.state.score,
+        round: this.logic.state.round,
+      }),
+    };
+    try {
+      this.script = await ScriptRuntime.instantiate(compiled.bytes, host, (msg) => this.toast(msg, "bad"));
+    } catch (e) {
+      this.toast(`[ENGINE C] ${(e as Error).message}`, "bad");
+      return;
+    }
+    this.script.fire("setup");
     if (this.logic.state.hp.player <= 0) {
       // a setup rule killed the player before the first round — mercy: undo it
       this.logic.state.hp.player = 1;
@@ -420,7 +423,7 @@ export class GameEngine {
   }
 
   /** Fire a custom-rule event (best-effort; scripts may never crash the game). */
-  private fireScript(event: ScriptEvent, ctx: { skill?: SkillId; side?: Side } = {}) {
+  private fireScript(event: ScriptEventName, ctx: { skill?: SkillId } = {}) {
     try {
       this.script?.fire(event, ctx);
     } catch {
@@ -470,10 +473,25 @@ export class GameEngine {
         gameAudio.ejectShell();
         this.toast(`CUSTOM RULE: ${label} — a shell is tossed!`, "info");
         break;
-      case "gamble":
-        this.onEvent({ type: "coinFlip", win: Math.random() < 0.5 });
+      case "gamble": {
+        // the REAL semi-3D coin: tossed up from the table, lands on the face
+        // the script rolled — then the effect applies.
+        const win = Math.random() < 0.5;
         this.toast(`CUSTOM RULE: ${label} — a coin flips!`, "info");
+        await this.scene.coinTossFX(win);
+        this.logic.forceSkill("gamble", target, { win });
+        if (target === "player") {
+          if (win) {
+            gameAudio.heal();
+            this.onEvent({ type: "dmgPop", side: "player", text: "+1 HP", tone: "reflect" });
+          } else {
+            gameAudio.hitPlayer();
+            this.scene.addTrauma(0.5);
+            this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
+          }
+        }
         break;
+      }
       default:
         this.toast(`CUSTOM RULE: ${label} fires!`, "info");
     }
@@ -531,9 +549,14 @@ export class GameEngine {
 
     const pool = this.dicePool();
     const nPlayer = Math.max(0, Math.min(6, this.mut?.skillsPlayer ?? 2));
+    // duplicates are only handed out when the mutator allows them —
+    // and every grant (even a duplicate) becomes its OWN slot
+    const allowDup = this.mut?.allowDup ?? false;
+    let bag = pool.filter((id) => allowDup || !this.logic.playerSlot(id));
+    if (!bag.length) bag = [...pool];
     const granted: SkillId[] = [];
     for (let k = 0; k < nPlayer; k++) {
-      granted.push(pool[Math.floor(Math.random() * pool.length)]);
+      granted.push(bag[Math.floor(Math.random() * bag.length)]);
     }
 
     this.scene.diceVisible(true);
@@ -671,7 +694,7 @@ export class GameEngine {
     const wasPublic = this.logic.state.countdown > 0;
     this.logic.setPhase("playerTurn");
     this.logic.startTurnTick();
-    this.fireScript("turn", { side: "player" });
+    this.fireScript("turn");
     if (wasPublic && this.logic.state.countdown <= 0 && this.logic.state.cylinder.length > 0) {
       this.toast(t("boardFaded"), "bad");
       gameAudio.ghostFade();
@@ -710,26 +733,54 @@ export class GameEngine {
     await this.afterShot("player", res);
   }
 
-  async playerUseSkill(id: SkillId) {
+  async playerUseSkill(uid: number) {
     const st = this.logic.state;
     if (this.busy || st.phase !== "playerTurn" || st.turn !== "player") return;
-    if (!this.logic.canUseSkill("player", id)) return;
+    const slot = this.logic.playerSlot(uid);
+    if (!slot) return;
+    if (!this.logic.canUseSkill("player", uid)) return;
     this.busy = true;
     this.notify();
 
-    const oc = this.logic.useSkill("player", id);
-    if (!oc.ok) {
-      this.busy = false;
-      this.notify();
-      return;
+    let oc: SkillOutcome;
+    if (slot.id === "gamble") {
+      // THE COIN: the flip is decided first, the REAL semi-3D coin is thrown
+      // from the table, and only when it lands does fate apply.
+      const win = Math.random() < 0.5;
+      this.onEvent({ type: "skillFlash", id: "gamble" });
+      gameAudio.diceShake();
+      await sleep(250);
+      await this.scene.coinTossFX(win);
+      oc = this.logic.useSkill("player", uid, { win });
+      if (!oc.ok) {
+        this.busy = false;
+        this.notify();
+        return;
+      }
+      if (win) {
+        gameAudio.heal();
+        this.onEvent({ type: "dmgPop", side: "player", text: "+1 HP", tone: "reflect" });
+        this.toast(t("heads"), "good");
+      } else {
+        gameAudio.hitPlayer();
+        this.scene.addTrauma(0.5);
+        this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
+        this.toast(t("tails"), "bad");
+      }
+    } else {
+      oc = this.logic.useSkill("player", uid);
+      if (!oc.ok) {
+        this.busy = false;
+        this.notify();
+        return;
+      }
+      this.onEvent({ type: "skillFlash", id: slot.id });
+      await this.playSkillFx("player", slot.id, oc);
     }
     // a spent TRIAL starts its 2-turn fade away
-    const sk = st.skills[id];
-    if (sk.trial && sk.charges <= 0) this.registerGhost(id);
-    this.onEvent({ type: "skillFlash", id });
-    await this.playSkillFx("player", id, oc);
-    this.fireScript("skill:all", { skill: id, side: "player" });
-    this.fireScript(`skill:${id}` as ScriptEvent, { skill: id, side: "player" });
+    const spent = this.logic.playerSlot(uid);
+    if (spent?.trial && spent.charges <= 0) this.registerGhost(spent);
+    this.fireScript("skill", { skill: slot.id });
     this.notify();
     this.checkHealthFx();
 
@@ -774,7 +825,7 @@ export class GameEngine {
     st.phase = "enemyTurn";
     const wasPublic = st.countdown > 0;
     this.logic.startTurnTick();
-    this.fireScript("turn", { side: "enemy" });
+    this.fireScript("turn");
     if (wasPublic && st.countdown <= 0 && st.cylinder.length > 0) {
       this.toast(t("boardFaded"), "bad");
       gameAudio.ghostFade();
@@ -803,8 +854,7 @@ export class GameEngine {
         if (!oc.ok) continue;
         skillsUsed++;
         await this.playSkillFx("enemy", d.skill, oc);
-        this.fireScript("skill:all", { skill: d.skill, side: "enemy" });
-        this.fireScript(`skill:${d.skill}` as ScriptEvent, { skill: d.skill, side: "enemy" });
+        this.fireScript("skill", { skill: d.skill });
         this.notify();
         await sleep(rnd(500, 850));
         continue;
@@ -924,8 +974,10 @@ export class GameEngine {
     }
 
     // custom rules: every hit / every X take damage
-    this.fireScript("hit", { side: out.shooter });
-    if (out.damageTo) this.fireScript(`damage:${out.damageTo}` as ScriptEvent, { side: out.damageTo });
+    this.fireScript("hit", { skill: undefined });
+    if (out.damageTo) {
+      this.fireScript(out.damageTo === "player" ? "player_take_damage" : "dealer_take_damage");
+    }
     if (this.logic.state.hp.player <= 0) {
       await sleep(400);
       return "dead";
@@ -940,7 +992,9 @@ export class GameEngine {
       // golden fire everywhere around you
       this.scene.sparkBurst(this.scene.muzzleWorldPos(), 16);
       this.scene.ringBurst(this.scene.muzzleWorldPos(), 1.1);
-      this.registerGhost("phoenix");
+      // the burned charm slot fades away over the next 2 turns
+      const burned = this.logic.state.skills.find((s) => s.id === "phoenix" && s.charges <= 0);
+      if (burned) this.registerGhost(burned);
       this.scene.enemySetMood("scared");
       this.scene.enemySay([pick("phoenix")], 2.6);
       this.onEvent({ type: "banner", title: "PHOENIX!", sub: "You refuse to die — the charm burns for you." });
@@ -1074,9 +1128,8 @@ export class GameEngine {
       case "peek": {
         gameAudio.scanDing();
         if (isPlayer) {
-          // THE MAGNIFYING GLASS: raised right up to your eyes, hovers over
-          // the chamber, zooms in a little, then sinks back down.
-          this.scene.gunPeek(true); // the revolver swings up CLOSE to your eyes
+          // THE MAGNIFYING GLASS ONLY — the old revolver peek animation is
+          // gone. The glass rises to your eyes, studies the chamber, sinks.
           await this.scene.magnifierFX("player");
           this.onEvent({ type: "shellReveal", shell: oc.revealed ?? null });
           this.toast(
@@ -1086,7 +1139,6 @@ export class GameEngine {
             "info",
           );
           await sleep(1500);
-          this.scene.gunPeek(false);
         } else {
           // the DEALER raises his own little glass over the chamber
           await this.scene.magnifierFX("enemy");
@@ -1206,24 +1258,21 @@ export class GameEngine {
         break;
       }
       case "gamble": {
-        // THE COIN — pure 2D doodle animation in the HUD overlay
-        gameAudio.diceShake();
-        await sleep(300);
-        this.onEvent({ type: "coinFlip", win: !!oc.gambleWin });
-        await sleep(1900); // the overlay plays the whole flip + result
+        // (enemy path only — the player's flip runs through playerUseSkill)
+        await this.scene.coinTossFX(!!oc.gambleWin);
         if (isPlayer) {
           if (oc.gambleWin) {
             gameAudio.heal();
-            this.toast("HEADS! +1 HP. The coin likes you today.", "good");
+            this.toast(t("heads"), "good");
           } else {
             gameAudio.hitPlayer();
             this.scene.addTrauma(0.5);
-            this.toast("TAILS! -1 HP. The coin is a cruel friend.", "bad");
+            this.toast(t("tails"), "bad");
           }
         } else {
           this.toast(oc.gambleWin ? "The DEALER flips HEADS — he gains 1 HP... wait, he has none?" : "The DEALER flips TAILS — bad luck for him!", oc.gambleWin ? "bad" : "good");
         }
-        await sleep(600);
+        await sleep(400);
         break;
       }
     }
@@ -1290,10 +1339,10 @@ export class GameEngine {
   /* ---------------- ghosts (spent trials fading away) ---------------- */
 
   /** A spent trial charm starts its 2-turn fade. */
-  private registerGhost(id: SkillId) {
-    const g = this.ghosts.find((x) => x.id === id);
+  private registerGhost(slot: SkillSlot) {
+    const g = this.ghosts.find((x) => x.uid === slot.uid);
     if (g) g.turns = 2;
-    else this.ghosts.push({ id, turns: 2 });
+    else this.ghosts.push({ uid: slot.uid, id: slot.id, turns: 2 });
     gameAudio.ghostFade();
   }
 
@@ -1301,12 +1350,12 @@ export class GameEngine {
   private tickGhosts() {
     if (!this.ghosts.length) return;
     for (const g of this.ghosts) g.turns -= 1;
-    const done = this.ghosts.filter((g) => g.turns <= 0).map((g) => g.id);
-    for (const id of done) {
-      const sk = this.logic.state.skills[id];
-      sk.owned = false;
-      sk.trial = false;
-      this.toast(`${SKILL_META[id].name} faded away.`, "info");
+    const done = this.ghosts.filter((g) => g.turns <= 0);
+    for (const g of done) {
+      const st = this.logic.state;
+      const idx = st.skills.findIndex((s) => s.uid === g.uid);
+      if (idx >= 0) st.skills.splice(idx, 1);
+      this.toast(`${SKILL_META[g.id].name} faded away.`, "info");
     }
     this.ghosts = this.ghosts.filter((g) => g.turns > 0);
   }
@@ -1326,22 +1375,20 @@ export class GameEngine {
   /** How many skill slots are in active use (ghosts don't count). */
   activeSkillCount() {
     const st = this.logic.state;
-    return ALL_SKILL_IDS.filter((id) => {
-      const sk = st.skills[id];
-      return sk.owned && !(sk.trial && sk.charges <= 0);
-    }).length;
+    return st.skills.filter((s) => !(s.trial && s.charges <= 0)).length;
   }
 
   /** Roll the 3 random items lying on the table this visit.
-   *  Rarity gates: EPIC needs NORMAL+, LEGEND needs INSANE/ENDLESS (+ the
-   *  allow-legend switch). Voodoo is never sold, and owned cards restock
-   *  out unless the mutator allows duplicates. */
+   *  Rarity gates: EPIC needs NORMAL+ (SHOP ONLY — the dice never rolls it),
+   *  LEGEND needs INSANE/ENDLESS (+ the allow-legend switch). Voodoo is
+   *  never sold, and owned cards restock out unless the mutator allows
+   *  duplicates (each copy = its own inventory slot). */
   private rollOffers(): ShopOffer[] {
     const st = this.logic.state;
     const pool = this.poolFor(st.difficulty, st.mode).filter((id) => {
       if (!SHOP_PRICES[id]) return false; // voodoo is not for sale
-      const owned = st.skills[id].owned;
-      if (owned && !(this.mut?.allowDup ?? false)) return false;
+      const ownedActive = st.skills.some((s) => s.id === id && !(s.trial && s.charges <= 0));
+      if (ownedActive && !(this.mut?.allowDup ?? false)) return false;
       return true;
     });
     return shuffled(pool)
