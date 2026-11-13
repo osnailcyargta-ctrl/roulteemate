@@ -29,6 +29,7 @@ import {
 import { setLang, t, type Lang } from "@/game/i18n";
 import { mutDefaultsFor, type MutConfig } from "@/game/mutator";
 import { compileScript } from "@/game/script";
+import { getDailyInfo } from "@/game/seed";
 import type { Difficulty } from "@/game/logic";
 import type { ShellType } from "@/game/logic";
 import { gameAudio } from "@/game/audio";
@@ -52,6 +53,10 @@ type Settings = {
   mutators: boolean;
   /** the live/blank counter board at the top */
   showShellStat: boolean;
+  /** percentage chip under the shell board (more likely side wins the label) */
+  showProb: boolean;
+  /** DAILY SEED: everyone playing today gets the same shells/shop/skills */
+  daily: boolean;
   /** TIME expands into these two */
   showRoundTime: boolean;
   showTotalTime: boolean;
@@ -67,10 +72,60 @@ const DEFAULT_SETTINGS: Settings = {
   lang: "en",
   mutators: false,
   showShellStat: true,
+  showProb: true,
+  daily: true,
   showRoundTime: true,
   showTotalTime: true,
   showFps: false,
 };
+
+/* ---------- interactive tutorial (first run, persisted) ---------- */
+
+const TUT_KEY = "roulteemate-tutorial";
+type TutState = { done: boolean; seen: string[] };
+const loadTut = (): TutState => {
+  try {
+    const raw = localStorage.getItem(TUT_KEY);
+    if (raw) return JSON.parse(raw) as TutState;
+  } catch {
+    /* corrupted storage — start fresh */
+  }
+  return { done: false, seen: [] };
+};
+
+/** Contextual hints, in the order they can fire. Each shows once. */
+const TUT_STEPS: { id: string; key: Parameters<typeof t>[0]; cond: (s: HudSnapshot) => boolean }[] = [
+  {
+    id: "firstTurn",
+    key: "tut1",
+    cond: (s) => s.phase === "playerTurn" && s.turn === "player" && s.round > 0,
+  },
+  {
+    id: "skills",
+    key: "tut2",
+    cond: (s) => s.phase === "playerTurn" && s.turn === "player" && s.skills.some((k) => k.ghostTurns <= 0),
+  },
+  {
+    id: "fade",
+    key: "tut3",
+    cond: (s) => s.round > 0 && !s.countsPublic && s.phase === "playerTurn",
+  },
+  {
+    id: "shop",
+    key: "tut4",
+    cond: (s) => s.phase === "shop",
+  },
+  {
+    id: "lowhp",
+    key: "tut5",
+    cond: (s) => s.phase === "playerTurn" && s.hpPlayer <= 2 && s.hpPlayer > 0,
+  },
+  {
+    id: "mustshoot",
+    key: "tut6",
+    cond: (s) => s.mustShoot && s.turn === "player",
+  },
+];
 
 function loadSettings(): Settings {
   try {
@@ -124,7 +179,18 @@ bonus += 1;   bonus -= 1;   bonus = bonus * 2 + 1;
 heal(PLAYER | DEALER, n)      damage(PLAYER | DEALER, n)
 run_skill("cuffs", PLAYER | DEALER)   // any skill id works
 hp(PLAYER | DEALER)   score()   round()   rand(n)   last_skill()
+chance(p)                     // 1 with p% probability, else 0
+shuffle()                     // scramble the remaining shell order
+theme(color)                  // tint the room light (0 = default)
+set_dmg_next(n)               // next trigger pull deals n damage
+set_coin(1)  set_coin(0)      // force the next gamble flip (heads/tails)
 print(x)   print("text")   say("text")
+
+// hooks (v2)
+every (shop)   { ... }  // the table stocks its goods
+every (death)  { ... }  // somebody hit 0 HP — heal inside to DENY death
+every (coin)   { ... }  // fires before a gamble flip — set_coin() works here
+every (peek)   { ... }  // a magnifying-glass reveal just happened
 
 // constants: PLAYER = 0, DEALER = 1,
 // SKILL_REROLL SKILL_VOODOO SKILL_PEEK SKILL_EJECT SKILL_COFFEE
@@ -169,12 +235,18 @@ export default function GameShell() {
   );
   /* ---------- FPS meter ---------- */
   const [fps, setFps] = useState(0);
+  /* ---------- interactive tutorial ---------- */
+  const [tut, setTut] = useState<TutState>({ done: false, seen: [] });
+  const [tutCard, setTutCard] = useState<string | null>(null);
+  /* ---------- end-of-run best tracking ---------- */
+  const [bestInfo, setBestInfo] = useState<{ isNew: boolean; rounds: number; score: number; endless: boolean; hasBest: boolean } | null>(null);
 
   /* load persisted settings once */
   useEffect(() => {
     const s = loadSettings();
     setSettings(s);
     setLang(s.lang);
+    setTut(loadTut());
   }, []);
 
   const updateSettings = useCallback((patch: Partial<Settings>) => {
@@ -375,6 +447,88 @@ export default function GameShell() {
     return () => clearInterval(iv);
   }, [phaseKey]);
 
+  /* ---------- interactive tutorial driver ---------- */
+  const tutRef = useRef(tut);
+  useEffect(() => {
+    tutRef.current = tut;
+  }, [tut]);
+
+  const saveTut = useCallback((next: TutState) => {
+    setTut(next);
+    try {
+      localStorage.setItem(TUT_KEY, JSON.stringify(next));
+    } catch {
+      /* private mode — tutorial just replays next session */
+    }
+  }, []);
+
+  useEffect(() => {
+    const s = snap;
+    if (!s || phaseKey === "menu") return;
+    if (tutRef.current.done) return;
+    if (tutCard) return; // one card at a time
+    const step = TUT_STEPS.find((st) => !tutRef.current.seen.includes(st.id) && st.cond(s));
+    if (step) setTutCard(step.id);
+  }, [snap, phaseKey, tutCard]);
+
+  const dismissTut = useCallback(() => {
+    if (!tutCard) return;
+    const seen = [...tutRef.current.seen, tutCard];
+    const done = TUT_STEPS.every((st) => seen.includes(st.id));
+    saveTut({ done, seen });
+    setTutCard(null);
+  }, [tutCard, saveTut]);
+
+  /* auto-dismiss tutorial cards after 12s so they never block play */
+  useEffect(() => {
+    if (!tutCard) return;
+    const iv = setTimeout(dismissTut, 12000);
+    return () => clearTimeout(iv);
+  }, [tutCard, dismissTut]);
+
+  /* ---------- personal best (written once per finished run) ---------- */
+  const bestPhaseRef = useRef<string>("");
+  useEffect(() => {
+    if (phaseKey !== "gameover" && phaseKey !== "victory") {
+      bestPhaseRef.current = phaseKey;
+      return;
+    }
+    if (bestPhaseRef.current === phaseKey) return; // only once per phase entry
+    bestPhaseRef.current = phaseKey;
+    const eng = engineRef.current;
+    const s = snap;
+    if (!eng || !s) return;
+    const st = eng.getStats();
+    const endless = s.mode === "endless";
+    const key = `roulteemate-best-${s.difficulty}-${s.mode}`;
+    let prev: { rounds: number; score: number } | null = null;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) prev = JSON.parse(raw);
+    } catch {
+      /* ignore corrupted best */
+    }
+    const better = endless
+      ? !prev || st.score > prev.score
+      : st.won && (!prev || st.rounds < prev.rounds);
+    if (better) {
+      try {
+        localStorage.setItem(key, JSON.stringify({ rounds: st.rounds, score: st.score }));
+      } catch {
+        /* private mode */
+      }
+    }
+    // what the panel should DISPLAY: this run when it set the record,
+    // otherwise the stored record (or nothing at all on a first loss)
+    const shown = better ? { rounds: st.rounds, score: st.score } : prev;
+    setBestInfo({
+      isNew: better,
+      rounds: shown?.rounds ?? 0,
+      score: shown?.score ?? 0,
+      endless,
+      hasBest: !!shown,
+    });
+  }, [phaseKey, snap]);
   /* ---------- mutator helpers ---------- */
   const openMutator = useCallback(() => {
     // keep whatever the player already configured (rules survive reopening);
@@ -398,7 +552,7 @@ export default function GameShell() {
       openMutator();
     } else {
       setMenuPanel(null);
-      void engineRef.current?.startGame(diff);
+      void engineRef.current?.startGame(diff, undefined, settings.daily);
     }
   };
 
@@ -409,7 +563,7 @@ export default function GameShell() {
     gameAudio.click();
     setMutOpen(false);
     setMenuPanel(null);
-    void engineRef.current?.startGame(diff, mutCfg);
+    void engineRef.current?.startGame(diff, mutCfg, settings.daily);
   };
 
   const isPlayerTurn = snap?.phase === "playerTurn" && snap.turn === "player" && !snap.busy;
@@ -417,6 +571,10 @@ export default function GameShell() {
   const inGame = phase !== "menu";
   const lowHp = inGame && snap ? snap.hpPlayer : 0;
   const endless = snap?.mode === "endless";
+  /** live/blank odds for the percentage chip — the more likely side labels it */
+  const probLive =
+    snap && snap.live + snap.blank > 0 ? Math.round((snap.live / (snap.live + snap.blank)) * 100) : null;
+  const dailyToday = getDailyInfo();
 
   /* ---------- render ---------- */
   return (
@@ -495,33 +653,36 @@ export default function GameShell() {
         <>
           {/* shell counter board — the honest numbers fade turn by turn,
               their opacity really stepping down until it hits zero.
-              Can be switched off entirely in SETTINGS > UI & QOL. */}
-          {snap.round > 0 && settings.showShellStat && (
-          <div className="absolute left-1/2 top-3 z-30 -translate-x-1/2">
-            <div className="relative">
-              <div
-                className="doodle-box flex items-center gap-3 px-4 py-1.5 transition-opacity duration-[1100ms] ease-in-out"
-                style={{ opacity: snap.countsPublic ? Math.min(1, snap.countdown / 3) : 0 }}
-              >
-                <div className="flex items-center gap-1">
-                  <img src={assets.pipLive} alt="live" className="h-7 w-7" />
-                  <span className="font-marker text-xl text-[#8f2418]">x{snap.live}</span>
-                </div>
-                <div className="h-6 w-0.5 bg-[#221a12]/30" />
-                <div className="flex items-center gap-1">
-                  <img src={assets.pipBlank} alt="blank" className="h-7 w-7" />
-                  <span className="font-marker text-xl text-[#57697c]">x{snap.blank}</span>
-                </div>
-              </div>
-              {!snap.countsPublic && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="doodle-box doodle-dark board-dark-box pop-in-delayed flex items-center gap-2 whitespace-nowrap px-4 py-1.5">
-                    <span className="font-marker text-xl tracking-widest text-[#8b8577]">? ? ?</span>
-                    <span className="rotate-[-2deg] font-hand-sc text-xs text-[#d9a441]">memorize!</span>
+              Can be switched off entirely in SETTINGS > UI & QOL.
+              Beneath it: the optional LIVE/BLANK percentage chip. */}
+          {snap.round > 0 && (snap.live + snap.blank > 0) && (
+          <div className="absolute left-1/2 top-3 z-30 flex -translate-x-1/2 flex-col items-center">
+            {settings.showShellStat && (
+              <div className="relative">
+                <div
+                  className="doodle-box flex items-center gap-3 px-4 py-1.5 transition-opacity duration-[1100ms] ease-in-out"
+                  style={{ opacity: snap.countsPublic ? Math.min(1, snap.countdown / 3) : 0 }}
+                >
+                  <div className="flex items-center gap-1">
+                    <img src={assets.pipLive} alt="live" className="h-7 w-7" />
+                    <span className="font-marker text-xl text-[#8f2418]">x{snap.live}</span>
+                  </div>
+                  <div className="h-6 w-0.5 bg-[#221a12]/30" />
+                  <div className="flex items-center gap-1">
+                    <img src={assets.pipBlank} alt="blank" className="h-7 w-7" />
+                    <span className="font-marker text-xl text-[#57697c]">x{snap.blank}</span>
                   </div>
                 </div>
-              )}
-            </div>
+                {!snap.countsPublic && (
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="doodle-box doodle-dark board-dark-box pop-in-delayed flex items-center gap-2 whitespace-nowrap px-4 py-1.5">
+                      <span className="font-marker text-xl tracking-widest text-[#8b8577]">? ? ?</span>
+                      <span className="rotate-[-2deg] font-hand-sc text-xs text-[#d9a441]">memorize!</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             {snap.known && (
               <div className="mt-1 flex justify-center">
                 <div
@@ -530,6 +691,21 @@ export default function GameShell() {
                   }`}
                 >
                   CHAMBER: {snap.known.toUpperCase()}
+                </div>
+              </div>
+            )}
+            {settings.showProb && probLive !== null && (
+              <div
+                className="mt-1 flex justify-center transition-opacity duration-[1100ms] ease-in-out"
+                style={{ opacity: snap.countsPublic ? Math.min(1, snap.countdown / 3) : 0 }}
+                title="Chance the next shell is live / blank — whichever is more likely"
+              >
+                <div
+                  className={`doodle-box px-2 py-0.5 font-hand-sc text-xs rotate-[1.5deg] ${
+                    probLive >= 50 ? "text-[#8f2418]" : "text-[#57697c]"
+                  }`}
+                >
+                  {probLive >= 50 ? `LIVE ${probLive}%` : `BLANK ${100 - probLive}%`}
                 </div>
               </div>
             )}
@@ -547,10 +723,20 @@ export default function GameShell() {
             </div>
           )}
 
-          {/* top left: round + cash + optional timers (toggles in SETTINGS) */}
+          {/* top left: round + cash + daily seed + optional timers */}
           <div className="absolute left-2 top-2 z-30 flex flex-col gap-1.5 sm:left-3 sm:top-3 sm:gap-2">
-            <div className="doodle-box doodle-dark px-2 py-0.5 font-marker text-xs rotate-[-1.5deg] sm:px-3 sm:py-1 sm:text-sm">
-              {t("round")} {Math.max(1, snap.round)}
+            <div className="flex items-center gap-1.5">
+              <div className="doodle-box doodle-dark px-2 py-0.5 font-marker text-xs rotate-[-1.5deg] sm:px-3 sm:py-1 sm:text-sm">
+                {t("round")} {Math.max(1, snap.round)}
+              </div>
+              {snap.daily && snap.seedCode && (
+                <div
+                  className="doodle-box px-2 py-0.5 font-hand-sc text-[10px] text-[#8a6d1d] rotate-[1.5deg] sm:text-xs"
+                  title={`DAILY SEED ${snap.seedCode} — ${snap.seedDate}. Same shells, same shop, same skills for everyone today.`}
+                >
+                  DAILY {snap.seedCode}
+                </div>
+              )}
             </div>
             <div
               className="doodle-box w-fit px-2 py-0.5 font-marker text-xs text-[#8a6d1d] rotate-[1deg] sm:text-sm"
@@ -773,6 +959,28 @@ export default function GameShell() {
               </div>
             ))}
           </div>
+
+          {/* interactive tutorial card — contextual hints, first run only */}
+          {tutCard && (
+            <div className="absolute bottom-[210px] left-3 z-40 w-72 sm:bottom-28">
+              <div className="pop-in doodle-box px-4 py-3 rotate-[-1deg]">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="font-marker text-sm text-[#8f2418]">TUTORIAL</span>
+                  <button className="doodle-btn px-2 py-0.5 font-marker text-xs" onClick={dismissTut}>
+                    X
+                  </button>
+                </div>
+                <div className="font-hand text-[15px] leading-snug">
+                  {t((TUT_STEPS.find((s) => s.id === tutCard)?.key ?? "tut1") as Parameters<typeof t>[0])}
+                </div>
+                <div className="mt-2 flex justify-end">
+                  <button className="doodle-btn px-3 py-1 font-hand-sc text-sm" onClick={dismissTut}>
+                    {t("tutGotIt")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -999,6 +1207,15 @@ export default function GameShell() {
                     </button>
                   ))}
                 </div>
+                {settings.daily && (
+                  <div
+                    className="mt-3 flex items-center justify-center gap-2 font-hand-sc text-sm text-[#8a6d1d]"
+                    title="The seed is an algorithm over today's date — everyone plays the same shells, shop and skills."
+                  >
+                    <span className="rotate-[-1deg]">DAILY SEED {dailyToday.code} — {dailyToday.date}</span>
+                    <span className="font-hand text-xs opacity-70">everyone plays the same run</span>
+                  </div>
+                )}
                 {settings.mutators && (
                   <div className="mt-3 font-hand-sc text-sm text-[#8f5bd4]">
                     MUTATORS ON — sitting down opens the CUSTOM TABLE sheet.
@@ -1099,6 +1316,44 @@ export default function GameShell() {
                     <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showShellStat ? "" : "opacity-70"}`}>
                       {settings.showShellStat ? t("on") : t("off")}
                     </span>
+                  </button>
+
+                  {/* live/blank percentage */}
+                  <button
+                    className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+                    onClick={() => updateSettings({ showProb: !settings.showProb })}
+                  >
+                    <span className="font-hand text-lg">
+                      {t("optProb")} <span className="font-hand-sc text-sm text-[#4a4036]">{t("optProbHint")}</span>
+                    </span>
+                    <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.showProb ? "" : "opacity-70"}`}>
+                      {settings.showProb ? t("on") : t("off")}
+                    </span>
+                  </button>
+
+                  {/* DAILY SEED */}
+                  <button
+                    className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+                    onClick={() => updateSettings({ daily: !settings.daily })}
+                  >
+                    <span className="font-hand text-lg">
+                      {t("optDaily")} <span className="font-hand-sc text-sm text-[#4a4036]">{t("optDailyHint")}</span>
+                    </span>
+                    <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.daily ? "" : "opacity-70"}`}>
+                      {settings.daily ? t("on") : t("off")}
+                    </span>
+                  </button>
+
+                  {/* replay the interactive tutorial */}
+                  <button
+                    className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+                    onClick={() => {
+                      saveTut({ done: false, seen: [] });
+                      gameAudio.click();
+                    }}
+                  >
+                    <span className="font-hand text-lg">{t("optTutReplay")}</span>
+                    <span className="doodle-btn px-3 py-0.5 font-hand-sc text-sm">{t("on")}</span>
                   </button>
 
                   {/* TIME — expands into round/total */}
@@ -1384,11 +1639,52 @@ export default function GameShell() {
                   : t("finalStats", { a: snap.hpPlayer, b: snap.maxHpPlayer, c: snap.hpEnemy, d: snap.maxHpEnemy })}
               </div>
               <div className="mt-1 font-hand text-base text-[#4a4036]">{t("cashLeft", { m: snap.money, t: fmtTime(times.totalMs) })}</div>
+              {(() => {
+                const eng = engineRef.current;
+                if (!eng) return null;
+                const st = eng.getStats();
+                const acc = st.shots > 0 ? Math.round((st.hits / st.shots) * 100) : 0;
+                const rows: [string, string][] = [
+                  [t("stShots"), String(st.shots)],
+                  [t("stHits"), String(st.hits)],
+                  [t("stAcc"), `${acc}%`],
+                  [t("stPeeks"), `${st.peeks} (${st.peekLive})`],
+                  [t("stDmgDealt"), String(st.dmgDealt)],
+                  [t("stDmgTaken"), String(st.dmgTaken)],
+                  [t("stSkills"), String(st.skillsUsed)],
+                ];
+                const bestLabel = bestInfo?.hasBest
+                  ? bestInfo.endless
+                    ? t("bestEndless", { s: bestInfo.score, r: bestInfo.rounds })
+                    : t("bestStd", { r: bestInfo.rounds })
+                  : t("bestNone");
+                return (
+                  <div className="mt-3 border-2 border-dashed border-[#221a12]/30 px-4 py-2.5">
+                    <div className="flex items-center justify-between">
+                      <div className="font-marker text-lg text-[#8a6d1d]">{t("statsTitle")}</div>
+                      {bestInfo?.isNew && (
+                        <div className="stamp-in doodle-box px-2 py-0.5 font-marker text-sm text-[#3f6b3d] rotate-[2deg]">
+                          {t("newBest")}
+                        </div>
+                      )}
+                    </div>
+                    <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5">
+                      {rows.map(([k, v]) => (
+                        <div key={k} className="flex items-baseline justify-between font-hand text-[15px]">
+                          <span className="text-[#4a4036]">{k}</span>
+                          <span className="font-hand-sc">{v}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-1.5 font-hand-sc text-sm text-[#8a6d1d]">{bestLabel}</div>
+                  </div>
+                );
+              })()}
             </div>
             <div className="mt-5 flex justify-center gap-3">
               <button
                 className="doodle-btn doodle-red px-8 py-2.5 font-marker text-xl"
-                onClick={() => void engineRef.current?.startGame(snap.difficulty)}
+                onClick={() => engineRef.current?.restart()}
               >
                 {t("playAgain")}
               </button>

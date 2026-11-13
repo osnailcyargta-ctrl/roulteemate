@@ -11,8 +11,8 @@
  *
  *   every (dealer_take_damage) {      // hooks: setup, turn, round, hit,
  *     bonus += 1;                     //   player_take_damage,
- *     if (bonus >= 3) {               //   dealer_take_damage, skill
- *       heal(PLAYER, 1);
+ *     if (bonus >= 3) {               //   dealer_take_damage, skill,
+ *       heal(PLAYER, 1);              //   shop, death, coin, peek
  *       bonus = 0;
  *     }
  *   }
@@ -24,6 +24,8 @@
  * Builtins:  heal(side,n)  damage(side,n)  run_skill("id",side)
  *            hp(side)  score()  round()  rand(n)  last_skill()
  *            print(x)  print("text")  say("text")
+ *            chance(p)  shuffle()  theme(color)
+ *            set_dmg_next(n)  set_coin(0|1)
  * Constants: PLAYER=0, DEALER=1, SKILL_REROLL ... SKILL_GAMBLE
  * Control:   if / else, while, repeat(n) (n <= 0 = infinite, fuel-guarded),
  *            break, int & float arithmetic, && || ! == != < <= > >= += -=
@@ -48,7 +50,11 @@ export type ScriptEventName =
   | "hit"
   | "player_take_damage"
   | "dealer_take_damage"
-  | "skill";
+  | "skill"
+  | "shop"
+  | "death"
+  | "coin"
+  | "peek";
 
 export const SCRIPT_EVENTS: ScriptEventName[] = [
   "setup",
@@ -58,6 +64,10 @@ export const SCRIPT_EVENTS: ScriptEventName[] = [
   "player_take_damage",
   "dealer_take_damage",
   "skill",
+  "shop",
+  "death",
+  "coin",
+  "peek",
 ];
 
 export interface ScriptHost {
@@ -67,6 +77,17 @@ export interface ScriptHost {
   say(text: string): void;
   /** Live game state for hp()/score()/round(). */
   stateRef(): { hp: Record<Side, number>; score: number; round: number };
+  /** ENGINE C v2 builtins — optional so older hosts/tests still work. */
+  /** chance(p): true with p percent probability. */
+  chance?(p: number): boolean;
+  /** shuffle(): scramble the remaining shell order. */
+  shuffle?(): void;
+  /** theme(color): tint the room light (0 resets). */
+  theme?(color: number): void;
+  /** set_dmg_next(n): the next trigger pull deals n damage. */
+  setDmgNext?(n: number): void;
+  /** set_coin(1|0): force the next gamble flip (heads/tails). */
+  setCoin?(win: number): void;
 }
 
 export interface CompileResult {
@@ -549,6 +570,12 @@ const I_ROUND = 8;
 const I_RAND = 9;
 const I_LAST_SKILL = 10;
 const I_FUEL = 11;
+// ENGINE C v2 — appended AFTER fuel so every legacy index stays stable
+const I_CHANCE = 12;
+const I_SHUFFLE = 13;
+const I_THEME = 14;
+const I_SETDMG = 15;
+const I_SETCOIN = 16;
 
 const uleb = (n: number): number[] => {
   const out: number[] = [];
@@ -884,8 +911,42 @@ function emitCall(e: { k: "call"; name: string; args: Expr[]; line: number }, ct
       ctx.push(0x10, ...uleb(I_LAST_SKILL));
       return "i32";
     }
+    case "chance": {
+      // chance(p): 1 with p% probability, else 0
+      if (e.args.length !== 1) addError(env, e.line, "chance(p) takes 1 argument (0-100)");
+      wantInt(arg(0), "p");
+      ctx.push(0x10, ...uleb(I_CHANCE));
+      return "i32";
+    }
+    case "shuffle": {
+      // shuffle(): scramble the remaining shell order
+      if (e.args.length !== 0) addError(env, e.line, "shuffle() takes no arguments");
+      ctx.push(0x10, ...uleb(I_SHUFFLE));
+      return "void";
+    }
+    case "theme": {
+      // theme(color): tint the room light (0 = back to warm default)
+      if (e.args.length !== 1) addError(env, e.line, "theme(color) takes 1 argument (0xRRGGBB)");
+      wantInt(arg(0), "color");
+      ctx.push(0x10, ...uleb(I_THEME));
+      return "void";
+    }
+    case "set_dmg_next": {
+      // set_dmg_next(n): the next trigger pull deals n damage
+      if (e.args.length !== 1) addError(env, e.line, "set_dmg_next(n) takes 1 argument");
+      wantInt(arg(0), "n");
+      ctx.push(0x10, ...uleb(I_SETDMG));
+      return "void";
+    }
+    case "set_coin": {
+      // set_coin(1|0): force the next gamble flip — heads (+1 HP) or tails (-1)
+      if (e.args.length !== 1) addError(env, e.line, "set_coin(win) takes 1 argument (1 or 0)");
+      wantInt(arg(0), "win");
+      ctx.push(0x10, ...uleb(I_SETCOIN));
+      return "void";
+    }
     default:
-      addError(env, e.line, `unknown function "${e.name}" — valid: heal damage run_skill print say hp score round rand last_skill`);
+      addError(env, e.line, `unknown function "${e.name}" — valid: heal damage run_skill print say hp score round rand last_skill chance shuffle theme set_dmg_next set_coin`);
       // consume arguments so the stack stays balanced
       for (const a of e.args) {
         const t = emitExpr(a, ctx, env);
@@ -1070,6 +1131,12 @@ export function compileScript(src: string): CompileResult {
     { name: "rand", type: 3 },
     { name: "last_skill", type: 4 },
     { name: "fuel_check", type: T_FUNC_VOID_VOID },
+    // ENGINE C v2
+    { name: "chance", type: 3 }, // (i32)->i32
+    { name: "shuffle", type: T_FUNC_VOID_VOID }, // ()->()
+    { name: "theme", type: 2 }, // (i32)->()
+    { name: "set_dmg_next", type: 2 },
+    { name: "set_coin", type: 2 },
   ];
 
   const section = (id: number, payload: number[]): number[] => [...uleb(id), ...uleb(payload.length), ...payload];
@@ -1176,6 +1243,12 @@ export class ScriptRuntime {
         rt.fuel++;
         if (rt.fuel > MAX_FUEL) throw new Error("loop ran too long — fuel exhausted (use break or smaller repeat)");
       },
+      // ENGINE C v2 — optional host methods fall back to sensible defaults
+      chance: (p: number) => (host.chance ? (host.chance(p) ? 1 : 0) : Math.random() * 100 < p ? 1 : 0),
+      shuffle: () => host.shuffle?.(),
+      theme: (c: number) => host.theme?.(c >>> 0),
+      set_dmg_next: (n: number) => host.setDmgNext?.(n),
+      set_coin: (n: number) => host.setCoin?.(n !== 0 ? 1 : 0),
     };
     try {
       const { instance } = await WebAssembly.instantiate(

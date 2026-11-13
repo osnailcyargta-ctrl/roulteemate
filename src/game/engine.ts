@@ -37,6 +37,7 @@ import { pick } from "./taunts";
 import { t } from "./i18n";
 import { MUT_DEFAULTS, type MutConfig } from "./mutator";
 import { compileScript, ScriptRuntime, type ScriptEventName, type ScriptHost } from "./script";
+import { getDailyInfo, rngStream, setDailyOff, setDailySeed, streamPick } from "./seed";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
@@ -78,6 +79,12 @@ export interface HudSnapshot {
   busy: boolean;
   difficulty: Difficulty;
   hasGame: boolean;
+  /** DAILY SEED active — everyone playing today shares this run. */
+  daily: boolean;
+  /** The 6-char seed code shown in the HUD (e.g. "K3X9Q2"). */
+  seedCode: string;
+  /** The UTC date the seed was derived from ("YYYY-MM-DD"). */
+  seedDate: string;
   /** The physical items on the table right now (shop phase). */
   shopOffers: ShopOfferView[];
 }
@@ -129,14 +136,37 @@ const SHOP_PRICES: Partial<Record<SkillId, number>> = {
 const START_MONEY = 200;
 export const MAX_SKILLS = 4;
 
-function shuffled<T>(arr: T[]): T[] {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
+/* ---------------- RUN STATS (the end-of-run screen) ---------------- */
+
+export interface RunStats {
+  shots: number; // trigger pulls by the PLAYER
+  hits: number; // player shots that dealt damage to the DEALER
+  peeks: number; // magnifying glass uses
+  peekLive: number; // peeks that found a live shell
+  dmgDealt: number; // damage points dealt to the DEALER (by any means)
+  dmgTaken: number; // damage points taken by the PLAYER (by any means)
+  skillsUsed: number; // player skill activations
+  rounds: number;
+  won: boolean;
+  score: number; // ENDLESS score at the end
+  money: number;
+  ms: number; // total playtime
 }
+
+const freshStats = (): RunStats => ({
+  shots: 0,
+  hits: 0,
+  peeks: 0,
+  peekLive: 0,
+  dmgDealt: 0,
+  dmgTaken: 0,
+  skillsUsed: 0,
+  rounds: 0,
+  won: false,
+  score: 0,
+  money: 0,
+  ms: 0,
+});
 
 export class GameEngine {
   scene = new RouletteScene();
@@ -153,6 +183,17 @@ export class GameEngine {
   mut: MutConfig | null = null;
   /** The custom-effect runtime (C-like scripts), when rules were provided. */
   script: ScriptRuntime | null = null;
+  /** DAILY SEED state (HUD display + rerun). */
+  dailyOn = true;
+  seedCode = "";
+  seedDate = "";
+  /** set_coin(1|0) from ENGINE C — forces the next gamble flip. */
+  private coinOverride: boolean | null = null;
+  /** The parameters of the last launch — PLAY AGAIN replays them. */
+  private lastLaunch: { diff: Difficulty | "endless"; mut?: MutConfig; daily: boolean } | null = null;
+  /** End-of-run statistics. */
+  private stats: RunStats = freshStats();
+  private statsDone = false;
   /** The 3 random items currently lying on the table (shop breaks only). */
   private shopOffers: ShopOffer[] = [];
   private hoverId: SkillId | "bell" | null = null;
@@ -235,6 +276,9 @@ export class GameEngine {
       busy: this.busy,
       difficulty: st.difficulty,
       hasGame: st.round > 0 || st.phase !== "menu",
+      daily: this.dailyOn,
+      seedCode: this.seedCode,
+      seedDate: this.seedDate,
       shopOffers: this.shopOffers.map((o) => this.offerView(o)),
     };
   }
@@ -288,6 +332,17 @@ export class GameEngine {
 
   /* ---------------- main flow ---------------- */
 
+  /** End-of-run statistics (read by the GAME OVER screen). */
+  getStats(): RunStats {
+    return { ...this.stats };
+  }
+
+  /** PLAY AGAIN: relaunch with the exact same table parameters. */
+  restart() {
+    if (!this.lastLaunch) return;
+    void this.startGame(this.lastLaunch.diff, this.lastLaunch.mut, this.lastLaunch.daily);
+  }
+
   /** The SHOP pool for this table. EPIC cards live here ONLY — and only on
    *  NORMAL and above. LEGEND needs INSANE / ENDLESS (+ the allow-legend
    *  switch). The mutator card pool gates everything further. */
@@ -314,28 +369,54 @@ export class GameEngine {
     ).filter((id) => RARITY[id] === "base");
   }
 
-  /** Draw n skills from the pool. The DEALER keeps the stacking record;
-   *  the player's dice grants go through diceIntro (which manages slots). */
+  /** Draw n skills for the DEALER. DETERMINISTIC UNDER THE DAILY SEED:
+   *  each pick comes from the "skill" stream (enemy lane), skipping what
+   *  he already owns unless the mutator allows duplicates. */
   private drawSkills(side: Side, pool: SkillId[], n: number) {
     const allowDup = this.mut?.allowDup ?? false;
     const st = this.logic.state;
-    const bag = allowDup
-      ? pool
-      : pool.filter((id) => !st.enemySkills[id].owned || side === "player");
-    const src = bag.length ? bag : pool;
     for (let k = 0; k < n; k++) {
-      const id = src[Math.floor(Math.random() * src.length)];
-      this.logic.grantSkill(side, id);
+      const id = streamPick(
+        pool,
+        (x) => (st.enemySkills[x].owned && !allowDup),
+        "skill",
+        k + 100, // the enemy lane of the stream (player dice uses 0..)
+      );
+      if (id) {
+        this.logic.grantSkill(side, id);
+      } else {
+        // everything is owned and dupes are off — fall back to the whole
+        // pool (still deterministic: fallback lane of the same stream)
+        const id2 = pool[Math.floor(rngStream("skill", k + 200, 0) * pool.length)];
+        if (id2) this.logic.grantSkill(side, id2);
+      }
     }
   }
 
-  async startGame(diff: Difficulty | "endless", mut?: MutConfig) {
+  async startGame(diff: Difficulty | "endless", mut?: MutConfig, daily = true) {
     gameAudio.ensure();
     gameAudio.startAmbient();
     this.lowHpTaunted = false;
     this.money = START_MONEY;
     this.ghosts = [];
     this.shopResolve = null;
+    this.coinOverride = null;
+    this.stats = freshStats();
+    this.statsDone = false;
+    this.lastLaunch = { diff, mut, daily };
+    // DAILY SEED: one algorithm over today's date — same run for everyone,
+    // computed fresh (never hardcoded). OFF = classic Math.random chaos.
+    const seedInfo = getDailyInfo();
+    if (daily) {
+      setDailySeed(seedInfo.seed);
+      this.seedCode = seedInfo.code;
+      this.seedDate = seedInfo.date;
+    } else {
+      setDailyOff();
+      this.seedCode = "";
+      this.seedDate = "";
+    }
+    this.dailyOn = daily;
     this.tStart = performance.now();
     this.tRoundStart = this.tStart;
     this.tEnd = 0;
@@ -355,6 +436,7 @@ export class GameEngine {
       this.logic = new RouletteLogic(baseDiff, mode);
     }
     this.ai = new EnemyAI(this.logic, SMART[this.mut?.ai ?? baseDiff]);
+    this.scene.setThemeTint(0); // any previous theme(color) dies with the table
     await this.setupScripts();
     this.scene.clearSpentShells();
     this.scene.dealerCuffed(false);
@@ -407,6 +489,16 @@ export class GameEngine {
         score: this.logic.state.score,
         round: this.logic.state.round,
       }),
+      // ENGINE C v2 builtins
+      chance: (p) => Math.random() * 100 < p,
+      shuffle: () => this.logic.shuffleChamber(),
+      theme: (c) => this.scene.setThemeTint(c),
+      setDmgNext: (n) => {
+        this.logic.dmgNext = Math.max(0, n | 0);
+      },
+      setCoin: (win) => {
+        this.coinOverride = win !== 0;
+      },
     };
     try {
       this.script = await ScriptRuntime.instantiate(compiled.bytes, host, (msg) => this.toast(msg, "bad"));
@@ -476,7 +568,13 @@ export class GameEngine {
       case "gamble": {
         // the REAL semi-3D coin: tossed up from the table, lands on the face
         // the script rolled — then the effect applies.
-        const win = Math.random() < 0.5;
+        // ENGINE C: every (coin) fires first; set_coin(1|0) forces the face.
+        let win = Math.random() < 0.5;
+        this.fireScript("coin", { skill: "gamble" });
+        if (this.coinOverride !== null) {
+          win = this.coinOverride;
+          this.coinOverride = null;
+        }
         this.toast(`CUSTOM RULE: ${label} — a coin flips!`, "info");
         await this.scene.coinTossFX(win);
         this.logic.forceSkill("gamble", target, { win });
@@ -520,6 +618,7 @@ export class GameEngine {
     this.scene.dollyHome();
     this.scene.voodooEndFX("player");
     this.scene.voodooEndFX("enemy");
+    this.scene.setThemeTint(0); // the table's theme dies with the run
     this.logic = new RouletteLogic(this.logic.state.difficulty, this.mode);
     this.logic.setPhase("menu");
     this.busy = false;
@@ -528,6 +627,14 @@ export class GameEngine {
     this.shopOffers = [];
     this.mut = null;
     this.script = null;
+    this.coinOverride = null;
+    this.lastLaunch = null;
+    this.stats = freshStats();
+    this.statsDone = false;
+    this.dailyOn = true;
+    this.seedCode = "";
+    this.seedDate = "";
+    setDailyOff();
     this.setShopHover(null);
     this.shopResolve = null;
     this.tStart = 0;
@@ -550,13 +657,15 @@ export class GameEngine {
     const pool = this.dicePool();
     const nPlayer = Math.max(0, Math.min(6, this.mut?.skillsPlayer ?? 2));
     // duplicates are only handed out when the mutator allows them —
-    // and every grant (even a duplicate) becomes its OWN slot
+    // and every grant (even a duplicate) becomes its OWN slot.
+    // DAILY SEED: the picks come from the deterministic "skill" stream,
+    // lane 0 (the enemy lane starts at +100), so everyone gets the same
+    // opening hand on the same date.
     const allowDup = this.mut?.allowDup ?? false;
-    let bag = pool.filter((id) => allowDup || !this.logic.playerSlot(id));
-    if (!bag.length) bag = [...pool];
     const granted: SkillId[] = [];
-    for (let k = 0; k < nPlayer; k++) {
-      granted.push(bag[Math.floor(Math.random() * bag.length)]);
+    for (let k = 0; granted.length < nPlayer && k < 32; k++) {
+      const id = streamPick(pool, (x) => !allowDup && (granted.includes(x) || !!this.logic.playerSlot(x)), "skill", k);
+      if (id) granted.push(id);
     }
 
     this.scene.diceVisible(true);
@@ -657,10 +766,15 @@ export class GameEngine {
     const total = 6;
     for (let i = 0; i < total; i++) {
       gameAudio.reloadLoad(i);
+      // TENSION JUICE: every shell the DEALER feeds in makes the hanging
+      // lamp sputter and the camera shiver a little. At low HP it's worse.
+      this.scene.lampDip(0.55 + i * 0.06);
+      this.scene.addTrauma(0.05 + (this.logic.state.hp.player <= 2 ? 0.04 : 0));
       this.onEvent({ type: "reloadStep", loaded: i + 1, total });
       await sleep(190);
     }
     gameAudio.spinCylinder();
+    this.scene.addTrauma(0.14);
     await sleep(560);
     this.scene.gunOpenCylinder(false);
     gameAudio.reloadClose();
@@ -681,6 +795,29 @@ export class GameEngine {
     await sleep(1400);
     this.fireScript("round");
     this.busy = false;
+  }
+
+  /** The hook that fires when somebody hits 0 HP. A script may heal the
+   *  dying side inside every (death) — if HP is back above 0, death is
+   *  DENIED and the fight goes on. Returns true when still dead. */
+  private deathCheck(): boolean {
+    const st = this.logic.state;
+    if (st.hp.player > 0 && st.hp.enemy > 0) return false;
+    this.fireScript("death");
+    if (st.hp.player > 0 && st.hp.enemy > 0) {
+      this.toast("CUSTOM RULES: DEATH DENIED — someone refused to die!", "voodoo");
+      this.notify();
+      return false;
+    }
+    return true;
+  }
+
+  /** deathCheck + endGame wrapper: fires the death hook, then either the
+   *  fight goes on (a rule revived somebody) or the run ends here. */
+  private async checkDeath(_why: string): Promise<boolean> {
+    if (!this.deathCheck()) return false;
+    await this.endGame();
+    return true;
   }
 
   /* ---------------- player turn ---------------- */
@@ -709,6 +846,7 @@ export class GameEngine {
     if (this.busy || st.phase !== "playerTurn" || st.turn !== "player") return;
     if (st.cylinder.length === 0) return;
     this.busy = true;
+    this.stats.shots++;
     this.notify();
 
     // LOW-HP TENSION: below 3 HP a self-shot gets 0.7s of pure dread first.
@@ -746,7 +884,15 @@ export class GameEngine {
     if (slot.id === "gamble") {
       // THE COIN: the flip is decided first, the REAL semi-3D coin is thrown
       // from the table, and only when it lands does fate apply.
-      const win = Math.random() < 0.5;
+      // ENGINE C: every (coin) fires BEFORE the flip — set_coin(1|0) inside
+      // it forces heads/tails for THIS flip (one-shot override).
+      let win = Math.random() < 0.5;
+      this.fireScript("coin", { skill: "gamble" });
+      if (this.coinOverride !== null) {
+        win = this.coinOverride;
+        this.coinOverride = null;
+      }
+      this.stats.skillsUsed++;
       this.onEvent({ type: "skillFlash", id: "gamble" });
       gameAudio.diceShake();
       await sleep(250);
@@ -774,6 +920,11 @@ export class GameEngine {
         this.notify();
         return;
       }
+      this.stats.skillsUsed++;
+      if (slot.id === "peek") {
+        this.stats.peeks++;
+        if (oc.revealed === "live") this.stats.peekLive++;
+      }
       this.onEvent({ type: "skillFlash", id: slot.id });
       await this.playSkillFx("player", slot.id, oc);
     }
@@ -787,8 +938,7 @@ export class GameEngine {
     // GAMBLE tails at 1 HP: the coin can kill its own flipper
     if (oc.died || st.hp.player <= 0) {
       await sleep(600);
-      await this.endGame();
-      return;
+      if (await this.checkDeath("gamble")) return;
     }
 
     // EJECT on the LAST shell empties the cylinder — nothing left to fire,
@@ -966,21 +1116,26 @@ export class GameEngine {
       this.money += gain;
       if (this.logic.state.lastShot) this.logic.state.lastShot.moneyGain = gain;
       if (this.logic.state.mode === "endless") {
-        this.onEvent({ type: "dmgPop", side: "enemy", text: out.reflected ? "SCORE +1!" : "+1 SCORE", tone: "reflect" });
+        this.onEvent({ type: "dmgPop", side: "enemy", text: out.reflected ? `SCORE +${out.amount}!` : `+${out.amount} SCORE`, tone: "reflect" });
         this.toast(`+$${gain} — SCORE ${this.logic.state.score}${out.reflected ? " (reflected!)" : ""}`, "good");
       } else {
         this.toast(`+$${gain}${out.reflected ? " (reflected!)" : ""}`, "good");
       }
     }
 
+    // STATS: any damage dealt/taken feeds the end-of-run screen
+    if (out.damageTo === "enemy") this.stats.dmgDealt += out.amount;
+    if (out.damageTo === "player") this.stats.dmgTaken += out.amount;
+    if (out.damageTo === "enemy" && shooterIsPlayer && !out.reflected) this.stats.hits++;
+
     // custom rules: every hit / every X take damage
     this.fireScript("hit", { skill: undefined });
     if (out.damageTo) {
       this.fireScript(out.damageTo === "player" ? "player_take_damage" : "dealer_take_damage");
     }
-    if (this.logic.state.hp.player <= 0) {
+    if (this.logic.state.hp.player <= 0 || this.logic.state.hp.enemy <= 0) {
       await sleep(400);
-      return "dead";
+      if (await this.checkDeath("shot")) return "dead";
     }
 
     if (out.phoenixSaved) {
@@ -1033,20 +1188,21 @@ export class GameEngine {
         setTimeout(() => this.scene.setAberration(0), 380);
         this.onEvent({ type: "screenSplat" });
         this.scene.bloodBurst("player");
+        const dmgTxt = out.amount > 0 ? `-${out.amount} HP` : "0 DMG";
         if (!shooterIsPlayer) {
           this.scene.enemySetMood("laugh");
-          this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
+          this.onEvent({ type: "dmgPop", side: "player", text: dmgTxt, tone: "hit" });
         } else {
           this.scene.enemySetMood("laugh");
           this.scene.enemySay([pick("playerHitSelf")], 2.4);
-          this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
+          this.onEvent({ type: "dmgPop", side: "player", text: dmgTxt, tone: "hit" });
         }
       } else if (out.damageTo === "enemy") {
         gameAudio.hitEnemy();
         this.scene.addTrauma(0.4);
         this.scene.bloodBurst("enemy", !!out.death);
         this.scene.enemySetMood("hit");
-        this.onEvent({ type: "dmgPop", side: "enemy", text: "-1 HP", tone: "hit" });
+        this.onEvent({ type: "dmgPop", side: "enemy", text: out.amount > 0 ? `-${out.amount} HP` : "0 DMG", tone: "hit" });
         await sleep(650);
         if (out.death !== "enemy") {
           this.scene.enemySetMood("grin");
@@ -1075,7 +1231,10 @@ export class GameEngine {
       await sleep(500);
     }
 
-    if (out.death) return "dead";
+    if (out.death) {
+      if (await this.checkDeath("shot")) return "dead";
+      out.death = null; // a rule denied this death — the fight goes on
+    }
     this.notify();
     this.checkHealthFx();
     return "pass";
@@ -1276,6 +1435,8 @@ export class GameEngine {
         break;
       }
     }
+    // ENGINE C: every (peek) fires after any magnifying-glass reveal
+    if (id === "peek") this.fireScript("peek");
     this.notify();
   }
 
@@ -1286,6 +1447,14 @@ export class GameEngine {
     const endless = st.mode === "endless";
     const deadSide: Side = st.hp.enemy <= 0 ? "enemy" : "player";
     this.tEnd = performance.now();
+    if (!this.statsDone) {
+      this.statsDone = true;
+      this.stats.rounds = st.round;
+      this.stats.won = deadSide === "enemy" && !endless;
+      this.stats.score = st.score;
+      this.stats.money = this.money;
+      this.stats.ms = Math.max(0, this.tEnd - this.tStart);
+    }
     gameAudio.stopHeartbeat();
     this.scene.setRedPulse(0);
 
@@ -1382,24 +1551,29 @@ export class GameEngine {
    *  Rarity gates: EPIC needs NORMAL+ (SHOP ONLY — the dice never rolls it),
    *  LEGEND needs INSANE/ENDLESS (+ the allow-legend switch). Voodoo is
    *  never sold, and owned cards restock out unless the mutator allows
-   *  duplicates (each copy = its own inventory slot). */
+   *  duplicates (each copy = its own inventory slot).
+   *  DAILY SEED: the selection comes from the deterministic "shop" stream
+   *  keyed by the round — same day, same table, for everyone. */
   private rollOffers(): ShopOffer[] {
     const st = this.logic.state;
-    const pool = this.poolFor(st.difficulty, st.mode).filter((id) => {
-      if (!SHOP_PRICES[id]) return false; // voodoo is not for sale
-      const ownedActive = st.skills.some((s) => s.id === id && !(s.trial && s.charges <= 0));
-      if (ownedActive && !(this.mut?.allowDup ?? false)) return false;
-      return true;
-    });
-    return shuffled(pool)
-      .slice(0, 3)
-      .map((id) => ({
+    const pool = this.poolFor(st.difficulty, st.mode).filter((id) => !!SHOP_PRICES[id]);
+    const allowDup = this.mut?.allowDup ?? false;
+    const picks: ShopOffer[] = [];
+    for (let k = 0; picks.length < 3 && k < 24; k++) {
+      const id = streamPick(pool, (x) => {
+        const ownedActive = st.skills.some((s) => s.id === x && !(s.trial && s.charges <= 0));
+        return ownedActive && !allowDup; // taken = skip this one
+      }, "shop", k);
+      if (!id || picks.some((o) => o.id === id)) continue;
+      picks.push({
         id,
         price: SHOP_PRICES[id]!,
         rarity: RARITY[id],
         legendary: RARITY[id] === "legend",
         sold: false,
-      }));
+      });
+    }
+    return picks;
   }
 
   /** Open the shop between rounds and wait for the bell to be rung. */
@@ -1419,6 +1593,7 @@ export class GameEngine {
       sub: t("shopSub"),
       long: true,
     });
+    this.fireScript("shop"); // ENGINE C: the table stocks its goods
     this.notify();
     await new Promise<void>((res) => {
       this.shopResolve = res;

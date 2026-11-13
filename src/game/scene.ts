@@ -168,6 +168,8 @@ export class RouletteScene {
 
   private lampPivot!: THREE.Group;
   private spot!: THREE.SpotLight;
+  private bulbMesh!: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+  private bulbBase = new THREE.Color(3.2, 2.7, 1.7);
   private muzzleLight!: THREE.PointLight;
   private ambience!: THREE.HemisphereLight;
 
@@ -577,6 +579,8 @@ export class RouletteScene {
     );
     bulb.position.y = -0.76;
     this.lampPivot.add(bulb);
+    this.bulbMesh = bulb;
+    this.bulbBase = new THREE.Color(3.2, 2.7, 1.7);
 
     this.spot = new THREE.SpotLight(0xffdc9e, 60, 9, 0.95, 0.55, 1.6);
     this.spot.position.set(0, -0.7, 0);
@@ -1518,6 +1522,32 @@ export class RouletteScene {
 
   setLampBoost(v: number) {
     this.lampBoost = v;
+  }
+
+  /** TENSION JUICE: the hanging lamp sputters — used while the DEALER
+   *  feeds shells into the cylinder and at other scary beats. The render
+   *  loop eases lampFlicker back to 1, so each dip lasts a few frames. */
+  lampDip(strength = 1) {
+    this.lampFlicker = Math.max(0.1, 0.62 - 0.42 * strength);
+  }
+
+  /** ENGINE C theme(color): tint the hanging lamp + its light. 0 restores
+   *  the warm default. The whole room mood shifts with one builtin call. */
+  setThemeTint(color: number) {
+    const c = color >>> 0;
+    if (!this.spot || !this.bulbMesh) return;
+    if (c === 0) {
+      this.spot.color.setHex(0xffdc9e);
+      this.bulbMesh.material.color.copy(this.bulbBase);
+      return;
+    }
+    this.spot.color.setHex(c);
+    const mat = this.bulbMesh.material as THREE.MeshBasicMaterial;
+    mat.color.setHex(c);
+    // keep the bulb bright: scale RGB past 1 like the warm default does
+    const col = new THREE.Color(c);
+    const mx = Math.max(col.r, col.g, col.b) || 1;
+    mat.color.setRGB((col.r / mx) * 3.2, (col.g / mx) * 3.2, (col.b / mx) * 3.2);
   }
 
   /* ---------------- graphics quality (SETTINGS) ---------------- */

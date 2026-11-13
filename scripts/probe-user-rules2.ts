@@ -1,4 +1,5 @@
 import { compileScript, ScriptRuntime } from "../src/game/script";
+import type { Side } from "../src/game/logic";
 
 async function run(label: string, src: string, rounds: number) {
   const c = compileScript(src);
@@ -10,7 +11,7 @@ async function run(label: string, src: string, rounds: number) {
     heal: (side, n) => calls.push(`heal(${side},${n})`),
     damage: (side, n) => calls.push(`damage(${side},${n})`),
     say: (m) => calls.push(`say("${m}")`),
-    stateRef: () => ({ hp: () => 10, score: () => 0, round: () => 0 }),
+    stateRef: () => ({ hp: { player: 10, enemy: 10 } as Record<Side, number>, score: 0, round: 0 }),
   });
   for (let i = 0; i < rounds; i++) rt.fire("round", {});
   console.log("calls:", calls.join("  ") || "(kosong)");

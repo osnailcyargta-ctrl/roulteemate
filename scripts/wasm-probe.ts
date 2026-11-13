@@ -196,6 +196,59 @@ every (round) {
     }
   }
 
+  /* 8. ENGINE C v2: new hooks + new builtins */
+  {
+    const calls: string[] = [];
+    const res = compileScript(`
+int dmg = 2;
+every (round)   { set_dmg_next(dmg); }
+every (shop)    { say("welcome to the shop"); }
+every (death)   { if (chance(100)) heal(PLAYER, 5); }
+every (coin)    { set_coin(1); }
+every (peek)    { shuffle(); }
+every (setup)   { theme(16711680); }
+`);
+    ok("v2 program compiles", res.ok, res.errors.join(" | "));
+    ok("v2 hooks detected", res.hooks.join(",") === "setup,round,shop,death,coin,peek", res.hooks.join(","));
+    if (res.ok && res.bytes) {
+      const rt = await ScriptRuntime.instantiate(res.bytes, {
+        runSkill: () => {},
+        heal: (side, n) => calls.push(`heal ${side} ${n}`),
+        damage: (side, n) => calls.push(`damage ${side} ${n}`),
+        say: (s) => calls.push(`say ${s}`),
+        stateRef: () => ({ hp: { player: 0, enemy: 3 } as Record<Side, number>, score: 0, round: 1 }),
+        // ENGINE C v2 optional host methods
+        chance: (p) => p >= 100,
+        shuffle: () => calls.push("shuffle"),
+        theme: (c) => calls.push(`theme ${c}`),
+        setDmgNext: (n) => calls.push(`set_dmg_next ${n}`),
+        setCoin: (w) => calls.push(`set_coin ${w}`),
+      });
+      rt.fire("setup");
+      rt.fire("round");
+      rt.fire("shop");
+      rt.fire("death"); // hp player = 0 → death hook heals 5 via chance(100)
+      rt.fire("coin");
+      rt.fire("peek");
+      ok("theme passed the color", calls.includes("theme 16711680"), calls.join(" | "));
+      ok("set_dmg_next passed 2", calls.includes("set_dmg_next 2"), calls.join(" | "));
+      ok("shop hook said its line", calls.includes("say welcome to the shop"), calls.join(" | "));
+      ok("chance(100) + heal denied death", calls.includes("heal player 5"), calls.join(" | "));
+      ok("set_coin forced heads", calls.includes("set_coin 1"), calls.join(" | "));
+      ok("shuffle called on peek", calls.includes("shuffle"), calls.join(" | "));
+    }
+  }
+
+  /* 9. v2 default host (no optional methods) still runs */
+  {
+    const { res, rt } = await run(`every (coin) { if (chance(0) == 1) { damage(PLAYER, 9); } }`);
+    ok("v2 compiles without optional host", res.ok, res.errors.join(" | "));
+    if (rt) {
+      rt.fire("coin");
+      ok("chance(0) never fires", true);
+    }
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 }

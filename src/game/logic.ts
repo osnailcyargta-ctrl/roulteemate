@@ -30,6 +30,7 @@
  */
 
 import type { SkillId } from "./doodle";
+import { rngStream } from "./seed";
 
 export type ShellType = "live" | "blank";
 export type Side = "player" | "enemy";
@@ -43,6 +44,8 @@ export interface LastShot {
   reflected: boolean;
   /** Cash the engine paid out for this shot (refunded by rewind). */
   moneyGain: number;
+  /** Damage this shell dealt (set_dmg_next can raise it above 1). */
+  amount: number;
 }
 
 export interface SkillState {
@@ -96,6 +99,8 @@ export interface GameState {
   countdown: number; // turns left before the LIVE/BLANK board fades out
 }
 
+/** set_dmg_next(n): damage of the very next trigger pull (null = normal 1). */
+
 export interface ShotOutcome {
   shooter: Side;
   target: Side; // aim target
@@ -107,6 +112,8 @@ export interface ShotOutcome {
   phoenixSaved: boolean; // the phoenix charm burned instead of the player
   death: Side | null;
   forced: boolean; // this shot was forced (from the voodoo curse)
+  /** Damage this shell dealt (set_dmg_next can raise it above 1). */
+  amount: number;
 }
 
 export interface SkillOutcome {
@@ -184,6 +191,8 @@ export interface LogicOverrides {
 
 export class RouletteLogic {
   state: GameState;
+  /** set_dmg_next(n): the next trigger pull deals n damage instead of 1. */
+  dmgNext: number | null = null;
   /** AI-only knowledge of the current shell (from its own peek). */
   aiKnown: ShellType | null = null;
   /** Player knowledge of the current shell (peek / third eye slot 0). */
@@ -245,19 +254,24 @@ export class RouletteLogic {
 
   /* ---------------- cylinder ---------------- */
 
+  /**
+   * Load the cylinder. UNDER THE DAILY SEED every draw goes through the
+   * deterministic "shells" stream — two players on the same date get the
+   * exact same live/blank counts AND the same shell order, every round.
+   */
   loadCylinder() {
     const r = this.state.round;
     let liveCount: number;
-    if (r <= 1) liveCount = 2 + (Math.random() < 0.5 ? 1 : 0);
-    else if (r === 2) liveCount = 3 + (Math.random() < 0.5 ? 1 : 0);
-    else liveCount = 4 + (Math.random() < 0.4 ? 1 : 0);
+    if (r <= 1) liveCount = 2 + (rngStream("shells", r, 0) < 0.5 ? 1 : 0);
+    else if (r === 2) liveCount = 3 + (rngStream("shells", r, 0) < 0.5 ? 1 : 0);
+    else liveCount = 4 + (rngStream("shells", r, 0) < 0.4 ? 1 : 0);
     liveCount = Math.min(5, Math.max(2, liveCount));
     const shells: ShellType[] = [];
     for (let i = 0; i < liveCount; i++) shells.push("live");
     while (shells.length < CHAMBER_SIZE) shells.push("blank");
-    // Fisher-Yates shuffle
+    // Fisher-Yates shuffle (deterministic under the daily seed)
     for (let i = shells.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = Math.floor(rngStream("shells", r, 1, i) * (i + 1));
       [shells[i], shells[j]] = [shells[j], shells[i]];
     }
     this.state.cylinder = shells;
@@ -283,6 +297,20 @@ export class RouletteLogic {
 
   get isEmpty() {
     return this.state.cylinder.length === 0;
+  }
+
+  /** ENGINE C shuffle(): scramble the REMAINING shell order in place.
+   *  Counts stay public knowledge — only the order is lost. */
+  shuffleChamber() {
+    const c = this.state.cylinder;
+    for (let i = c.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [c[i], c[j]] = [c[j], c[i]];
+    }
+    // all positional knowledge dies — the queue slots stay, but go blind
+    this.playerKnownQueue = c.map(() => null);
+    this.playerKnown = null;
+    this.aiKnown = null;
   }
 
   /* ---------------- skill grants (dice / shop) ---------------- */
@@ -561,9 +589,9 @@ export class RouletteLogic {
         st.cylinder.unshift(last.shell);
         if (last.damageTo) {
           if (last.damageTo === "enemy" && st.mode === "endless") {
-            st.score -= 1; // even the score forgets it happened
+            st.score -= last.amount; // even the score forgets it happened
           } else {
-            st.hp[last.damageTo] = Math.min(st.maxHp[last.damageTo], st.hp[last.damageTo] + 1);
+            st.hp[last.damageTo] = Math.min(st.maxHp[last.damageTo], st.hp[last.damageTo] + last.amount);
           }
         }
         // the AI's memory gets its shell back too
@@ -612,6 +640,10 @@ export class RouletteLogic {
     this.playerKnown = this.playerKnownQueue[0] ?? null;
     this.aiKnown = null;
 
+    // set_dmg_next(n): this trigger pull deals n (then the override burns)
+    const dmg = Math.max(0, this.dmgNext ?? 1);
+    this.dmgNext = null;
+
     const out: ShotOutcome = {
       shooter,
       target,
@@ -623,6 +655,7 @@ export class RouletteLogic {
       phoenixSaved: false,
       death: null,
       forced,
+      amount: dmg,
     };
 
     const shooterVoodoo = st.voodooTurns[shooter] > 0;
@@ -677,14 +710,14 @@ export class RouletteLogic {
       const phoenixSlot = st.skills.find((s) => s.id === "phoenix" && s.charges > 0);
       if (
         out.damageTo === "player" &&
-        st.hp.player - 1 <= 0 &&
+        st.hp.player - dmg <= 0 &&
         phoenixSlot
       ) {
         phoenixSlot.charges -= 1;
         st.hp.player = 1;
         out.phoenixSaved = true;
       } else {
-        const dead = this.damageSide(out.damageTo, 1);
+        const dead = this.damageSide(out.damageTo, dmg);
         // ENDLESS: hurting the DEALER only feeds the score — nobody dies
         if (dead) out.death = out.damageTo;
       }
@@ -696,6 +729,7 @@ export class RouletteLogic {
       damageTo: out.damageTo,
       reflected: out.reflected,
       moneyGain: 0, // the engine fills in the cash payout it gave
+      amount: dmg,
     };
 
     return out;
@@ -772,8 +806,8 @@ export class RouletteLogic {
         if (!last) return {};
         st.cylinder.unshift(last.shell);
         if (last.damageTo) {
-          if (last.damageTo === "enemy" && st.mode === "endless") st.score -= 1;
-          else st.hp[last.damageTo] = Math.min(st.maxHp[last.damageTo], st.hp[last.damageTo] + 1);
+          if (last.damageTo === "enemy" && st.mode === "endless") st.score -= last.amount;
+          else st.hp[last.damageTo] = Math.min(st.maxHp[last.damageTo], st.hp[last.damageTo] + last.amount);
         }
         this.aiMem.total += 1;
         if (last.shell === "live") this.aiMem.live = Math.min(this.aiMem.live + 1, this.aiMem.total);
