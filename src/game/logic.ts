@@ -30,7 +30,7 @@
  */
 
 import type { SkillId } from "./doodle";
-import { rngStream } from "./seed";
+import { coinFlip, rngStream, shellReroll } from "./seed";
 
 export type ShellType = "live" | "blank";
 export type Side = "player" | "enemy";
@@ -517,9 +517,10 @@ export class RouletteLogic {
     if (sk.trial && sk.charges > 0) sk.charges -= 1;
     switch (id) {
       case "reroll": {
-        // pure reroll: random result, may repeat itself
+        // pure reroll: random result, may repeat itself.
+        // DAILY SEED: the new shell comes from the deterministic reroll lane.
         this.noteReroll(this.aiKnown);
-        const next: ShellType = Math.random() < 0.5 ? "live" : "blank";
+        const next: ShellType = shellReroll();
         st.cylinder[0] = next;
         sk.cooldown = SKILL_CD.reroll;
         st.mustShoot = true;
@@ -612,7 +613,8 @@ export class RouletteLogic {
         // The engine may PRE-ROLL the flip so the 3D coin lands honestly.
         if (!sk.trial) sk.charges -= 1;
         sk.cooldown = SKILL_CD.gamble;
-        const win = preset.win ?? Math.random() < 0.5;
+        // DAILY SEED: an unforced flip runs through the coin lane.
+        const win = preset.win ?? coinFlip();
         let died = false;
         if (win) {
           this.healSide(side, 1);
@@ -678,7 +680,8 @@ export class RouletteLogic {
         if (shooterVoodoo && !forced) {
           // VOODOO CURSE: the blank shell is rerolled and you MUST fire once
           // more — aimed at the opponent. The fresh shell is pushed on top.
-          const fresh: ShellType = Math.random() < 0.5 ? "live" : "blank";
+          // DAILY SEED: the fresh shell comes from the reroll lane.
+          const fresh: ShellType = shellReroll();
           st.cylinder.unshift(fresh);
           this.noteFreshShell();
           this.playerKnownQueue = [null, ...this.playerKnownQueue];
@@ -751,7 +754,7 @@ export class RouletteLogic {
         this.healSide(target, 1);
         return {};
       case "reroll": {
-        const next: ShellType = Math.random() < 0.5 ? "live" : "blank";
+        const next: ShellType = shellReroll(); // DAILY SEED: deterministic lane
         if (st.cylinder.length) st.cylinder[0] = next;
         this.playerKnownQueue = this.playerKnownQueue.length ? [null, ...this.playerKnownQueue.slice(1)] : [];
         this.playerKnown = this.playerKnownQueue[0] ?? null;
@@ -815,7 +818,7 @@ export class RouletteLogic {
         return {};
       }
       case "gamble": {
-        const win = preset.win ?? Math.random() < 0.5;
+        const win = preset.win ?? coinFlip(); // DAILY SEED: coin lane
         let died = false;
         if (win) this.healSide(target, 1);
         else died = this.damageSide(target, 1);

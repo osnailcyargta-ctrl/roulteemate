@@ -46,7 +46,11 @@ const EN = {
   optProbHint: "(under the shell board)",
   optDaily: "Daily seed — same run for everyone",
   optDailyHint: "(from today's date, not hardcoded)",
+  optTutorial: "Interactive tutorial",
+  optTutorialHint: "(spotlight walkthrough — OFF by default)",
   optTutReplay: "Replay tutorial",
+  optTutReplayHint: "(starts a practice table right now)",
+  tutStart: "START",
   tutReplayed: "Tutorial rearmed — hints return on your next table.",
   on: "ON",
   off: "OFF",
@@ -134,7 +138,7 @@ const EN = {
   bestEndless: "BEST: score {s} (round {r})",
   bestNone: "No personal best yet — this run writes history.",
   newBest: "NEW BEST!",
-  // ---------- interactive tutorial ----------
+  // ---------- interactive tutorial (contextual hints) ----------
   tutGotIt: "GOT IT",
   tut1: "LIVE (red) hurts, BLANK (blue) is empty. The board up top counts them honestly — but only for 3 turns. Q = shoot self, E = shoot the Dealer.",
   tut2: "Skills are FREE actions — using one never passes the turn. Press 1-4 or click a card.",
@@ -142,6 +146,32 @@ const EN = {
   tut4: "SHOP BREAK: hover the items on the table to inspect them, click to buy a 1-use TRIAL. Ring the golden bell to fight on.",
   tut5: "DANGER: your heart is pounding. Coffee heals, Phoenix refuses death — and shooting yourself with a BLANK earns a free shot at the Dealer.",
   tut6: "You MUST shoot now (a reroll leaves no way out). Pick the target the odds forgive.",
+  // ---------- interactive tutorial (spotlight walkthrough) ----------
+  tutSpot: "TUTORIAL",
+  tutNext: "NEXT",
+  tutSkip: "Skip the tutorial",
+  tutClick: "CLICK IT!",
+  tutWaiting: "play on — this card pops when it happens",
+  tutStepWelcome:
+    "Welcome to the table. This walkthrough runs on a REAL table — everything you do counts. Follow the golden outline; when it says CLICK IT, really click that thing.",
+  tutStepDealer:
+    "THE DEALER. His hearts hang top-right. Drop them all to zero and the room is yours. (ENDLESS swaps his hearts for a SCORE counter.)",
+  tutStepYou:
+    "YOU. Your hearts sit under your name. Hit zero and the run is over — so read the odds before you pull.",
+  tutStepBoard:
+    "The LIVE/BLANK board. It honestly counts the shells left in the cylinder — but only for the first 3 turns, then it fades. The % chip below shows whichever side is more likely.",
+  tutStepSkills:
+    "Your skill cards. Skills are FREE — they never pass the turn. Try one now: click any card, or press 1-4. A number over a card means it's still resting.",
+  tutStepFire:
+    "Time to pull the trigger. SHOOT SELF — a blank pays one free shot at the Dealer, live hurts. SHOOT DEALER — live hits him. Click whichever the odds forgive.",
+  tutStepCash:
+    "Your CASH. Bullets you land pay $100, voodoo reflections $150, surviving a round $75. Between rounds 3 random items land on the table — hover to inspect, click to buy a 1-use TRIAL.",
+  tutStepShop:
+    "SHOP BREAK. Hover the items ON THE TABLE to read price & effect; click to buy one as a 1-use TRIAL. Ring the golden bell on the left to end the break and load the next round.",
+  tutStepFade:
+    "THE BOARD FADED. Both of you run on memory now — the spent shells on the table edge are your ledger, in firing order.",
+  tutStepEnd:
+    "That's the whole walk. The rest you learn by surviving: Phoenix refuses death, Reroll forces a shot, Voodoo reflects pain, Rewind undoes a trigger, Third Eye reads three shells. Good luck — and don't trust his grin.",
   // ---------- engine toasts ----------
   boardFaded: "THE BOARD FADED — memorize your shells!",
   chamberEmpty: "CHAMBER EMPTY — the round is over!",
@@ -196,7 +226,11 @@ const ID: Record<keyof typeof EN, string> = {
   optProbHint: "(di bawah papan shell)",
   optDaily: "Seed harian — run sama untuk semua orang",
   optDailyHint: "(dihitung dari tanggal hari ini, bukan hardcoded)",
+  optTutorial: "Tutorial interaktif",
+  optTutorialHint: "(tur spotlight — default MATI)",
   optTutReplay: "Ulangi tutorial",
+  optTutReplayHint: "(langsung mulai meja latihan)",
+  tutStart: "MULAI",
   tutReplayed: "Tutorial diaktifkan lagi — hint muncul di meja berikutnya.",
   on: "NYALA",
   off: "MATI",
@@ -292,6 +326,32 @@ const ID: Record<keyof typeof EN, string> = {
   tut4: "ISTIRAHAT TOKO: arahkan kursor ke barang di meja buat inspect, klik buat beli COBA 1 pakai. Bunyikan lonceng emas buat lanjut.",
   tut5: "BAHAYA: jantungmu berdebar. Coffee nyembuhin, Phoenix nolak kematian — dan nembak diri pakai BLANK kasih tembakan gratis ke Dealer.",
   tut6: "Kamu HARUS nembak sekarang (hasil reroll gak ada jalan keluar). Pilih target yang paling pengertian sama peluang.",
+  // ---------- interactive tutorial (spotlight walkthrough) ----------
+  tutSpot: "TUTORIAL",
+  tutNext: "LANJUT",
+  tutSkip: "Lewati tutorial",
+  tutClick: "KLIK INI!",
+  tutWaiting: "main aja dulu — kartu ini muncul pas kejadiannya datang",
+  tutStepWelcome:
+    "Selamat datang di meja. Tur ini jalan di meja BENERAN — semua yang kamu lakuin itu nyata. Ikuti garis emasnya; pas dia bilang KLIK INI, klik beneran.",
+  tutStepDealer:
+    "THE DEALER. Hati-hatinya nongkrong di kanan atas. Nol-in semuanya dan ruangan ini jadi milikmu. (TANPA BATAS mengganti hati-hatinya jadi penghitung SKOR.)",
+  tutStepYou:
+    "KAMU. Hati-hatimu ada di bawah namamu. Nol berarti tamat — jadi baca peluangnya dulu sebelum narik trigger.",
+  tutStepBoard:
+    "Papan LIVE/BLANK. Dia ngitung shell yang tersisa di chamber dengan jujur — tapi cuma 3 giliran pertama, habis itu memudar. Chip % di bawah nunjukin sisi yang peluangnya lebih gede.",
+  tutStepSkills:
+    "Kartu skill-mu. Skill itu GRATIS — gak pernah melewatkan giliran. Coba sekarang: klik salah satu kartu, atau tekan 1-4. Angka di atas kartu artinya dia masih istirahat.",
+  tutStepFire:
+    "Saatnya narik trigger. TEMBAK DIRI — blank bayar satu tembakan gratis ke Dealer, live nyakitin kamu. TEMBAK DEALER — live kena dia. Klik yang paling dimaafkan peluang.",
+  tutStepCash:
+    "UANG-mu. Peluru yang kena bayar $100, pantulan voodoo $150, selamat satu ronde $75. Di sela ronde 3 barang acak muncul di meja — hover buat inspect, klik buat beli COBA 1 pakai.",
+  tutStepShop:
+    "ISTIRAHAT TOKO. Hover barang DI ATAS MEJA buat baca harga & efek; klik buat beli sebagai COBA 1 pakai. Bunyikan lonceng emas di kiri buat akhiri istirahat dan isi ronde berikutnya.",
+  tutStepFade:
+    "PAPANNYA MENGELAP. Sekarang kalian berdua jalan pakai ingatan — shell bekas di tepi meja adalah buku besarmu, urut dari yang ditembak.",
+  tutStepEnd:
+    "Tur-nya cuma itu. Sisanya kamu belajar dengan bertahan: Phoenix nolak mati, Reroll maksa nembak, Voodoo pantulkan sakit, Rewind batalkan tembakan, Third Eye baca 3 shell. Semoga beruntung — dan jangan percaya senyum dia.",
   // ---------- engine toasts ----------
   boardFaded: "PAPANNYA SUDAH GELAP — hafal pelurumu!",
   chamberEmpty: "CHAMBER KOSONG — ronde selesai!",

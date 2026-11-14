@@ -37,7 +37,7 @@ import { pick } from "./taunts";
 import { t } from "./i18n";
 import { MUT_DEFAULTS, type MutConfig } from "./mutator";
 import { compileScript, ScriptRuntime, type ScriptEventName, type ScriptHost } from "./script";
-import { getDailyInfo, rngStream, setDailyOff, setDailySeed, streamPick } from "./seed";
+import { coinFlip, getDailyInfo, rngStream, scriptChance, setDailyOff, setDailySeed, streamPick } from "./seed";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
@@ -100,7 +100,8 @@ export type HudEvent =
   | { type: "skillFlash"; id: SkillId }
   | { type: "reloadStep"; loaded: number; total: number }
   | { type: "shopTip"; id: SkillId | "bell" | null; xPct: number; yPct: number }
-  | { type: "rewindFx" };
+  | { type: "rewindFx" }
+  | { type: "tutAction"; action: "shoot" | "skill" | "buy" | "bell" | "shopOpen" };
 
 const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.95 };
 
@@ -489,8 +490,9 @@ export class GameEngine {
         score: this.logic.state.score,
         round: this.logic.state.round,
       }),
-      // ENGINE C v2 builtins
-      chance: (p) => Math.random() * 100 < p,
+      // ENGINE C v2 builtins — chance() runs through the DAILY SEED script
+      // lane so a seeded table stays reproducible for everyone
+      chance: (p) => scriptChance(p),
       shuffle: () => this.logic.shuffleChamber(),
       theme: (c) => this.scene.setThemeTint(c),
       setDmgNext: (n) => {
@@ -569,7 +571,8 @@ export class GameEngine {
         // the REAL semi-3D coin: tossed up from the table, lands on the face
         // the script rolled — then the effect applies.
         // ENGINE C: every (coin) fires first; set_coin(1|0) forces the face.
-        let win = Math.random() < 0.5;
+        // DAILY SEED: the unforced flip comes from the coin lane.
+        let win = coinFlip();
         this.fireScript("coin", { skill: "gamble" });
         if (this.coinOverride !== null) {
           win = this.coinOverride;
@@ -848,6 +851,8 @@ export class GameEngine {
     this.busy = true;
     this.stats.shots++;
     this.notify();
+    // interactive tutorial: the player really pulled the trigger
+    this.onEvent({ type: "tutAction", action: "shoot" });
 
     // LOW-HP TENSION: below 3 HP a self-shot gets 0.7s of pure dread first.
     const tension = target === "player" && st.hp.player < 3;
@@ -886,7 +891,8 @@ export class GameEngine {
       // from the table, and only when it lands does fate apply.
       // ENGINE C: every (coin) fires BEFORE the flip — set_coin(1|0) inside
       // it forces heads/tails for THIS flip (one-shot override).
-      let win = Math.random() < 0.5;
+      // DAILY SEED: the unforced flip comes from the coin lane.
+      let win = coinFlip();
       this.fireScript("coin", { skill: "gamble" });
       if (this.coinOverride !== null) {
         win = this.coinOverride;
@@ -931,6 +937,8 @@ export class GameEngine {
     // a spent TRIAL starts its 2-turn fade away
     const spent = this.logic.playerSlot(uid);
     if (spent?.trial && spent.charges <= 0) this.registerGhost(spent);
+    // interactive tutorial: the player really used a skill
+    this.onEvent({ type: "tutAction", action: "skill" });
     this.fireScript("skill", { skill: slot.id });
     this.notify();
     this.checkHealthFx();
@@ -1594,6 +1602,7 @@ export class GameEngine {
       long: true,
     });
     this.fireScript("shop"); // ENGINE C: the table stocks its goods
+    this.onEvent({ type: "tutAction", action: "shopOpen" });
     this.notify();
     await new Promise<void>((res) => {
       this.shopResolve = res;
@@ -1633,6 +1642,7 @@ export class GameEngine {
     this.onEvent({ type: "skillGet", id });
     this.toast(`TRIAL ${SKILL_META[id].name} bought — one use, then it fades!`, "good");
     this.scene.enemySay([pick("shopBuy")], 2.2);
+    this.onEvent({ type: "tutAction", action: "buy" });
     this.notify();
   }
 
@@ -1650,6 +1660,7 @@ export class GameEngine {
   private async ringBell() {
     if (this.logic.state.phase !== "shop") return;
     gameAudio.scanDing();
+    this.onEvent({ type: "tutAction", action: "bell" });
     this.scene.ringBellAnim();
     this.scene.enemySay([pick("bellRing")], 2);
     await sleep(750);

@@ -618,3 +618,22 @@ canvas {
 .doodle-box textarea::placeholder {
   color: rgba(34, 26, 18, 0.45);
 }
+
+/* ==================== INTERACTIVE TUTORIAL SPOTLIGHT ==================== */
+@keyframes tut-breathe {
+  0%,
+  100% {
+    outline-offset: 4px;
+    outline-color: rgba(217, 164, 65, 0.95);
+  }
+  50% {
+    outline-offset: 11px;
+    outline-color: rgba(217, 164, 65, 0.4);
+  }
+}
+.tut-outline {
+  animation: tut-breathe 1.15s ease-in-out infinite;
+}
+.tut-skip-chip {
+  animation: float-y 2.4s ease-in-out infinite;
+}

@@ -33,6 +33,7 @@ import { getDailyInfo } from "@/game/seed";
 import type { Difficulty } from "@/game/logic";
 import type { ShellType } from "@/game/logic";
 import { gameAudio } from "@/game/audio";
+import TutorialSpot from "./TutorialSpot";
 
 type Toast = { id: number; text: string; tone: string; leaving?: boolean };
 type Pop = { id: number; side: string; text: string; tone: string };
@@ -57,6 +58,9 @@ type Settings = {
   showProb: boolean;
   /** DAILY SEED: everyone playing today gets the same shells/shop/skills */
   daily: boolean;
+  /** INTERACTIVE tutorial — spotlight walkthrough; the whole feature (and
+   *  the replay button) can be turned OFF, and it defaults to OFF */
+  tutorial: boolean;
   /** TIME expands into these two */
   showRoundTime: boolean;
   showTotalTime: boolean;
@@ -74,57 +78,59 @@ const DEFAULT_SETTINGS: Settings = {
   showShellStat: true,
   showProb: true,
   daily: true,
+  tutorial: false,
   showRoundTime: true,
   showTotalTime: true,
   showFps: false,
 };
 
-/* ---------- interactive tutorial (first run, persisted) ---------- */
+/* ---------- interactive SPOTLIGHT tutorial (settings toggle, default OFF) ---------- */
 
 const TUT_KEY = "roulteemate-tutorial";
-type TutState = { done: boolean; seen: string[] };
+type TutState = { done: boolean };
 const loadTut = (): TutState => {
   try {
     const raw = localStorage.getItem(TUT_KEY);
-    if (raw) return JSON.parse(raw) as TutState;
+    if (raw) {
+      const p = JSON.parse(raw) as { done?: boolean; seen?: string[] };
+      // legacy format also tracked a seen[] list
+      return { done: !!p.done || (Array.isArray(p.seen) && p.seen.length > 0) };
+    }
   } catch {
     /* corrupted storage — start fresh */
   }
-  return { done: false, seen: [] };
+  return { done: false };
 };
 
-/** Contextual hints, in the order they can fire. Each shows once. */
-const TUT_STEPS: { id: string; key: Parameters<typeof t>[0]; cond: (s: HudSnapshot) => boolean }[] = [
-  {
-    id: "firstTurn",
-    key: "tut1",
-    cond: (s) => s.phase === "playerTurn" && s.turn === "player" && s.round > 0,
-  },
-  {
-    id: "skills",
-    key: "tut2",
-    cond: (s) => s.phase === "playerTurn" && s.turn === "player" && s.skills.some((k) => k.ghostTurns <= 0),
-  },
+type TutAction = "shoot" | "skill" | "buy" | "bell" | "shopOpen";
+
+/** The spotlight walkthrough, in order. ACTION steps complete when the REAL
+ *  action happens on the live table (the overlay stays click-through);
+ *  `when` steps wait for their moment (shop break, board fade...). */
+const TUT_SPOT_STEPS: {
+  id: string;
+  key: Parameters<typeof t>[0];
+  target: string | null; // data-tut attribute; null = center card
+  blocking: boolean; // info steps block clicks, action steps stay click-through
+  action?: TutAction;
+  when?: (s: HudSnapshot) => boolean;
+}[] = [
+  { id: "welcome", key: "tutStepWelcome", target: null, blocking: true },
+  { id: "dealer", key: "tutStepDealer", target: "dealer", blocking: true },
+  { id: "you", key: "tutStepYou", target: "you", blocking: true },
+  { id: "board", key: "tutStepBoard", target: "board", blocking: true },
+  { id: "skills", key: "tutStepSkills", target: "skills", blocking: false, action: "skill" },
+  { id: "fire", key: "tutStepFire", target: "fire", blocking: false, action: "shoot" },
+  { id: "cash", key: "tutStepCash", target: "cash", blocking: true },
+  { id: "shop", key: "tutStepShop", target: null, blocking: true, when: (s) => s.phase === "shop" },
   {
     id: "fade",
-    key: "tut3",
-    cond: (s) => s.round > 0 && !s.countsPublic && s.phase === "playerTurn",
+    key: "tutStepFade",
+    target: null,
+    blocking: true,
+    when: (s) => s.phase === "playerTurn" && !s.countsPublic,
   },
-  {
-    id: "shop",
-    key: "tut4",
-    cond: (s) => s.phase === "shop",
-  },
-  {
-    id: "lowhp",
-    key: "tut5",
-    cond: (s) => s.phase === "playerTurn" && s.hpPlayer <= 2 && s.hpPlayer > 0,
-  },
-  {
-    id: "mustshoot",
-    key: "tut6",
-    cond: (s) => s.mustShoot && s.turn === "player",
-  },
+  { id: "end", key: "tutStepEnd", target: null, blocking: true },
 ];
 
 function loadSettings(): Settings {
@@ -235,9 +241,11 @@ export default function GameShell() {
   );
   /* ---------- FPS meter ---------- */
   const [fps, setFps] = useState(0);
-  /* ---------- interactive tutorial ---------- */
-  const [tut, setTut] = useState<TutState>({ done: false, seen: [] });
-  const [tutCard, setTutCard] = useState<string | null>(null);
+  /* ---------- interactive tutorial (spotlight, default OFF) ---------- */
+  const [tut, setTut] = useState<TutState>({ done: false });
+  const [tutStep, setTutStep] = useState(0);
+  const [tutRun, setTutRun] = useState(false);
+  const tutReplayRef = useRef(false);
   /* ---------- end-of-run best tracking ---------- */
   const [bestInfo, setBestInfo] = useState<{ isNew: boolean; rounds: number; score: number; endless: boolean; hasBest: boolean } | null>(null);
 
@@ -314,9 +322,10 @@ export default function GameShell() {
     assetsRef.current = assets;
   }, [assets]);
 
-  const handleEvent = useCallback((e: HudEvent) => {
-    const id = ++evId.current;
-    switch (e.type) {
+  const handleEvent = useCallback(
+    (e: HudEvent) => {
+      const id = ++evId.current;
+      switch (e.type) {
       case "toast": {
         setToasts((t) => [...t.slice(-4), { id, text: e.text, tone: e.tone ?? "info" }]);
         // graceful exit: slide-fade out before removal
@@ -379,8 +388,14 @@ export default function GameShell() {
         setRewinding(true);
         setTimeout(() => setRewinding(false), 1500);
         break;
+      case "tutAction":
+        // the interactive tutorial advances its ACTION steps on real play
+        setTutStep((i) => (TUT_SPOT_STEPS[i]?.action === e.action ? i + 1 : i));
+        break;
     }
-  }, []);
+    },
+    [],
+  );
 
   /* ---------- mount engine ---------- */
   useEffect(() => {
@@ -462,29 +477,38 @@ export default function GameShell() {
     }
   }, []);
 
+  /* arm once per run: the spotlight plays when the feature is ON and the
+   * player hasn't finished it yet (or asked for a replay) */
+  const tutArmedRef = useRef(false);
   useEffect(() => {
-    const s = snap;
-    if (!s || phaseKey === "menu") return;
-    if (tutRef.current.done) return;
-    if (tutCard) return; // one card at a time
-    const step = TUT_STEPS.find((st) => !tutRef.current.seen.includes(st.id) && st.cond(s));
-    if (step) setTutCard(step.id);
-  }, [snap, phaseKey, tutCard]);
+    if (phaseKey === "menu") {
+      tutArmedRef.current = false;
+      setTutRun(false);
+      return;
+    }
+    if (phaseKey === "gameover" || phaseKey === "victory") return;
+    if (tutArmedRef.current) return;
+    tutArmedRef.current = true;
+    if (settings.tutorial && (!tutRef.current.done || tutReplayRef.current)) {
+      tutReplayRef.current = false;
+      setTutStep(0);
+      setTutRun(true);
+    }
+  }, [phaseKey, settings.tutorial]);
 
-  const dismissTut = useCallback(() => {
-    if (!tutCard) return;
-    const seen = [...tutRef.current.seen, tutCard];
-    const done = TUT_STEPS.every((st) => seen.includes(st.id));
-    saveTut({ done, seen });
-    setTutCard(null);
-  }, [tutCard, saveTut]);
-
-  /* auto-dismiss tutorial cards after 12s so they never block play */
+  /* the last step closes the walkthrough and remembers it */
+  const tutDone = tutRun && tutStep >= TUT_SPOT_STEPS.length;
   useEffect(() => {
-    if (!tutCard) return;
-    const iv = setTimeout(dismissTut, 12000);
-    return () => clearTimeout(iv);
-  }, [tutCard, dismissTut]);
+    if (!tutDone) return;
+    setTutRun(false);
+    saveTut({ done: true });
+  }, [tutDone, saveTut]);
+
+  const advanceTut = useCallback(() => setTutStep((i) => i + 1), []);
+  const skipTut = useCallback(() => {
+    setTutRun(false);
+    saveTut({ done: true });
+  }, [saveTut]);
 
   /* ---------- personal best (written once per finished run) ---------- */
   const bestPhaseRef = useRef<string>("");
@@ -556,6 +580,18 @@ export default function GameShell() {
     }
   };
 
+  /** REPLAY TUTORIAL: a real practice table (EASY) with the spotlight
+   *  walkthrough forced on from step one. Only reachable while the
+   *  tutorial feature itself is switched on. */
+  const startTutorialRun = () => {
+    gameAudio.ensure();
+    gameAudio.click();
+    tutReplayRef.current = true;
+    saveTut({ done: false });
+    setMenuPanel(null);
+    void engineRef.current?.startGame("easy", undefined, settings.daily);
+  };
+
   const launchCustomTable = () => {
     if (!mutCfg) return;
     if (!compiled.ok) return; // never sit down with a broken script
@@ -575,6 +611,11 @@ export default function GameShell() {
   const probLive =
     snap && snap.live + snap.blank > 0 ? Math.round((snap.live / (snap.live + snap.blank)) * 100) : null;
   const dailyToday = getDailyInfo();
+  /* interactive spotlight tutorial (only while the feature is ON) */
+  const tutActive =
+    tutRun && settings.tutorial && inGame && phase !== "gameover" && phase !== "victory";
+  const curTutStep = tutActive ? TUT_SPOT_STEPS[tutStep] : null;
+  const tutStepVisible = !!curTutStep && (!curTutStep.when || (snap ? curTutStep.when(snap) : false));
 
   /* ---------- render ---------- */
   return (
@@ -656,7 +697,7 @@ export default function GameShell() {
               Can be switched off entirely in SETTINGS > UI & QOL.
               Beneath it: the optional LIVE/BLANK percentage chip. */}
           {snap.round > 0 && (snap.live + snap.blank > 0) && (
-          <div className="absolute left-1/2 top-3 z-30 flex -translate-x-1/2 flex-col items-center">
+          <div data-tut="board" className="absolute left-1/2 top-3 z-30 flex -translate-x-1/2 flex-col items-center">
             {settings.showShellStat && (
               <div className="relative">
                 <div
@@ -739,6 +780,7 @@ export default function GameShell() {
               )}
             </div>
             <div
+              data-tut="cash"
               className="doodle-box w-fit px-2 py-0.5 font-marker text-xs text-[#8a6d1d] rotate-[1deg] sm:text-sm"
               title="Cash — land bullets ($100), voodoo reflections ($150), survive rounds ($75). Between rounds 3 random items appear on the table."
             >
@@ -762,7 +804,7 @@ export default function GameShell() {
 
           {/* top right: THE DEALER — hearts in standard play, the SCORE
               counter in ENDLESS (his HP literally becomes a scoreboard) */}
-          <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-1">
+          <div data-tut="dealer" className="absolute right-3 top-3 z-30 flex flex-col items-end gap-1">
             <div className="doodle-box px-3 py-1 rotate-[1.5deg]">
               <span className="font-marker text-lg text-[#8f2418]">{t("theDealer")}</span>
               {snap.voodooEnemy > 0 && (
@@ -804,7 +846,7 @@ export default function GameShell() {
 
           {/* player: top-left on mobile, bottom-left on desktop.
               The optional FPS meter sits right ABOVE the YOU indicator (60% opacity). */}
-          <div className="absolute left-2 top-[88px] z-30 flex flex-col gap-1 sm:left-3 sm:top-auto sm:bottom-3">
+          <div data-tut="you" className="absolute left-2 top-[88px] z-30 flex flex-col gap-1 sm:left-3 sm:top-auto sm:bottom-3">
             {settings.showFps && (
               <div className="doodle-box doodle-dark w-fit px-2 py-0.5 font-hand-sc text-[10px] opacity-60 sm:text-xs">
                 FPS {fps}
@@ -867,7 +909,7 @@ export default function GameShell() {
 
           {/* skill bar — each slot is its OWN entry: duplicates appear twice,
               each with its own charges & cooldown counter */}
-          <div className="absolute bottom-[104px] left-1/2 z-30 flex -translate-x-1/2 items-end gap-1.5 sm:bottom-3 sm:gap-2">
+          <div data-tut="skills" className="absolute bottom-[104px] left-1/2 z-30 flex -translate-x-1/2 items-end gap-1.5 sm:bottom-3 sm:gap-2">
             {snap.skills
               .filter((s) => s.ghostTurns > 0 || s.charges !== 0 || s.cooldown > 0 || !s.trial)
               .map((s, idx) => {
@@ -923,7 +965,7 @@ export default function GameShell() {
           </div>
 
           {/* shoot buttons */}
-          <div className="absolute bottom-3 right-2 z-30 flex flex-row gap-2 sm:right-3 sm:flex-col">
+          <div data-tut="fire" className="absolute bottom-3 right-2 z-30 flex flex-row gap-2 sm:right-3 sm:flex-col">
             <button
               className={`doodle-btn doodle-red px-3 py-2.5 font-marker text-sm sm:px-5 sm:text-lg ${isPlayerTurn ? "" : "opacity-50"}`}
               disabled={!isPlayerTurn}
@@ -960,26 +1002,36 @@ export default function GameShell() {
             ))}
           </div>
 
-          {/* interactive tutorial card — contextual hints, first run only */}
-          {tutCard && (
-            <div className="absolute bottom-[210px] left-3 z-40 w-72 sm:bottom-28">
-              <div className="pop-in doodle-box px-4 py-3 rotate-[-1deg]">
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="font-marker text-sm text-[#8f2418]">TUTORIAL</span>
-                  <button className="doodle-btn px-2 py-0.5 font-marker text-xs" onClick={dismissTut}>
-                    X
-                  </button>
-                </div>
-                <div className="font-hand text-[15px] leading-snug">
-                  {t((TUT_STEPS.find((s) => s.id === tutCard)?.key ?? "tut1") as Parameters<typeof t>[0])}
-                </div>
-                <div className="mt-2 flex justify-end">
-                  <button className="doodle-btn px-3 py-1 font-hand-sc text-sm" onClick={dismissTut}>
-                    {t("tutGotIt")}
-                  </button>
-                </div>
-              </div>
-            </div>
+          {/* interactive SPOTLIGHT tutorial — golden outlines point at the
+              real HUD; action steps stay click-through and complete when the
+              player actually does the thing. Enabled in SETTINGS, default OFF. */}
+          {tutActive && curTutStep && tutStepVisible && (
+            <TutorialSpot
+              key={curTutStep.id}
+              target={curTutStep.target}
+              title={t("tutSpot")}
+              text={t(curTutStep.key)}
+              step={tutStep + 1}
+              total={TUT_SPOT_STEPS.length}
+              blocking={curTutStep.blocking}
+              actionMode={!!curTutStep.action}
+              nextLabel={t("tutNext")}
+              skipLabel={t("tutSkip")}
+              waitingLabel={t("tutWaiting")}
+              clickLabel={t("tutClick")}
+              onNext={advanceTut}
+              onSkip={skipTut}
+            />
+          )}
+          {/* while a `when` step waits for its moment, a small escape chip
+              stays on screen so the walkthrough can always be skipped */}
+          {tutActive && curTutStep && !tutStepVisible && (
+            <button
+              className="tut-skip-chip doodle-btn absolute bottom-3 left-1/2 z-[58] -translate-x-1/2 px-3 py-1 font-hand-sc text-xs opacity-80"
+              onClick={skipTut}
+            >
+              {t("tutSpot")} — {t("tutSkip")}
+            </button>
           )}
         </>
       )}
@@ -1344,17 +1396,35 @@ export default function GameShell() {
                     </span>
                   </button>
 
-                  {/* replay the interactive tutorial */}
+                  {/* INTERACTIVE tutorial — the whole feature (and its replay
+                      button below) can be turned OFF; default is OFF */}
                   <button
                     className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
-                    onClick={() => {
-                      saveTut({ done: false, seen: [] });
-                      gameAudio.click();
-                    }}
+                    onClick={() => updateSettings({ tutorial: !settings.tutorial })}
                   >
-                    <span className="font-hand text-lg">{t("optTutReplay")}</span>
-                    <span className="doodle-btn px-3 py-0.5 font-hand-sc text-sm">{t("on")}</span>
+                    <span className="font-hand text-lg">
+                      {t("optTutorial")}{" "}
+                      <span className="font-hand-sc text-sm text-[#4a4036]">{t("optTutorialHint")}</span>
+                    </span>
+                    <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.tutorial ? "" : "opacity-70"}`}>
+                      {settings.tutorial ? t("on") : t("off")}
+                    </span>
                   </button>
+
+                  {/* replay the tutorial — a real practice table; only exists
+                      while the tutorial feature itself is switched on */}
+                  {settings.tutorial && (
+                    <button
+                      className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
+                      onClick={startTutorialRun}
+                    >
+                      <span className="font-hand text-lg">
+                        {t("optTutReplay")}{" "}
+                        <span className="font-hand-sc text-sm text-[#4a4036]">{t("optTutReplayHint")}</span>
+                      </span>
+                      <span className="doodle-btn doodle-red px-3 py-0.5 font-hand-sc text-sm">{t("tutStart")}</span>
+                    </button>
+                  )}
 
                   {/* TIME — expands into round/total */}
                   <div>

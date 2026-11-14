@@ -12,7 +12,7 @@
 import { RouletteLogic, EnemyAI } from "../src/game/logic";
 import { RARITY, ALL_SKILL_IDS } from "../src/game/doodle";
 import { compileScript, ScriptRuntime, type ScriptHost } from "../src/game/script";
-import { isDailyOn, rngStream, seedFromDate, setDailyOff, setDailySeed } from "../src/game/seed";
+import { isDailyOn, rngStream, seedFromDate, setDailyOff, setDailySeed, shellReroll, coinFlip, scriptChance } from "../src/game/seed";
 import type { Side } from "../src/game/logic";
 
 let pass = 0;
@@ -175,6 +175,27 @@ console.log("DAILY SEED:");
   }
   check("daily: cylinders identical across instances (5 rounds)", same);
 
+  // the GAMEPLAY lanes are deterministic under the seed as well:
+  // re-arming the same seed must replay the same rerolls/flips/chances
+  setDailySeed(a.seed);
+  const rSeq = [shellReroll(), shellReroll(), shellReroll()];
+  const cSeq = [coinFlip(), coinFlip(), coinFlip()];
+  const sSeq = [scriptChance(100), scriptChance(0), scriptChance(50)];
+  setDailySeed(a.seed);
+  check(
+    "reroll lane replays identically",
+    rSeq.join(",") === [shellReroll(), shellReroll(), shellReroll()].join(","),
+  );
+  check(
+    "coin lane replays identically",
+    cSeq.join(",") === [coinFlip(), coinFlip(), coinFlip()].join(","),
+  );
+  check(
+    "script chance lane replays identically",
+    sSeq.join(",") === [scriptChance(100), scriptChance(0), scriptChance(50)].join(","),
+  );
+  check("script chance(100) always true / (0) always false", sSeq[0] === true && sSeq[1] === false);
+
   // off = pure Math.random again (flag flips, game still works)
   setDailyOff();
   check("daily off", !isDailyOn());
@@ -188,6 +209,9 @@ console.log("DMG/SHUFFLE:");
   const L = new RouletteLogic("normal");
   L.loadCylinder();
   L.setPhase("playerTurn");
+  // rig the chamber so the FIRST shell is live — a blank would legitimately
+  // not apply any damage and the assertion would flake
+  L.state.cylinder = ["live", "blank", "live", "blank", "blank", "blank"];
   L.dmgNext = 3;
   const hpBefore = L.state.hp.enemy;
   const out = L.shoot("player", "enemy");

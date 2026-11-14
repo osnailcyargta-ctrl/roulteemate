@@ -76,15 +76,48 @@ let baseSeed = 0;
 export function setDailySeed(seed: number) {
   baseSeed = seed | 0;
   active = true;
+  rerollLane = 0;
+  coinLane = 0;
+  scriptLane = 0;
 }
 
 /** Back to plain Math.random. */
 export function setDailyOff() {
   active = false;
+  rerollLane = 0;
+  coinLane = 0;
+  scriptLane = 0;
 }
 
 export function isDailyOn(): boolean {
   return active;
+}
+
+/* ---------------- gameplay draw lanes ---------------- */
+
+/* Rerolls, coin flips and script chance() draws are REAL GAMEPLAY
+ * randomness — under the daily seed they must be deterministic too, so
+ * they run through their own counter lanes. Each lane advances on every
+ * draw; the counters reset when a new seed activates. */
+let rerollLane = 0;
+let coinLane = 0;
+let scriptLane = 0;
+
+/** Reroll the chamber shell (REROLL skill + the voodoo curse reroll).
+ *  DETERMINISTIC under the daily seed — Math.random chaos when it is off. */
+export function shellReroll(): "live" | "blank" {
+  return rngStream("reroll", rerollLane++) < 0.5 ? "live" : "blank";
+}
+
+/** One gamble coin flip. DETERMINISTIC under the daily seed.
+ *  (A set_coin() override still burns one lane — that is fine.) */
+export function coinFlip(): boolean {
+  return rngStream("coin", coinLane++) < 0.5;
+}
+
+/** ENGINE C chance(p): the script's own deterministic lane. */
+export function scriptChance(p: number): boolean {
+  return rngStream("script", scriptLane++) * 100 < p;
 }
 
 /* ---------------- the streams ---------------- */
