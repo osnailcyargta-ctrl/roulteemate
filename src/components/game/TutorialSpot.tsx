@@ -6,9 +6,10 @@
  * A golden dashed outline is drawn around the real HUD element the step
  * talks about (a "spotlight" cutout over a dimmed screen). The player
  * follows it like a real tutorial: info steps block the screen until
- * NEXT is pressed, ACTION steps keep the whole game clickable and pulse
- * a "CLICK IT!" chip — the step completes when the real action happens
- * (using a skill, pulling the trigger, ringing the bell...).
+ * NEXT is pressed, ACTION steps lock the whole screen except the outlined
+ * box — clicks outside land on invisible eaters (the chip shakes as
+ * feedback) and the step completes when the real action happens inside
+ * the outline (using a skill, pulling the trigger, ringing the bell...).
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -23,7 +24,8 @@ export interface TutorialSpotProps {
   total: number;
   /** true = a click-eater blocks the screen outside the card */
   blocking: boolean;
-  /** true = the target stays clickable and pulses "CLICK IT!" */
+  /** true = ONLY the outlined area stays clickable — every click outside
+   *  lands on invisible eaters and just nudges the CLICK IT chip */
   actionMode: boolean;
   nextLabel: string;
   skipLabel: string;
@@ -52,6 +54,7 @@ export default function TutorialSpot({
   onSkip,
 }: TutorialSpotProps) {
   const [rect, setRect] = useState<DOMRect | null>(null);
+  const [nudge, setNudge] = useState(0);
 
   const remeasure = useCallback(() => {
     if (!target) {
@@ -63,12 +66,14 @@ export default function TutorialSpot({
   }, [target]);
 
   useEffect(() => {
-    remeasure();
+    // first measure lands async (setState-in-effect is a no-no), then a
+    // slow interval + resize listener keep the hole glued to the HUD as
+    // chips come and go
+    const t0 = window.setTimeout(remeasure, 40);
     window.addEventListener("resize", remeasure);
-    // HUD chips come and go (the shell board fades, hearts appear...),
-    // so re-check on a slow interval too
     const iv = setInterval(remeasure, 600);
     return () => {
+      window.clearTimeout(t0);
       window.removeEventListener("resize", remeasure);
       clearInterval(iv);
     };
@@ -112,17 +117,46 @@ export default function TutorialSpot({
       }
     : null;
 
+  /* ACTION steps are hard-locked: four invisible eaters cover everything
+   * AROUND the golden hole, so the only thing the player can actually
+   * click is the real HUD element inside the outline. The hole itself is
+   * a pass-through — genuine clicks land on the real buttons below. */
+  const hx = rect ? rect.left - PAD : 0;
+  const hy = rect ? rect.top - PAD : 0;
+  const hw = rect ? rect.width + PAD * 2 : 0;
+  const hh = rect ? rect.height + PAD * 2 : 0;
+  const eaters = rect && actionMode
+    ? [
+        { left: 0, top: 0, width: vw, height: Math.max(0, hy) },
+        { left: 0, top: hy + hh, width: vw, height: Math.max(0, vh - hy - hh) },
+        { left: 0, top: Math.max(0, hy), width: Math.max(0, hx), height: hh },
+        { left: hx + hw, top: Math.max(0, hy), width: Math.max(0, vw - hx - hw), height: hh },
+      ]
+    : [];
+
   return (
     /* the wrapper itself never eats clicks — the click-eater (blocking
-       info steps) and the card opt back in individually */
+       info steps), the action eaters and the card opt back in individually */
     <div className="pointer-events-none absolute inset-0 z-[58]">
       {blocking && <div className="absolute inset-0" style={{ pointerEvents: "auto" }} />}
+
+      {eaters.map((s, i) => (
+        <div
+          key={`eat-${i}`}
+          className="absolute"
+          style={{ ...s, pointerEvents: "auto", cursor: "not-allowed" }}
+          onClick={() => setNudge((n) => n + 1)}
+        />
+      ))}
 
       {holeStyle && <div className="tut-outline absolute" style={holeStyle} />}
 
       {actionMode && clickChip && (
         <div className="absolute" style={clickChip}>
-          <div className="blink-soft doodle-box doodle-red px-2.5 py-0.5 font-marker text-sm rotate-[-2deg]">
+          <div
+            key={`chip-${nudge}`}
+            className={`blink-soft doodle-box doodle-red px-2.5 py-0.5 font-marker text-sm rotate-[-2deg] ${nudge > 0 ? "nudge-shake" : ""}`}
+          >
             {clickLabel}
           </div>
         </div>
@@ -146,13 +180,15 @@ export default function TutorialSpot({
             </button>
           </div>
           <div className="mt-1 font-hand text-[15px] leading-snug">{text}</div>
-          {!actionMode && (
+          {!actionMode ? (
             <div className="mt-2 flex items-center justify-end gap-2">
               <span className="mr-auto font-hand-sc text-[10px] text-[#4a4036] opacity-70">{waitingLabel}</span>
               <button className="doodle-btn doodle-red px-3 py-1 font-hand-sc text-sm" onClick={onNext}>
                 {step >= total ? "OK" : nextLabel}
               </button>
             </div>
+          ) : (
+            <div className="mt-1 text-center font-hand-sc text-[10px] text-[#8f2418] opacity-80">{waitingLabel}</div>
           )}
         </div>
       </div>

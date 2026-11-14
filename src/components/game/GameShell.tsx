@@ -34,6 +34,8 @@ import type { Difficulty } from "@/game/logic";
 import type { ShellType } from "@/game/logic";
 import { gameAudio } from "@/game/audio";
 import TutorialSpot from "./TutorialSpot";
+import { PhoenixCut, ThirdEyeCut } from "./Cutscenes";
+import RoultChat from "./RoultChat";
 
 type Toast = { id: number; text: string; tone: string; leaving?: boolean };
 type Pop = { id: number; side: string; text: string; tone: string };
@@ -224,6 +226,11 @@ export default function GameShell() {
   const [shopTip, setShopTip] = useState<{ id: SkillId | "bell"; xPct: number; yPct: number } | null>(null);
   /* 2D overlay: REWIND un-shot (the GAMBLE coin is fully 3D in the scene) */
   const [rewinding, setRewinding] = useState(false);
+  /* 2D cutscenes: PHOENIX resurrection + THIRD EYE sight (legend skills) */
+  const [phoenixCut, setPhoenixCut] = useState(false);
+  const [thirdEyeCut, setThirdEyeCut] = useState(false);
+  /* the secret local assistant (no button anywhere — keyboard only) */
+  const [roultOpen, setRoultOpen] = useState(false);
 
   /* ---------- MAIN MENU screens ---------- */
   const [menuPanel, setMenuPanel] = useState<MenuPanel>(null);
@@ -388,6 +395,14 @@ export default function GameShell() {
         setRewinding(true);
         setTimeout(() => setRewinding(false), 1500);
         break;
+      case "phoenixCut":
+        setPhoenixCut(true);
+        setTimeout(() => setPhoenixCut(false), 2650);
+        break;
+      case "thirdEyeCut":
+        setThirdEyeCut(true);
+        setTimeout(() => setThirdEyeCut(false), 2100);
+        break;
       case "tutAction":
         // the interactive tutorial advances its ACTION steps on real play
         setTutStep((i) => (TUT_SPOT_STEPS[i]?.action === e.action ? i + 1 : i));
@@ -435,6 +450,13 @@ export default function GameShell() {
         setMenuPanel(null);
         setShowHelp(false);
         setMutOpen(false);
+        setRoultOpen(false);
+        return;
+      }
+      /* the secret popup: ctrl + alt + M opens/closes roul, anywhere */
+      if (ev.ctrlKey && ev.altKey && k === "m") {
+        ev.preventDefault();
+        setRoultOpen((v) => !v);
         return;
       }
       if (!eng || !snap) return;
@@ -603,6 +625,23 @@ export default function GameShell() {
   };
 
   const isPlayerTurn = snap?.phase === "playerTurn" && snap.turn === "player" && !snap.busy;
+  /* roult can push a finished ENGINE C script straight into the CUSTOM
+   * TABLE editor (opens the popup so the player sees it compile). */
+  useEffect(() => {
+    const onRoultApply = (e: Event) => {
+      const code = (e as CustomEvent<string>).detail ?? "";
+      if (!code) return;
+      setMutCfg((prev) => {
+        const base =
+          prev ?? mutDefaultsFor(baseDiffOf(diff), modeOf(diff) as "standard" | "endless", ALL_SKILL_IDS);
+        return { ...base, rules: code };
+      });
+      setMutOpen(true);
+      gameAudio.buy();
+    };
+    window.addEventListener("roult:apply", onRoultApply);
+    return () => window.removeEventListener("roult:apply", onRoultApply);
+  }, [diff]);
   const phase = snap?.phase ?? "menu";
   const inGame = phase !== "menu";
   const lowHp = inGame && snap ? snap.hpPlayer : 0;
@@ -1117,6 +1156,10 @@ export default function GameShell() {
           </>
         )}
       </div>
+
+      {/* LEGEND cutscenes: the phoenix resurrection + the third eye sight */}
+      {phoenixCut && <PhoenixCut />}
+      {thirdEyeCut && <ThirdEyeCut />}
 
       {/* center banner */}
       <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
@@ -1903,6 +1946,9 @@ export default function GameShell() {
           </div>
         </div>
       )}
+
+      {/* ================= THE SECRET ASSISTANT ================= */}
+      {roultOpen && <RoultChat onClose={() => setRoultOpen(false)} />}
     </div>
   );
 }

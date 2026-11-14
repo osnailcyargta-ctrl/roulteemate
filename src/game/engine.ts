@@ -101,7 +101,9 @@ export type HudEvent =
   | { type: "reloadStep"; loaded: number; total: number }
   | { type: "shopTip"; id: SkillId | "bell" | null; xPct: number; yPct: number }
   | { type: "rewindFx" }
-  | { type: "tutAction"; action: "shoot" | "skill" | "buy" | "bell" | "shopOpen" };
+  | { type: "tutAction"; action: "shoot" | "skill" | "buy" | "bell" | "shopOpen" }
+  | { type: "phoenixCut" }
+  | { type: "thirdEyeCut" };
 
 const SMART: Record<Difficulty, number> = { easy: 0.55, normal: 0.8, insane: 0.95 };
 
@@ -1147,7 +1149,8 @@ export class GameEngine {
     }
 
     if (out.phoenixSaved) {
-      // the killing blow burned the charm instead
+      // the killing blow burned the charm instead — NO text banner anymore,
+      // the resurrection is a real cinematic: 2D ember/fire/wing VFX layer
       gameAudio.phoenix();
       this.scene.flash(0.65);
       this.scene.setDesat(0.2);
@@ -1160,8 +1163,8 @@ export class GameEngine {
       if (burned) this.registerGhost(burned);
       this.scene.enemySetMood("scared");
       this.scene.enemySay([pick("phoenix")], 2.6);
-      this.onEvent({ type: "banner", title: "PHOENIX!", sub: "You refuse to die — the charm burns for you." });
-      await sleep(1200);
+      this.onEvent({ type: "phoenixCut" });
+      await sleep(2500);
     }
 
     if (out.shell === "live") {
@@ -1381,6 +1384,13 @@ export class GameEngine {
         break;
       }
       case "thirdEye": {
+        // a real cutscene first: the violet eye opens over the screen,
+        // THEN the chamber swings open and the shells are revealed
+        gameAudio.riser(0.75);
+        this.scene.setDesat(0.2);
+        setTimeout(() => this.scene.setDesat(0), 1500);
+        this.onEvent({ type: "thirdEyeCut" });
+        await sleep(1250);
         gameAudio.scanDing();
         this.scene.flash(0.25);
         this.scene.gunPeek(true); // the chamber swings open before your eyes
