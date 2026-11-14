@@ -54,3 +54,5 @@ server.log
 /skills/
 # sandbox artifacts
 tool-results/
+data/
+out/
