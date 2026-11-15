@@ -6,13 +6,16 @@
 import type { Difficulty, Mode } from "./logic";
 import type { SkillId } from "./doodle";
 
+/** The difficulty ROW in the popup: the three brains + ENDLESS score mode. */
+export type MutAi = Difficulty | "endless";
+
 export interface MutConfig {
   /** Which cards may appear at all (dice + shop), before rarity gates. */
   pool: SkillId[];
   /** LEGEND cards allowed — still requires INSANE or ENDLESS to actually spawn. */
   allowLegend: boolean;
-  /** The DEALER's brain, independent of the table difficulty. */
-  ai: Difficulty;
+  /** The run's difficulty — picking a preset here also sets the stats. */
+  ai: MutAi;
   /** Custom HP for both sides. */
   hpPlayer: number;
   hpEnemy: number;
@@ -52,4 +55,19 @@ export function mutDefaultsFor(diff: Difficulty, mode: Mode, pool: SkillId[]): M
     allowDup: false,
     rules: "",
   };
+}
+
+/** Preset stats applied when a DIFFICULTY button is clicked: INSANE sets
+ *  allow legend + 4 player HP + 5 dealer HP + 3 dealer skills, ENDLESS does
+ *  the endless statline (and kills the dealer HP input in the UI). */
+export function mutPresetFor(ai: MutAi): Partial<MutConfig> {
+  const base: Record<MutAi, { hpPlayer: number; hpEnemy: number; skillsPlayer: number; skillsEnemy: number }> = {
+    easy: { hpPlayer: 6, hpEnemy: 5, skillsPlayer: 2, skillsEnemy: 1 },
+    normal: { hpPlayer: 5, hpEnemy: 5, skillsPlayer: 2, skillsEnemy: 2 },
+    insane: { hpPlayer: 4, hpEnemy: 5, skillsPlayer: 2, skillsEnemy: 3 },
+    endless: { hpPlayer: 5, hpEnemy: 5, skillsPlayer: 2, skillsEnemy: 3 },
+  };
+  return ai === "insane" || ai === "endless"
+    ? { ...base[ai], allowLegend: true }
+    : { ...base[ai] };
 }

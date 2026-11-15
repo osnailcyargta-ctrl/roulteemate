@@ -28,7 +28,7 @@ import {
   type SkillId,
 } from "@/game/doodle";
 import { setLang, t, type Lang } from "@/game/i18n";
-import { mutDefaultsFor, type MutConfig } from "@/game/mutator";
+import { mutDefaultsFor, mutPresetFor, type MutConfig, type MutAi } from "@/game/mutator";
 import { compileScript } from "@/game/script";
 import { getDailyInfo } from "@/game/seed";
 import type { Difficulty } from "@/game/logic";
@@ -241,6 +241,12 @@ export default function GameShell() {
   /* the MUTATOR button revealed under PICK A TABLE: hold/right-click
      PICK A TABLE toggles the rise; ONLY clicking that button opens the popup */
   const [mutRevealed, setMutRevealed] = useState(false);
+  /* DEBUG MODE — RUN DEBUG MODE (the CUSTOM TABLE sheet's start button)
+     launches a normal run with god-hands: SET HP, ADD SKILL, NEXT ROUND */
+  const [debugMode, setDebugMode] = useState(false);
+  const [dbgHpYou, setDbgHpYou] = useState(5);
+  const [dbgHpDealer, setDbgHpDealer] = useState(5);
+  const [dbgSkillOpen, setDbgSkillOpen] = useState(false);
   const [mutCfg, setMutCfg] = useState<MutConfig | null>(null);
   const [showSyntax, setShowSyntax] = useState(false);
   /** live ENGINE C compile of the code in the editor */
@@ -552,6 +558,35 @@ export default function GameShell() {
     return () => clearInterval(iv);
   }, [phaseKey]);
 
+  /* ---------- DEBUG MODE helpers ----------
+   * leaves debug mode whenever the run ends back at the menu; the HP
+   * inputs re-sync with the real HP once per round so manual edits stay. */
+  useEffect(() => {
+    if (phaseKey === "menu") setDebugMode(false);
+  }, [phaseKey]);
+  const dbgRound = snap?.round ?? 0;
+  useEffect(() => {
+    if (!debugMode || !snap) return;
+    if (snap.phase === "menu" || snap.phase === "gameover" || snap.phase === "victory") return;
+    setDbgHpYou(snap.hpPlayer);
+    setDbgHpDealer(snap.hpEnemy);
+  }, [debugMode, dbgRound]);
+  const dbgSetHp = () => {
+    const eng = engineRef.current;
+    if (!eng) return;
+    gameAudio.click();
+    eng.debugSetHp("player", dbgHpYou);
+    eng.debugSetHp("enemy", dbgHpDealer);
+  };
+  const dbgAddSkill = (id: SkillId) => {
+    gameAudio.click();
+    engineRef.current?.debugAddSkill(id);
+  };
+  const dbgNextRound = () => {
+    gameAudio.click();
+    void engineRef.current?.debugNextRound();
+  };
+
   /* ---------- interactive tutorial driver ---------- */
   const tutRef = useRef(tut);
   useEffect(() => {
@@ -659,6 +694,7 @@ export default function GameShell() {
     gameAudio.ensure();
     gameAudio.click();
     setMenuPanel(null);
+    setDebugMode(false); // a normal table — no debug hands in the HUD
     // sitting down starts the run directly — the CUSTOM TABLE sheet never
     // opens here; it lives behind the revealed MUTATOR button only.
     void engineRef.current?.startGame(diff, mutOn && mutCfg ? mutCfg : undefined, settings.daily);
@@ -673,6 +709,7 @@ export default function GameShell() {
     tutReplayRef.current = true;
     saveTut({ done: false });
     setMenuPanel(null);
+    setDebugMode(false);
     void engineRef.current?.startGame("easy", undefined, settings.daily);
   };
 
@@ -683,7 +720,10 @@ export default function GameShell() {
     gameAudio.click();
     setMutOpen(false);
     setMenuPanel(null);
-    void engineRef.current?.startGame(diff, mutOn ? mutCfg : undefined, settings.daily);
+    setDebugMode(true); // RUN DEBUG MODE — the run starts with god-hands
+    // the DIFFICULTY row decides the run: picking ENDLESS there plays endless
+    const tableDiff: MutAi = mutOn ? mutCfg.ai : diff;
+    void engineRef.current?.startGame(tableDiff, mutOn ? mutCfg : undefined, settings.daily);
   };
   const phase = snap?.phase ?? "menu";
   const inGame = phase !== "menu";
@@ -1063,6 +1103,68 @@ export default function GameShell() {
               {t("shootSelf")}
             </button>
           </div>
+
+          {/* DEBUG MODE bar — RUN DEBUG MODE from the CUSTOM TABLE sheet
+              grants god-hands: SET HP, ADD SKILL, NEXT ROUND (the shop
+              break still comes first when the round ends). */}
+          {debugMode && snap && !["menu", "gameover", "victory"].includes(snap.phase) && (
+            <div className="absolute left-1/2 top-[64px] z-30 flex -translate-x-1/2 flex-col items-center gap-1.5">
+              <div className="doodle-box flex flex-wrap items-center justify-center gap-1.5 px-3 py-2" title={t("dbgNextHint")}>
+                <span className="rotate-[-2deg] font-marker text-sm text-[#8f5bd4]">DEBUG</span>
+                <label className="flex items-center gap-1">
+                  <span className="font-hand-sc text-xs text-[#4a4036]">{t("dbgYou")}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={12}
+                    value={dbgHpYou}
+                    onChange={(e) => setDbgHpYou(Math.max(0, Math.min(12, Number(e.target.value) || 0)))}
+                    className="doodle-box w-12 px-1 py-0.5 text-center font-marker text-sm"
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  <span className="font-hand-sc text-xs text-[#4a4036]">{t("dbgDealer")}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={12}
+                    value={dbgHpDealer}
+                    onChange={(e) => setDbgHpDealer(Math.max(0, Math.min(12, Number(e.target.value) || 0)))}
+                    className="doodle-box w-12 px-1 py-0.5 text-center font-marker text-sm"
+                  />
+                </label>
+                <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs" onClick={dbgSetHp}>
+                  {t("dbgSetHp")}
+                </button>
+                <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs" onClick={() => setDbgSkillOpen((v) => !v)}>
+                  {t("dbgAddSkill")} {dbgSkillOpen ? "▲" : "▼"}
+                </button>
+                <button
+                  className="doodle-btn doodle-red px-2 py-0.5 font-hand-sc text-xs"
+                  disabled={snap.phase === "shop" || snap.busy}
+                  onClick={dbgNextRound}
+                >
+                  {t("dbgNextRound")}
+                </button>
+              </div>
+              {dbgSkillOpen && (
+                <div className="doodle-box flex max-w-[94vw] flex-wrap items-center justify-center gap-1.5 px-3 py-2">
+                  {ALL_SKILL_IDS.map((id) => (
+                    <button
+                      key={id}
+                      className="doodle-btn flex items-center gap-1.5 px-2 py-0.5 text-[13px]"
+                      style={{ borderColor: RARITY_COLOR[RARITY[id]] }}
+                      onClick={() => dbgAddSkill(id)}
+                      title={`${SKILL_META[id].name} — ${t("dbgAddHint")}`}
+                    >
+                      <span className="h-2 w-2 rounded-full" style={{ background: RARITY_COLOR[RARITY[id]] }} />
+                      <span className="font-hand-sc">{SKILL_META[id].name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* toasts left (slide in, slide out) */}
           <div className="pointer-events-none absolute left-3 top-28 z-30 flex w-64 flex-col gap-1.5">
@@ -1671,18 +1773,25 @@ export default function GameShell() {
                   </span>
                 </button>
 
-                {/* dealer AI + HP + skill counts */}
+                {/* difficulty + HP + skill counts */}
                 <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-hand text-base">{t("mutAi")}</span>
                     <div className="flex gap-1">
-                      {(["easy", "normal", "insane"] as Difficulty[]).map((d) => (
+                      {(["easy", "normal", "insane", "endless"] as MutAi[]).map((d) => (
                         <button
                           key={d}
                           className={`doodle-btn px-2 py-0.5 font-hand-sc text-xs ${
                             mutCfg.ai === d ? "bg-[#221a12] text-[#f3ecd7]" : ""
                           }`}
-                          onClick={() => setMutCfg({ ...mutCfg, ai: d })}
+                          title={d === "endless" ? t("mutAiEndlessHint") : undefined}
+                          onClick={() => {
+                            // a DIFFICULTY click sets the whole statline:
+                            // INSANE = allow legend + 4/5 HP + 3 dealer skills,
+                            // ENDLESS = endless statline, dealer HP input dies.
+                            setMutCfg((c) => (c ? { ...c, ...mutPresetFor(d), ai: d } : c));
+                            gameAudio.click();
+                          }}
                         >
                           {d.toUpperCase()}
                         </button>
@@ -1700,13 +1809,16 @@ export default function GameShell() {
                       className="doodle-box w-16 px-2 py-0.5 text-center font-marker text-lg"
                     />
                   </label>
-                  <label className={`flex items-center justify-between gap-2 ${diff === "endless" ? "opacity-40" : ""}`} title={diff === "endless" ? "ENDLESS: the dealer's HP is a score counter" : ""}>
+                  <label
+                    className={`flex items-center justify-between gap-2 ${mutCfg.ai === "endless" ? "opacity-40" : ""}`}
+                    title={mutCfg.ai === "endless" ? "ENDLESS: the dealer's HP is a score counter" : ""}
+                  >
                     <span className="font-hand text-base">{t("mutHpDealer")}</span>
                     <input
                       type="number"
                       min={1}
                       max={12}
-                      disabled={diff === "endless"}
+                      disabled={mutCfg.ai === "endless"}
                       value={mutCfg.hpEnemy}
                       onChange={(e) => setMutCfg({ ...mutCfg, hpEnemy: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
                       className="doodle-box w-16 px-2 py-0.5 text-center font-marker text-lg"

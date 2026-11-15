@@ -466,7 +466,10 @@ export class GameEngine {
     } else {
       this.logic = new RouletteLogic(baseDiff, mode);
     }
-    this.ai = new EnemyAI(this.logic, SMART[this.mut?.ai ?? baseDiff]);
+    this.ai = new EnemyAI(
+      this.logic,
+      SMART[this.mut?.ai === "endless" ? "insane" : (this.mut?.ai ?? baseDiff)],
+    );
     this.scene.setThemeTint(0); // any previous theme(color) dies with the table
     await this.setupScripts();
     this.scene.clearSpentShells();
@@ -729,6 +732,44 @@ export class GameEngine {
     this.tStart = 0;
     this.tEnd = 0;
     this.notify();
+  }
+
+  /* ---------------- DEBUG MODE ----------------
+   * RUN DEBUG MODE (the CUSTOM TABLE sheet's start button) launches a run
+   * that plays like normal but with god-hands in the HUD: set HP on both
+   * sides, grant any skill in full charge, and skip straight to the next
+   * round — the shop break still comes first when the round ends. */
+
+  /** SET HP: clamp to the same 0..12 range the popup uses. */
+  debugSetHp(side: Side, n: number) {
+    const v = Math.max(0, Math.min(12, Math.round(n) || 0));
+    if (side === "player") this.logic.state.hp.player = v;
+    else this.logic.state.hp.enemy = v;
+    this.checkHealthFx();
+    this.notify();
+  }
+
+  /** ADD SKILL: a full dice-style grant for the player — new slot, own
+   *  charges & cooldown, duplicates included. */
+  debugAddSkill(id: SkillId) {
+    this.logic.grantSkill("player", id);
+    this.onEvent({ type: "skillGet", id });
+    this.notify();
+  }
+
+  /** NEXT ROUND: the current round ends right here. Whatever shells were
+   *  left in the cylinder vanish; if the chamber ran dry the SHOP opens
+   *  first (round survived bonus included), then the reload plays, then
+   *  the player is handed the gun again. */
+  async debugNextRound() {
+    const st = this.logic.state;
+    if (this.busy || st.phase === "shop" || st.phase === "gameover" || st.phase === "victory") return;
+    this.busy = true;
+    this.notify();
+    this.toast("DEBUG: the round ends here — next round incoming…", "info");
+    st.cylinder.length = 0;
+    await this.maybeShopAndReload();
+    await this.playerTurnStart();
   }
 
   /** Dice intro: the dice hands out the player's skills (2 by default,
