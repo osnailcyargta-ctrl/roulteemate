@@ -812,6 +812,36 @@ canvas {
   transition: opacity 0.15s ease;
   pointer-events: none;
 }
+/* the MUTATOR button rises out from under PICK A TABLE */
+.mut-reveal {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  margin-bottom: -0.75rem; /* cancel the parent gap while hidden */
+  transform: translateY(-12px);
+  transition:
+    max-height 0.5s cubic-bezier(0.2, 1.2, 0.4, 1),
+    opacity 0.4s ease,
+    transform 0.5s cubic-bezier(0.2, 1.2, 0.4, 1),
+    margin-bottom 0.5s ease;
+  pointer-events: none;
+}
+.mut-reveal-open {
+  max-height: 84px;
+  opacity: 1;
+  margin-bottom: 0;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.mut-menu-btn {
+  border-color: #7b4fd4;
+  color: #d9c9ff;
+  background: rgba(23, 18, 38, 0.92);
+  text-shadow: 0 0 12px rgba(123, 79, 212, 0.55);
+}
+.mut-menu-btn:hover {
+  box-shadow: 0 0 18px rgba(123, 79, 212, 0.45), 3px 4px 0 rgba(0, 0, 0, 0.55);
+}
 
 /* ==================== PHOENIX CUTSCENE v2 ====================
    A real multi-phase cinematic: ignition flash -> burning wings ->

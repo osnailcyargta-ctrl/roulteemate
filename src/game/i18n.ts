@@ -184,7 +184,8 @@ const EN = {
   skillsCount: "{n} SKILLS",
   helpTip: "Tip: MAGNIFYING GLASS before you decide. Reroll when the chamber feels too dangerous. Voodoo is at its meanest when the Dealer looks brave — every live bullet he fires at you crawls back into him.",
   // ---------- custom table / mutators ----------
-  mutHoldHint: "hold 1s / right-click = mutators",
+  mutHoldHint: "hold 1s / right-click = mutator button",
+  mutBtn: "MUTATORS",
   mutOnOff: "MUTATORS",
   mutOnOffHint: "off = the plain vanilla table",
   mutOffNote: "mutators are OFF — the table plays by the book.",
@@ -368,7 +369,8 @@ const ID: Record<keyof typeof EN, string> = {
   skillsCount: "{n} SKILL",
   helpTip: "Tips: pakai MAGNIFYING GLASS sebelum memutuskan. Reroll kalau chamber terasa terlalu berbahaya. Voodoo paling kejam saat Dealer kelihatan berani — setiap peluru hidup yang dia tembakkan ke kamu akan merayap balik ke dirinya.",
   // ---------- custom table / mutators ----------
-  mutHoldHint: "tahan 1 dtk / klik kanan = mutator",
+  mutHoldHint: "tahan 1 dtk / klik kanan = tombol mutator",
+  mutBtn: "MUTATOR",
   mutOnOff: "MUTATOR",
   mutOnOffHint: "off = meja polos tanpa mutator",
   mutOffNote: "mutator OFF — meja main sesuai aturan baku.",

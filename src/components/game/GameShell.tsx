@@ -238,6 +238,9 @@ export default function GameShell() {
   const [timeOpen, setTimeOpen] = useState(false);
   /* ---------- MUTATOR popup ---------- */
   const [mutOpen, setMutOpen] = useState(false);
+  /* the MUTATOR button revealed under PICK A TABLE: hold/right-click
+     PICK A TABLE toggles the rise; ONLY clicking that button opens the popup */
+  const [mutRevealed, setMutRevealed] = useState(false);
   const [mutCfg, setMutCfg] = useState<MutConfig | null>(null);
   const [showSyntax, setShowSyntax] = useState(false);
   /** live ENGINE C compile of the code in the editor */
@@ -441,13 +444,23 @@ export default function GameShell() {
     // keep whatever the player already configured (rules survive reopening);
     // first open starts from the table's defaults
     setMutCfg((prev) => prev ?? mutDefaultsFor(baseDiffOf(diff), modeOf(diff) as "standard" | "endless", ALL_SKILL_IDS));
+    setMenuPanel(null);
     setMutOpen(true);
   }, [diff]);
 
-  /* ---------- PICK A TABLE: hold 1s (or right-click) opens MUTATORS ----------
+  /* hold/right-click PICK A TABLE: rises (reveals the MUTATOR button) —
+     held again while risen, it sinks back down */
+  const revealMut = useCallback(() => {
+    gameAudio.ensure();
+    gameAudio.click();
+    setMutRevealed((v) => !v);
+  }, []);
+
+  /* ---------- PICK A TABLE: hold 1s (or right-click) reveals MUTATOR ----------
    * a quick click still opens the table popup; a full 1s hold (the golden
-   * bar fills) or a right-click opens the CUSTOM TABLE sheet directly —
-   * the mutators are always available, no settings toggle anywhere. */
+   * bar fills) or a right-click makes the MUTATOR button rise out from
+   * under it (hold again to sink it back). The CUSTOM TABLE sheet itself
+   * opens ONLY through that button — never anywhere else. */
   const HOLD_MS = 1000;
   const [holdP, setHoldP] = useState(0);
   const [holding, setHolding] = useState(false);
@@ -484,15 +497,13 @@ export default function GameShell() {
     const full = performance.now() - holdT0.current >= HOLD_MS;
     stopHold();
     if (full) {
-      gameAudio.ensure();
-      gameAudio.click();
-      openMutator(); // held the full second — CUSTOM TABLE sheet, popup stays shut
+      revealMut(); // held the full second — MUTATOR button rises / sinks
     } else {
       gameAudio.ensure();
       gameAudio.click();
       setMenuPanel("play"); // ordinary click — open the table picker
     }
-  }, [openMutator, stopHold]);
+  }, [revealMut, stopHold]);
 
   const onPlayLeave = useCallback(() => {
     if (holdingRef.current) stopHold(); // dragged away: cancel silently
@@ -502,11 +513,9 @@ export default function GameShell() {
     (e: React.MouseEvent) => {
       e.preventDefault();
       stopHold();
-      gameAudio.ensure();
-      gameAudio.click();
-      openMutator(); // right-click — instant CUSTOM TABLE sheet
+      revealMut(); // right-click — MUTATOR button rises / sinks instantly
     },
-    [openMutator, stopHold],
+    [revealMut, stopHold],
   );
 
   /* ---------- keyboard (Q/E shoot, 1-4 skills, ESC closes) ---------- */
@@ -649,9 +658,10 @@ export default function GameShell() {
   const startFromMenu = () => {
     gameAudio.ensure();
     gameAudio.click();
-    // mutators are ALWAYS active: sitting down always lands on the CUSTOM
-    // TABLE sheet first — the ON/OFF switch lives inside the popup itself.
-    openMutator();
+    setMenuPanel(null);
+    // sitting down starts the run directly — the CUSTOM TABLE sheet never
+    // opens here; it lives behind the revealed MUTATOR button only.
+    void engineRef.current?.startGame(diff, mutOn && mutCfg ? mutCfg : undefined, settings.daily);
   };
 
   /** REPLAY TUTORIAL: a real practice table (EASY) with the spotlight
@@ -1265,9 +1275,10 @@ export default function GameShell() {
           </div>
 
           {/* the doors of this establishment — bottom left, top to bottom.
-              PICK A TABLE hides the CUSTOM TABLE sheet: hold it a full
-              second (the golden bar fills under the label) or right-click
-              it and the mutators popup opens on the spot. */}
+              PICK A TABLE hides the MUTATOR button: hold it a full second
+              (the golden bar fills under the label) or right-click it and
+              the button rises; hold again while risen and it sinks back.
+              The CUSTOM TABLE sheet opens only through that button. */}
           <div className="absolute bottom-6 left-5 z-10 flex flex-col items-start gap-3 sm:bottom-9 sm:left-8">
             <button
               className="doodle-btn doodle-red menu-btn relative px-8 py-3 font-marker text-2xl sm:px-10"
@@ -1280,8 +1291,8 @@ export default function GameShell() {
               title={t("mutHoldHint")}
             >
               {t("btnPlay")}
-              {/* the V indicator — flips upside down while held */}
-              <span className={`play-v font-marker ${holding ? "play-v-flip" : ""}`}>
+              {/* the V indicator — flips while held / while the button is risen */}
+              <span className={`play-v font-marker ${holding || mutRevealed ? "play-v-flip" : ""}`}>
                 v
               </span>
               {/* the 1-second hold bar under the label */}
@@ -1290,6 +1301,21 @@ export default function GameShell() {
                 style={{ width: `${holdP * 80}%`, opacity: holding ? 1 : 0 }}
               />
             </button>
+            {/* MUTATORS — rises out from under PICK A TABLE */}
+            <div className={`mut-reveal ${mutRevealed ? "mut-reveal-open" : ""}`}>
+              <button
+                className="doodle-btn menu-btn mut-menu-btn px-6 py-2 font-marker text-xl sm:px-8"
+                style={{ animationDelay: "0.12s" }}
+                onClick={() => {
+                  gameAudio.ensure();
+                  gameAudio.click();
+                  openMutator(); // the ONLY door to the CUSTOM TABLE sheet
+                }}
+                title={t("mutHoldHint")}
+              >
+                {t("mutBtn")}
+              </button>
+            </div>
             <button
               className="doodle-btn menu-btn px-6 py-2 font-marker text-xl sm:px-8"
               style={{ animationDelay: "0.18s" }}
