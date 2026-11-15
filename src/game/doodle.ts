@@ -2558,6 +2558,49 @@ export function texBellNote() {
   );
 }
 
+/** Panah giliran: scrap kertas kecil + panah gemuk mengarah ke bawah,
+ *  digambar tangan — mengambang di atas pihak yang lagi punya giliran. */
+export function texTurnArrow(label: string) {
+  return makeCanvas(
+    `turn-arrow-${label}`,
+    320,
+    240,
+    (ctx, w, h, rng) => {
+      ctx.save();
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate(-0.03);
+      // scrap kertas buat label
+      const scrap: [number, number][] = [
+        [-108, -110],
+        [108, -114],
+        [116, -38],
+        [-100, -34],
+      ];
+      ctx.fillStyle = PAPER;
+      wobblePath(ctx, scrap, rng, 3, true);
+      ctx.fill();
+      sketchStroke(ctx, scrap, rng, { width: 5, jitter: 3, close: true });
+      handText(ctx, label, 4, -74, 32, INK, -0.02);
+      // panah tebal ke bawah (arah ke kepala/kursi yang punya giliran)
+      const arrow: [number, number][] = [
+        [-26, -6],
+        [26, -6],
+        [26, 40],
+        [54, 40],
+        [0, 100],
+        [-54, 40],
+        [-26, 40],
+      ];
+      ctx.fillStyle = "#f2c14e";
+      wobblePath(ctx, arrow, rng, 3, true);
+      ctx.fill();
+      sketchStroke(ctx, arrow, rng, { width: 6, jitter: 3, close: true });
+      ctx.restore();
+    },
+    31,
+  );
+}
+
 export function texBoombox() {
   return makeCanvas(
     "boombox",

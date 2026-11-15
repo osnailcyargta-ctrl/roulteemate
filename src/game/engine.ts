@@ -473,6 +473,8 @@ export class GameEngine {
     this.scene.setThemeTint(0); // any previous theme(color) dies with the table
     await this.setupScripts();
     this.scene.clearSpentShells();
+    this.scene.setTurnArrow(null);
+    this.scene.setHeartbeat(false);
     this.scene.dealerCuffed(false);
     this.scene.dollyHome();
     this.scene.voodooEndFX("player");
@@ -701,6 +703,8 @@ export class GameEngine {
     this.scene.setDesat(0);
     this.scene.setTimeScale(1);
     this.scene.gunAim(null);
+    this.scene.setTurnArrow(null);
+    this.scene.setHeartbeat(false);
     this.scene.enemySetMood("idle1");
     this.scene.hideShopItems();
     this.scene.clearSpentShells();
@@ -966,6 +970,7 @@ export class GameEngine {
     }
     this.busy = false;
     this.scene.dealerCuffed(false); // his skipped turn is over — uncuff him
+    this.scene.setTurnArrow("player");
     this.notify();
   }
 
@@ -982,8 +987,10 @@ export class GameEngine {
     const tension = target === "player" && st.hp.player < 3;
 
     this.scene.gunAim(target === "player" ? "self" : "enemy");
+    this.scene.setTurnArrow(null); // the gun is up — the arrow goes quiet
     gameAudio.hammerCock();
     gameAudio.riser(tension ? 1.5 : 0.55);
+    this.scene.addTrauma(0.16); // EVERY pull jolts your hand a little
     await sleep(800);
     if (tension) {
       // 0.7s: the trigger finger trembles... 240 + 240 + 220
@@ -1120,6 +1127,7 @@ export class GameEngine {
     this.notify();
 
     this.scene.enemySetMood("idle2");
+    this.scene.setTurnArrow("enemy");
     this.scene.enemySay([pick("enemyTurn")], 2.2);
     await sleep(rnd(1000, 1700));
 
@@ -1147,8 +1155,11 @@ export class GameEngine {
 
     if (decision && decision.kind === "shoot" && decision.target && !this.logic.isEmpty) {
       this.scene.enemySetMood("aim");
+      this.scene.setTurnArrow(null); // he lowers the arrow, the gun speaks
+      if (decision.target === "player") this.scene.setHeartbeat(true); // the muzzle swings to YOU
       gameAudio.riser(1.0);
       await sleep(rnd(850, 1400));
+      this.scene.setHeartbeat(false);
       const res = await this.shootSequence("enemy", decision.target);
       this.scene.enemySetMood("idle1");
       if (res === "dead") {
@@ -1207,8 +1218,10 @@ export class GameEngine {
         await sleep(750);
       } else {
         this.scene.enemySetMood("aim");
+        this.scene.setHeartbeat(true); // a free shot pointed at YOUR head
         this.toast("DEALER blanks himself — free shot at you!", "bad");
         await sleep(750);
+        this.scene.setHeartbeat(false);
       }
       const out2 = this.logic.shoot(shooter, opp);
       if (shooter === "player") this.stats.shots++;
@@ -1301,8 +1314,8 @@ export class GameEngine {
         this.scene.muzzleFlash();
         this.scene.gunKick();
       } else {
+        this.scene.enemyMuzzleFlash(); // doodle starburst + smoke on his side
         this.scene.addTrauma(0.5);
-        this.scene.flash(0.4);
       }
       // bullet-exit delay: at low HP a self-shot lingers 0.2s longer
       await sleep(tensionSelf ? 340 : 140);
@@ -1354,8 +1367,10 @@ export class GameEngine {
       gameAudio.blankClick();
       if (shooterIsPlayer) {
         this.scene.dustPuffAtCamera();
+        this.scene.addTrauma(0.26); // a dry snap still kicks the hand
       } else {
         this.scene.enemySetMood("scared");
+        this.scene.addTrauma(0.1);
       }
       this.onEvent({ type: "dmgPop", side: out.target, text: "CLICK! blank", tone: "blank" });
       const who =
@@ -1602,6 +1617,8 @@ export class GameEngine {
     }
     gameAudio.stopHeartbeat();
     this.scene.setRedPulse(0);
+    this.scene.setTurnArrow(null);
+    this.scene.setHeartbeat(false);
 
     if (deadSide === "enemy" && !endless) {
       st.phase = "victory";
@@ -1731,6 +1748,7 @@ export class GameEngine {
     this.busy = true;
     gameAudio.shopOpen();
     this.scene.enemySay([pick("shop")], 2.6);
+    this.scene.setTurnArrow(null); // the break — nobody's turn
     this.scene.showShopItems(this.shopOffers.filter((o) => !o.sold));
     this.onEvent({
       type: "banner",

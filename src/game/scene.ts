@@ -29,6 +29,7 @@ import {
   texTableTop,
   texPoster,
   texArrowSign,
+  texTurnArrow,
   texCardBack,
   texPriceTag,
   texBellNote,
@@ -259,6 +260,14 @@ export class RouletteScene {
      with a tiny gap between them, the gap closed by a gold cylinder rim.
      Tossed from the table, spins in the air, lands and shows the answer. */
   private coinGroup: THREE.Group | null = null;
+  /* turn indicator: a hand-drawn arrow bobbing over whoever owns the turn */
+  private turnArrow!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  private turnArrowTex!: { player: THREE.Texture; enemy: THREE.Texture };
+  private turnArrowBase = new THREE.Vector3();
+  private turnArrowBorn = 0;
+  /* heartbeat vignette: breathes while the muzzle points at YOU */
+  private heartOn = false;
+  private heartAmp = 0;
 
   /** Build (once) the semi-3D coin: two 2D plates + a 3D cylindrical rim. */
   private buildCoin(): THREE.Group {
@@ -431,6 +440,7 @@ export class RouletteScene {
     this.buildLights();
     this.buildTable();
     this.buildEnemy();
+    this.buildTurnArrow();
     this.buildGun();
     this.buildDice();
     this.buildParticles();
@@ -651,6 +661,26 @@ export class RouletteScene {
     this.speechMesh.position.set(0.72, 2.32, -1.7);
     this.speechMesh.renderOrder = 5;
     this.scene.add(this.speechMesh);
+  }
+
+  private buildTurnArrow() {
+    this.turnArrowTex = {
+      player: ctex(texTurnArrow("YOUR TURN")),
+      enemy: ctex(texTurnArrow("DEALER")),
+    };
+    this.turnArrow = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.78, 0.585),
+      new THREE.MeshBasicMaterial({
+        map: this.turnArrowTex.player,
+        transparent: true,
+        opacity: 0,
+        alphaTest: 0.02,
+        depthWrite: false,
+      }),
+    );
+    this.turnArrow.renderOrder = 7;
+    this.turnArrow.visible = false;
+    this.scene.add(this.turnArrow);
   }
 
   private buildGun() {
@@ -1234,6 +1264,7 @@ export class RouletteScene {
           emissive: 0xffffff,
           emissiveMap: this.shopTex(`cardback-${o.legendary ? 1 : 0}`, texCardBack(o.legendary)),
           emissiveIntensity: 0.85,
+          side: THREE.DoubleSide, // visible mid-flip while the card spins in
         }),
       );
       back.position.y = 0.2;
@@ -1634,6 +1665,7 @@ export class RouletteScene {
     this.muzzleMesh.material.opacity = 1;
     this.muzzleMesh.rotation.z = Math.random() * Math.PI;
     this.muzzleMesh.scale.setScalar(0.8 + Math.random() * 0.4);
+    this.muzzleLight.position.set(0, 1.3, 0.6); // home — the dealer's shot moves it
     this.muzzleLight.intensity = 55;
     this.flash(0.5);
     this.addTrauma(0.55);
@@ -1650,6 +1682,58 @@ export class RouletteScene {
         grow: 0.35,
       });
     }
+  }
+
+  /** THE DEALER's live shot: a doodle starburst + smoke on HIS side of the
+   *  table, the muzzle light jumping to his gun for the moment. */
+  enemyMuzzleFlash() {
+    const p = this.enemyBasePos.clone().add(new THREE.Vector3(0.45, 0.18, 0.42));
+    this.spawn(this.muzzleTex, p, {
+      size: 0.45,
+      life: 0.22,
+      grow: 1.8,
+      fadePow: 1.1,
+      rotVel: (Math.random() - 0.5) * 7,
+      blending: THREE.AdditiveBlending,
+    });
+    for (let i = 0; i < 4; i++) {
+      const q = p.clone();
+      q.x += (Math.random() - 0.5) * 0.2;
+      q.y += (Math.random() - 0.5) * 0.2;
+      this.spawn(this.smokeTex, q, {
+        size: 0.16 + Math.random() * 0.16,
+        vel: new THREE.Vector3((Math.random() - 0.5) * 0.25, 0.3 + Math.random() * 0.3, (Math.random() - 0.5) * 0.2),
+        life: 1.2 + Math.random() * 0.7,
+        grow: 0.4,
+      });
+    }
+    this.muzzleLight.position.set(p.x, p.y + 0.1, p.z);
+    this.muzzleLight.intensity = 40;
+    this.flash(0.35);
+  }
+
+  /** Turn indicator: a doodle arrow pops up bobbing over the active side
+   *  (above THE DEALER's head, or over your own side of the table). */
+  setTurnArrow(who: "player" | "enemy" | null) {
+    if (!who) {
+      this.turnArrow.visible = false;
+      this.turnArrow.material.opacity = 0;
+      return;
+    }
+    this.turnArrow.visible = true;
+    this.turnArrow.material.opacity = 1;
+    this.turnArrowBorn = performance.now();
+    if (who === "enemy") this.turnArrowBase.set(0, 2.46, -1.92);
+    else this.turnArrowBase.set(-0.84, 1.3, 0.26);
+    this.turnArrow.material.map = this.turnArrowTex[who];
+    this.turnArrow.material.needsUpdate = true;
+  }
+
+  /** TENSION HEARTBEAT: the vignette pounds like a heart while something
+   *  points at you (self-aim turns it on automatically; the engine uses
+   *  this for the beats where THE DEALER takes aim at your side). */
+  setHeartbeat(on: boolean) {
+    this.heartOn = on;
   }
 
   bloodBurst(at: "enemy" | "player", big = false) {
@@ -1885,6 +1969,21 @@ export class RouletteScene {
       }
     }
 
+    // turn arrow: pop-in, bobbing, gentle sway — always billboarded
+    if (this.turnArrow.visible) {
+      const camQ2 = this.camera.getWorldQuaternion(new THREE.Quaternion());
+      this.turnArrow.quaternion.copy(camQ2);
+      const apop = Math.min(1, (performance.now() - this.turnArrowBorn) / 300);
+      const ae = 1 + 2.7 * Math.pow(apop - 1, 3) + 1.7 * Math.pow(apop - 1, 2);
+      this.turnArrow.scale.setScalar(Math.max(0.001, 0.4 + 0.6 * ae));
+      this.turnArrow.position.set(
+        this.turnArrowBase.x,
+        this.turnArrowBase.y + Math.sin(t * 2.7) * 0.045,
+        this.turnArrowBase.z,
+      );
+      this.turnArrow.rotateZ(Math.sin(t * 1.9) * 0.09);
+    }
+
     // gun lerp + recoil
     this.gunCurrent.lerp(this.gunTarget, Math.min(1, dt0 * 7));
     this.gunRecoil = Math.max(0, this.gunRecoil - dt0 * 5.5);
@@ -1906,6 +2005,10 @@ export class RouletteScene {
     // muzzle fade
     if (this.muzzleMesh.material.opacity > 0) {
       this.muzzleMesh.material.opacity = Math.max(0, this.muzzleMesh.material.opacity - dt0 * 7);
+    }
+    // the muzzle light decays no matter WHICH gun fired it (the dealer's
+    // flash never touches muzzleMesh.opacity — it decays on its own)
+    if (this.muzzleLight.intensity > 0) {
       this.muzzleLight.intensity = Math.max(0, this.muzzleLight.intensity - dt0 * 260);
     }
 
@@ -1913,6 +2016,17 @@ export class RouletteScene {
     const u = this.finalPass.uniforms;
     u.uFlash.value = Math.max(0, u.uFlash.value - dt0 * 2.6);
     u.uTime.value = t;
+    // heartbeat vignette: only pounds while something points at you
+    const hbTarget = this.heartOn || this.gunPose === "self" ? 1 : 0;
+    this.heartAmp += (hbTarget - this.heartAmp) * Math.min(1, dt0 * 2.6);
+    if (this.heartAmp > 0.004) {
+      const P = 0.86;
+      const p = (t % P) / P;
+      const beat = Math.exp(-Math.pow((p - 0.14) / 0.055, 2)) + 0.62 * Math.exp(-Math.pow((p - 0.38) / 0.08, 2));
+      u.uVignette.value = 0.55 + beat * this.heartAmp * 0.24;
+    } else {
+      u.uVignette.value = 0.55;
+    }
 
     // partikel
     for (let i = this.particles.length - 1; i >= 0; i--) {
@@ -1943,6 +2057,12 @@ export class RouletteScene {
         const e = 1 + 2.7 * Math.pow(pop - 1, 3) + 1.7 * Math.pow(pop - 1, 2); // easeOutBack
         const s = (pop <= 0 ? 0 : e) * (1 + it.hoverK * 0.15);
         it.group.scale.setScalar(Math.max(0.001, s));
+        // card flip: the offer spins in from its back and lands with a
+        // paper wobble — the icon only reveals in the last third of the flip
+        const fk = Math.min(1, (nowMs - it.bornAt) / 640);
+        const fe = 1 + 2.4 * Math.pow(fk - 1, 3) + 1.4 * Math.pow(fk - 1, 2);
+        it.group.rotation.y = (1 - fe) * 2.4;
+        it.group.rotation.z = Math.sin(fk * Math.PI * 2.2) * 0.16 * (1 - fk);
         it.group.position.y = it.base.y + Math.sin(t * 2.1 + it.idx * 1.9) * 0.008 + it.hoverK * 0.045;
         if (it.glow) {
           (it.glow.material as THREE.MeshBasicMaterial).opacity =

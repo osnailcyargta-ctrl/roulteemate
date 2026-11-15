@@ -1123,19 +1123,8 @@ export default function GameShell() {
             </div>
           </div>
 
-          {/* turn indicator */}
-          <div className="pointer-events-none absolute left-1/2 top-[74px] z-20 -translate-x-1/2 sm:top-16">
-            {snap.turn === "player" && (
-              <div className="doodle-box px-4 py-0.5 font-marker text-[#8f2418] rotate-[-2deg] float-y">
-                {t("yourTurn")}
-              </div>
-            )}
-            {snap.turn === "enemy" && (
-              <div className="doodle-box doodle-dark px-4 py-0.5 font-marker rotate-[2deg] float-y">
-                {t("dealerTurn")}
-              </div>
-            )}
-          </div>
+          {/* turn indicator: now the bobbing doodle arrow INSIDE the scene
+              (over the dealer's head / your side of the table) */}
 
           {/* must shoot */}
           {snap.mustShoot && snap.turn === "player" && (
