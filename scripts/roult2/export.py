@@ -3,7 +3,7 @@ roult2/export.py — quantizes the trained checkpoint to int8 (per-row scales)
 and writes the browser inference binary + copies vocab.json next to the
 runtime code.
 
-  public/models/roult.bin   (≈55MB, self-describing layout)
+  public/models/roult.bin   (≈21MB, self-describing layout)
   src/game/roult/vocab.json (itos + token tags)
 
 Layout (little endian):

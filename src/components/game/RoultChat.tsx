@@ -1,12 +1,14 @@
 "use client";
 
 /**
- * RoultChat — the SECRET local AI popup. No button anywhere opens this;
- * the only entrance is the keyboard shortcut handled in GameShell.
+ * RoultChat — the LOCAL AI gamemode designer popup. Opened from the menu:
+ * hold PICK A TABLE for one second (or right-click it) and the ROULT button
+ * rises out from under it.
  *
- * roul is a fully local gamemode designer powered by a REAL transformer:
- *   - ~55M parameters, TRAINED FROM SCRATCH (scripts/roult2/, weights in
- *     public/models/roult.bin) — no API, no network, runs in this tab
+ * roult is a fully local gamemode designer powered by a REAL transformer:
+ *   - ~20M parameters, TRAINED FROM SCRATCH (scripts/roult2/, weights in
+ *     public/models/roult.bin) — no API key, no network, runs in this tab
+ *   - BILINGUAL: it answers in whatever language you throw at it (EN/ID)
  *   - it streams its reasoning (<think>), proposes a PLAN
  *   - the player can REVISI (mutate aspects) or LANJUT (deep think)
  *   - then it WRITES roulteematescript token-by-token under a grammar
@@ -16,7 +18,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { compileScript } from "@/game/script";
-import { openSession, type PlanParsed, type RoultSession } from "@/game/roult/brain";
+import { t } from "@/game/i18n";
+import { binMB, openSession, type PlanParsed, type RoultSession } from "@/game/roult/brain";
 
 type Kind = "you" | "trace" | "sys" | "plan" | "code" | "status";
 type Phase = "idle" | "loading" | "thinking" | "plan" | "deepthink" | "result";
@@ -32,14 +35,7 @@ interface Msg {
   bytes?: number;
 }
 
-const REVISE_CHIPS = [
-  "lebih brutal",
-  "lebih adil",
-  "tambah mekanik acak",
-  "peluru diacak tiap ronde",
-  "tambah regen tiap ronde",
-  "ganti tema ruangan",
-];
+const REVISE_CHIPS_KEY = ["chipsBrutal", "chipsFair", "chipsRandom", "chipsShuffle", "chipsRegen", "chipsTheme"] as const;
 
 const MAXT = 384; // the model's context window (tokens)
 
@@ -71,28 +67,25 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
     setMsgs((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
 
-  /* greeting */
+  /* greeting — bilingual, and explicitly flexing that this is a REAL AI */
   useEffect(() => {
     const id = ++runId.current;
-    const t: number[] = [];
-    t.push(
+    const t1: number[] = [];
+    t1.push(
       window.setTimeout(() => {
         if (runId.current !== id) return;
-        pushMsg({ kind: "sys", text: "…oh. kamu nemu aku." });
+        pushMsg({ kind: "sys", text: t("roultHello1") });
       }, 250),
     );
-    t.push(
+    t1.push(
       window.setTimeout(() => {
         if (runId.current !== id) return;
-        pushMsg({
-          kind: "sys",
-          text: "aku roult — otakku 55M parameter, ditrain dari nol buat satu hal: nulis gamemode roulteematescript. kasih ide, bahasa bebas. aku baca, mikir, kasih plan — lu bisa revisi atau langsung lanjut.",
-        });
+        pushMsg({ kind: "sys", text: t("roultHello2") });
       }, 950),
     );
     return () => {
       runId.current++;
-      t.forEach(clearTimeout);
+      t1.forEach(clearTimeout);
     };
   }, [pushMsg]);
 
@@ -108,9 +101,19 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
   const ensureSession = useCallback(async () => {
     if (!sessionRef.current) {
       setPhase("loading");
-      pushMsg({ kind: "sys", text: "memuat otak… 55M param, sekali saja." });
+      pushMsg({ kind: "sys", text: t("roultLoading") });
       sessionRef.current = await openSession(0.7);
-      pushMsg({ kind: "sys", text: "otak nyala. semua jalan di browser ini — tanpa api, tanpa internet." });
+      // EXPLICIT flex: the real numbers, straight from the loaded weights
+      const info = sessionRef.current.brain.info();
+      pushMsg({ kind: "sys", text: t("roultReady") });
+      pushMsg({
+        kind: "sys",
+        text: t("roultSpecs", {
+          p: info.params.toLocaleString("en-US"),
+          mb: binMB(),
+          c: info.MAXT,
+        }),
+      });
     }
     return sessionRef.current;
   }, [pushMsg]);
@@ -154,7 +157,7 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
       setInput("");
       setReviseOpen(false);
       setPhase("thinking");
-      pushMsg({ kind: "trace", text: "nunggu, aku racik ulang…" });
+      pushMsg({ kind: "trace", text: t("roultRethink") });
       const plan = await session.revise(text, {
         onPlanLine: (line) => {
           if (runId.current !== run) return;
@@ -179,7 +182,6 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
     const cid = pushMsg({ kind: "code", text: "", full: "" });
     codeMsgId.current = cid;
     codeBuf.current = "";
-    let thinkFlush = "";
     const code = await session.generateCode({
       onThinkLine: (line) => {
         if (runId.current !== run) return;
@@ -193,7 +195,6 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
       },
     });
     if (runId.current !== run) return;
-    void thinkFlush;
     patchMsg(cid, { text: code, full: code });
     setCtxTok(session.brain.T);
     // validate with the REAL compiler
@@ -201,8 +202,8 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
     pushMsg({
       kind: "status",
       text: res.ok
-        ? `compiled OK — ${res.bytes?.length} bytes of WASM · hooks: ${res.hooks.join(", ")}`
-        : `compiler gagal: ${res.errors.slice(0, 2).join(" · ")} — coba revisi atau kirim ulang idenya`,
+        ? t("roultCompiledOk", { a: String(res.bytes?.length ?? 0), b: res.hooks.join(", ") })
+        : t("roultCompileFail", { a: res.errors.slice(0, 2).join(" · ") }),
       ok: res.ok,
       hooks: res.hooks,
       bytes: res.bytes?.length,
@@ -215,10 +216,10 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
     if (!session) return;
     const run = ++runId.current;
     setPhase("deepthink");
-    pushMsg({ kind: "trace", text: "aku mikir ulang dari awal…" });
+    pushMsg({ kind: "trace", text: t("roultRethink2") });
     // rewind: re-run plan + code on a fresh brain with the same idea
     const lastYou = [...msgs].reverse().find((m) => m.kind === "you" && !m.text.startsWith("lebih") && !m.text.startsWith("jangan"));
-    const idea = lastYou?.text ?? "mode vampir: dealer heal tiap player kena";
+    const idea = lastYou?.text ?? "vampire mode: the dealer heals when i get hit";
     session.brain.reset((Math.random() * 2 ** 31) | 0);
     await session.start(idea, { onPlanLine: (line) => {
       if (runId.current !== run) return;
@@ -241,8 +242,8 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
     pushMsg({
       kind: "status",
       text: res.ok
-        ? `compiled OK — ${res.bytes?.length} bytes of WASM · hooks: ${res.hooks.join(", ")}`
-        : `masih gagal: ${res.errors.slice(0, 2).join(" · ")}`,
+        ? t("roultCompiledOk", { a: String(res.bytes?.length ?? 0), b: res.hooks.join(", ") })
+        : t("roultStillFail", { a: res.errors.slice(0, 2).join(" · ") }),
       ok: res.ok,
     });
     setPhase("result");
@@ -285,11 +286,17 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
           <span className="font-mono text-lg tracking-widest text-[#c9b3ec]">
             roult<span className="caret-blink text-[#8f6ad4]">_</span>
           </span>
-          <span className="font-mono text-[10px] uppercase tracking-[0.25em] text-[#6d5a96]">
+          <span className="hidden font-mono text-[10px] uppercase tracking-[0.25em] text-[#6d5a96] sm:inline">
             local gamemode engine
           </span>
-          <span className="ml-auto font-mono text-[10px] text-[#6d5a96]">
-            55M param · trained from scratch · no api
+          {/* the explicit flex: a REAL ai, locally trained, zero api */}
+          <span className="ml-auto flex items-center gap-1.5">
+            <span className="rounded border border-[#3f6b3d]/70 bg-[#3f6b3d]/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-[#8fd49a]">
+              real ai
+            </span>
+            <span className="hidden font-mono text-[10px] text-[#6d5a96] md:inline">
+              {t("roultBadge")}
+            </span>
           </span>
           <button
             className="rounded border border-[#8f6ad4]/40 px-2 py-0.5 font-mono text-xs text-[#c9b3ec] hover:bg-[#8f6ad4]/20"
@@ -303,7 +310,7 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
               const id = ++runId.current;
               window.setTimeout(() => {
                 if (runId.current !== id) return;
-                pushMsg({ kind: "sys", text: "session baru. kasih ide gamemode." });
+                pushMsg({ kind: "sys", text: t("roultNewSession") });
               }, 200);
             }}
             title="new session"
@@ -353,7 +360,7 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
                   <div key={m.id} className="max-w-[95%] rounded border border-[#8f6ad4]/45 bg-[#14101f] px-3.5 py-3">
                     <div className="flex items-baseline justify-between gap-2">
                       <div className="font-mono text-[15px] font-bold uppercase tracking-wide text-[#d9c9ff]">
-                        {p.title || "tanpa judul"}
+                        {p.title || t("roultTitleNone")}
                       </div>
                     </div>
                     <div className="mt-0.5 font-mono text-[12px] italic text-[#9d8cc7]">{p.tagline}</div>
@@ -367,7 +374,7 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
                       {p.theme && (
                         <div className="flex items-center gap-2 font-mono text-[12px] text-[#8f7ab0]">
                           <span className="text-[#5e4a8f]">◇</span>
-                          <span>ruangan: {p.theme}</span>
+                          <span>{t("roultRoom")}: {p.theme}</span>
                         </div>
                       )}
                     </div>
@@ -390,13 +397,13 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
                     {phase === "plan" && reviseOpen && (
                       <div className="mt-2 border-t border-[#8f6ad4]/25 pt-2">
                         <div className="mb-1.5 flex flex-wrap gap-1.5">
-                          {REVISE_CHIPS.map((c) => (
+                          {REVISE_CHIPS_KEY.map((k) => (
                             <button
-                              key={c}
+                              key={k}
                               className="rounded-full border border-[#8f6ad4]/40 px-2 py-0.5 font-mono text-[11px] text-[#b8a6e0] hover:bg-[#8f6ad4]/20"
-                              onClick={() => submitRevise(c)}
+                              onClick={() => submitRevise(t(k))}
                             >
-                              {c}
+                              {t(k)}
                             </button>
                           ))}
                         </div>
@@ -410,7 +417,7 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
                           <input
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
-                            placeholder="tulisan revisi lu… (aspek apa yang diubah?)"
+                            placeholder={t("roultWriteHere")}
                             className="flex-1 rounded border border-[#8f6ad4]/40 bg-[#0d0b14] px-2 py-1 font-mono text-[12px] text-[#e4dbff] outline-none placeholder:text-[#5e4a8f] focus:border-[#8f6ad4]"
                           />
                           <button className="rounded border border-[#d9a441]/60 px-2.5 py-1 font-mono text-xs text-[#d9a441] hover:bg-[#d9a441]/15">
@@ -426,7 +433,7 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
                 return (
                   <div key={m.id} className="max-w-[95%] overflow-hidden rounded border border-[#8f6ad4]/35 bg-[#0a0812]">
                     <div className="border-b border-[#8f6ad4]/25 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.25em] text-[#6d5a96]">
-                      roulteematescript — written live, token by token
+                      {t("roultCodeHeader")}
                     </div>
                     <pre className="roult-code max-h-72 overflow-auto px-3 py-2 font-mono text-[11.5px] leading-snug text-[#b8e0c0]">
                       {m.text}
@@ -457,20 +464,20 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
                           className="rounded border border-[#8f6ad4]/50 px-3 py-1 font-mono text-xs text-[#c9b3ec] hover:bg-[#8f6ad4]/20"
                           onClick={retry}
                         >
-                          MIKIR ULANG
+                          {t("roultThinkAgain")}
                         </button>
                       )}
                       <button
                         className="rounded border border-[#8f6ad4]/50 px-3 py-1 font-mono text-xs text-[#c9b3ec] hover:bg-[#8f6ad4]/20"
                         onClick={copyCode}
                       >
-                        {copied ? "copied ✓" : "COPY"}
+                        {copied ? t("roultCopied") : t("roultCopy")}
                       </button>
                       <button
                         className="rounded border border-[#d9a441]/70 bg-[#d9a441]/15 px-3 py-1 font-mono text-xs text-[#d9a441] hover:bg-[#d9a441]/30"
                         onClick={applyCode}
                       >
-                        KIRIM KE CUSTOM TABLE →
+                        {t("roultSendTable")}
                       </button>
                     </div>
                   )}
@@ -482,12 +489,10 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
                 <span className="caret-blink text-[#7b4fd4]">▌</span>
                 <span>
                   {phase === "loading"
-                    ? "loading weights…"
-                    : phase === "codegen"
-                      ? "writing…"
-                      : phase === "deepthink"
-                        ? "deep thinking…"
-                        : "thinking…"}
+                    ? t("roultLoadingW")
+                    : phase === "deepthink"
+                      ? t("roultDeep")
+                      : t("roultThinking")}
                 </span>
               </div>
             )}
@@ -523,10 +528,10 @@ export default function RoultChat({ onClose }: { onClose: () => void }) {
               disabled={busy}
               placeholder={
                 busy
-                  ? "roult mikir…"
+                  ? t("roultRoultThinks")
                   : phase === "plan" && reviseOpen
-                    ? "aspek apa yang direvisi?"
-                    : "deskripsiin gamemode yang lu mau…"
+                    ? t("roultRevisePh")
+                    : t("roultIdeaPh")
               }
               className="flex-1 rounded border border-[#8f6ad4]/40 bg-[#171226] px-3 py-2 font-mono text-[13px] text-[#e4dbff] outline-none placeholder:text-[#5e4a8f] focus:border-[#a88fe0] disabled:opacity-50"
             />

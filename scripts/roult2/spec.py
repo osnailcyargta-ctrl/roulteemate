@@ -5,9 +5,11 @@ roult2/spec.py — single source of truth for the ROULT v2 language model.
 - token categories, vocab builder, encode/decode
 - shared pools: identifiers, taunts, moods, seed vocabulary
 
-The model: a ~55M param pre-LN transformer trained FROM SCRATCH on a
+The model: a ~20M param pre-LN transformer trained FROM SCRATCH on a
 synthetic corpus of (intent -> plan -> [revise -> plan] -> think -> code)
-examples written in roulteematescript (ENGINE C).
+examples written in roulteematescript (ENGINE C). The corpus is FULLY
+BILINGUAL: EN intents get EN plans/thinks, ID intents get ID plans/thinks —
+one model, language follows the user.
 """
 
 import re
@@ -67,42 +69,64 @@ IDENT_POOL = [
     "hitCount", "roundNo", "glow", "shadow", "frenzy", "hunger",
 ]
 
-TAUNTS = [
-    "waktu habis...", "shell-nya diacak!", "jackpot!", "darahku...",
-    "jangan nakal", "peluru asli? mungkin", "dua arah, satu kubur",
-    "makin tua, makin lapar", "satu utk aku", "tangan dingin",
-    "keputusan buruk", "ronde terakhir", "koin gak bisa dipercaya",
-    "kelihatan semua...", "aku lihat kamu", "jangan lari",
-    "semua celah kulihat", "koin paling jujur", "tipis tipis aja",
-    "hunger never waits", "the house always drinks",
-    "satu lagi, satu lagi", "keberuntunganmu habis", "meja ini ingat",
-    "hidup segan mati tak segan", "aku hitam putih kamu abu",
-    "kunci diri kirim salam", "kejar kejaran",
+TAUNTS = {  # say(...) lines inside code — language follows the intent
+    "id": [
+        "waktu habis...", "shell-nya diacak!", "jackpot!", "darahku...",
+        "jangan nakal", "peluru asli? mungkin", "dua arah, satu kubur",
+        "makin tua, makin lapar", "satu utk aku", "tangan dingin",
+        "keputusan buruk", "ronde terakhir", "koin gak bisa dipercaya",
+        "kelihatan semua...", "aku lihat kamu", "jangan lari",
+        "semua celah kulihat", "koin paling jujur", "tipis tipis aja",
+        "satu lagi, satu lagi", "keberuntunganmu habis", "meja ini ingat",
+        "hidup segan mati tak segan", "aku hitam putih kamu abu",
+        "kunci diri kirim salam", "kejar kejaran",
+    ],
+    "en": [
+        "time is up...", "the shells are scrambled!", "jackpot!", "my blood...",
+        "do not be naughty", "a live round? maybe", "two directions, one grave",
+        "older and hungrier", "one for me", "cold hands",
+        "bad decision", "last round", "the coin cannot be trusted",
+        "everything is visible...", "i see you", "do not run",
+        "i see every gap", "the most honest coin", "just barely",
+        "one more, one more", "your luck ran out", "this table remembers",
+        "born to lose", "i am black and white, you are grey",
+        "lock yourself in, send regards", "the chase is on",
+        "hunger never waits", "the house always drinks",
+    ],
+}
+
+MOODS = [  # (id, en) pairs — plan flavor only
+    ("crypt", "crypt"), ("kapal karam", "shipwreck"), ("neon bawah tanah", "underground neon"),
+    ("gudang tua", "old warehouse"), ("salju", "snow"), ("gurun", "desert"),
+    ("hotel rusak", "ruined hotel"), ("kereta malam", "night train"), ("rumah kaca", "glass house"),
+    ("cabin merah", "red cabin"),
 ]
 
-MOODS = [
-    "crypt", "cabin merah", "neon bawah tanah", "kapal karam", "gudang tua",
-    "salju", "gurun", "hotel rusak", "kereta malam", "rumah kaca",
-]
+def mood_id(en_mood):
+    """map an en mood string back to its id twin (used by corpus pools)"""
+    for a, b in MOODS:
+        if b == en_mood:
+            return a
+    return en_mood
 
-TITLES = {
-    "vampire": ["DARAH SEPERSELIT", "NYEDETIK", "VAMPIRE TABLE", "SEDOTAN"],
-    "leech": ["TANGAN LEMBAP", "PEMULIHAAN DURJANA", "SUCKER PUNCH"],
-    "escalate": ["BUTA WAKTU", "ESKALASI", "MEJA PEMARAH", "BUNGA HUTANG"],
-    "soften": ["BALM PERRONDE", "TIUPAN PEMULIH", "NAPAS KEDUA"],
-    "endgame": ["LIMA DETIK TERAKHIR", "JAM SEGEL", "HITUNG MUNDUR"],
-    "fury": ["MERAH MEPET", "CACING TANAH", "GIGI TERAKHIR"],
-    "coinrig": ["KEPALA SELALU", "KOIN BERAT", "JACKPOT HALUS"],
-    "chaos": ["PELURU CAKAR", "TANGAN GELOMBANG", "SHUFFLE ROULETTE"],
-    "shopfree": ["TOKO JUMAT", "SALES UANG", "KASIR BAIK"],
-    "peektax": ["INTIP = PAJAK", "MATA BAYAR", "PENALTI PENASARAN"],
-    "skillecho": ["GEMA KARTU", "BONUS GILIRAN", "ECHO GELANG"],
-    "phoenixpraise": ["SAYAP SAYAP", "ABU MENJADI", "BIRD BONUS"],
-    "eyepraise": ["RETINA UANG", "PANDANGAN KE-3", "LIDAH MATA"],
-    "theme": ["GANTI CAHAYA", "LAMPU RUSAK", "MOOD SWING"],
-    "taunt": ["MULUT MEJA", "NGOCEH", "SINDIRAN PERGILIRAN"],
-    "burst": ["DOBLE TAP", "TIGA PUKULAN", "KOMBO KAMSEUPAYA"],
-    "loopdrain": ["PAYASAN", "PANEN PELAN", "GORILO DRILL"],
+TITLES = {  # feature -> {"id": [...], "en": [...]}
+    "vampire": {"id": ["DARAH SEPERSELIT", "NYEDETIK", "VAMPIRE TABLE", "SEDOTAN"], "en": ["BLOOD PER SHELL", "SIPHON", "VAMPIRE TABLE", "THE STRAW"]},
+    "leech": {"id": ["TANGAN LEMBAP", "PEMULIHAAN DURJANA", "SUCKER PUNCH"], "en": ["COLD HANDS", "CRUEL MENDING", "SUCKER PUNCH"]},
+    "escalate": {"id": ["BUTA WAKTU", "ESKALASI", "MEJA PEMARAH", "BUNGA HUTANG"], "en": ["BLIND CLOCK", "ESCALATION", "CRUEL TABLE", "DEBT INTEREST"]},
+    "soften": {"id": ["BALM PERRONDE", "TIUPAN PEMULIH", "NAPAS KEDUA"], "en": ["BALM PER ROUND", "MENDING BREATH", "SECOND WIND"]},
+    "endgame": {"id": ["LIMA DETIK TERAKHIR", "JAM SEGEL", "HITUNG MUNDUR"], "en": ["LAST FIVE SECONDS", "SEALED HOURGLASS", "COUNTDOWN"]},
+    "fury": {"id": ["MERAH MEPET", "CACING TANAH", "GIGI TERAKHIR"], "en": ["RED MARGIN", "WORM MODE", "LAST TOOTH"]},
+    "coinrig": {"id": ["KEPALA SELALU", "KOIN BERAT", "JACKPOT HALUS"], "en": ["HEADS ALWAYS", "HEAVY COIN", "GENTLE JACKPOT"]},
+    "chaos": {"id": ["PELURU CAKAR", "TANGAN GELOMBANG", "SHUFFLE ROULETTE"], "en": ["CLAW BULLETS", "WAVE HANDS", "SHUFFLE ROULETTE"]},
+    "shopfree": {"id": ["TOKO JUMAT", "SALES UANG", "KASIR BAIK"], "en": ["FRIDAY SHOP", "MONEY SALESMAN", "KIND CASHIER"]},
+    "peektax": {"id": ["INTIP = PAJAK", "MATA BAYAR", "PENALTI PENASARAN"], "en": ["PEEP = TAX", "PAYING EYES", "CURIOUS PENALTY"]},
+    "skillecho": {"id": ["GEMA KARTU", "BONUS GILIRAN", "ECHO GELANG"], "en": ["CARD ECHO", "TURN BONUS", "ECHO BRACELET"]},
+    "phoenixpraise": {"id": ["SAYAP SAYAP", "ABU MENJADI", "BIRD BONUS"], "en": ["WINGS WINGS", "FROM ASH", "BIRD BONUS"]},
+    "eyepraise": {"id": ["RETINA UANG", "PANDANGAN KE-3", "LIDAH MATA"], "en": ["MONEY RETINA", "THE 3RD SIGHT", "EYE TONGUE"]},
+    "theme": {"id": ["GANTI CAHAYA", "LAMPU RUSAK", "MOOD SWING"], "en": ["LIGHT CHANGE", "BROKEN LAMP", "MOOD SWING"]},
+    "taunt": {"id": ["MULUT MEJA", "NGOCEH", "SINDIRAN PERGILIRAN"], "en": ["TABLE MOUTH", "RAMBLING", "PER-TURN MOCKERY"]},
+    "burst": {"id": ["DOBLE TAP", "TIGA PUKULAN", "KOMBO KAMSEUPAYA"], "en": ["DOUBLE TAP", "TRIPLE STRIKE", "LUCKY COMBO"]},
+    "loopdrain": {"id": ["PAYASAN", "PANEN PELAN", "GORILO DRILL"], "en": ["A JOKE", "SLOW HARVEST", "GORILLA DRILL"]},
 }
 
 # ------------------------------------------------------------------ #
@@ -140,6 +164,22 @@ the and when gets gain free penalty
 tension fair blood vampire leech drain feed feeds drinks house always
 rng luck lucky rigged weighted chaos scrambled scramble
 naikan turunkan besarin kecilin ubah ditambah dihapus dihapusin
+the dealer heals you every hit bullet blood drink siphon straw meal food
+feed feeds bleeding bleeds climb climbs grows grow hourglass sealed countdown
+second wind balm mending margin worm tooth heads heavy gentle kind
+claw clawing wave waving hands friday salesman cashier paying eyes
+curious curiosity echo bracelet wings ash bird retina sight tongue lamp
+swing mockery rambling mouth tap strike lucky joke harvest grinder gorilla
+drill drills pressure mind memory tracking warning late final near
+almost dead angry gets small keep lasts longer please give grant visit
+comes gift bonus lights light room changes color colors talks reacts
+open opens hidden becomes pain hurt cruel merciless insane scale rises
+climbing pulse mends mend chips rare combo double triple once leans
+favors loaded scrambles fail fails useless an of it its at is no not
+only but or more less most very too quite just like while whiles
+this that these those there here from after back on in so
+maker builder trick tick clock leak leaks leaky rush rushing
+mean meaner cooking crueler cruelly old older grower
 """.split()
 
 # ------------------------------------------------------------------ #

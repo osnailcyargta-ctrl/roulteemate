@@ -224,13 +224,14 @@ export default function GameShell() {
   const [revealQueue, setRevealQueue] = useState<(ShellType | null)[] | null>(null);
   const [times, setTimes] = useState<{ roundMs: number; totalMs: number }>({ roundMs: 0, totalMs: 0 });
   const [shopTip, setShopTip] = useState<{ id: SkillId | "bell"; xPct: number; yPct: number } | null>(null);
-  /* 2D overlay: REWIND un-shot (the GAMBLE coin is fully 3D in the scene) */
-  const [rewinding, setRewinding] = useState(false);
+  /* 2D overlay: REWIND un-shot — the pip shown is the REAL shell that crawls back */
+  const [rewinding, setRewinding] = useState<{ shell: ShellType } | null>(null);
   /* 2D cutscenes: PHOENIX resurrection + THIRD EYE sight (legend skills) */
   const [phoenixCut, setPhoenixCut] = useState(false);
   const [thirdEyeCut, setThirdEyeCut] = useState(false);
-  /* the secret local assistant (no button anywhere — keyboard only) */
+  /* ROULT — the local AI gamemode designer (revealed under PICK A TABLE) */
   const [roultOpen, setRoultOpen] = useState(false);
+  const [roultRevealed, setRoultRevealed] = useState(false);
 
   /* ---------- MAIN MENU screens ---------- */
   const [menuPanel, setMenuPanel] = useState<MenuPanel>(null);
@@ -392,16 +393,16 @@ export default function GameShell() {
         setShopTip(e.id ? { id: e.id, xPct: e.xPct, yPct: e.yPct } : null);
         break;
       case "rewindFx":
-        setRewinding(true);
-        setTimeout(() => setRewinding(false), 1500);
+        setRewinding({ shell: e.shell });
+        setTimeout(() => setRewinding(null), 1500);
         break;
       case "phoenixCut":
         setPhoenixCut(true);
-        setTimeout(() => setPhoenixCut(false), 2650);
+        setTimeout(() => setPhoenixCut(false), 3500);
         break;
       case "thirdEyeCut":
         setThirdEyeCut(true);
-        setTimeout(() => setThirdEyeCut(false), 2100);
+        setTimeout(() => setThirdEyeCut(false), 2600);
         break;
       case "tutAction":
         // the interactive tutorial advances its ACTION steps on real play
@@ -437,11 +438,73 @@ export default function GameShell() {
     };
   }, []);
 
-  const toggleMute = useCallback(() => {
-    updateSettings({ muted: !settings.muted });
-  }, [settings.muted, updateSettings]);
+  /* ---------- PICK A TABLE: hold 1s (or right-click) reveals ROULT ----------
+   * a quick click still opens the table popup; a full 1s hold (the golden
+   * bar fills) makes the panel rise smoothly and uncover the local AI; a
+   * right-click is the instant version and never opens the popup. */
+  const HOLD_MS = 1000;
+  const [holdP, setHoldP] = useState(0);
+  const [holding, setHolding] = useState(false);
+  const holdRaf = useRef(0);
+  const holdT0 = useRef(0);
+  const holdingRef = useRef(false);
 
-  /* ---------- keyboard ---------- */
+  const revealRoult = useCallback(() => {
+    if (!roultRevealed) gameAudio.click();
+    setRoultRevealed(true);
+  }, [roultRevealed]);
+
+  const stopHold = useCallback(() => {
+    holdingRef.current = false;
+    setHolding(false);
+    setHoldP(0);
+    cancelAnimationFrame(holdRaf.current);
+  }, []);
+
+  const onPlayDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return; // right-click goes through onContextMenu
+      holdingRef.current = true;
+      setHolding(true);
+      holdT0.current = performance.now();
+      const tick = () => {
+        if (!holdingRef.current) return;
+        const p = Math.min(1, (performance.now() - holdT0.current) / HOLD_MS);
+        setHoldP(p);
+        if (p < 1) holdRaf.current = requestAnimationFrame(tick);
+      };
+      holdRaf.current = requestAnimationFrame(tick);
+    },
+    [],
+  );
+
+  const onPlayUp = useCallback(() => {
+    if (!holdingRef.current) return;
+    const full = performance.now() - holdT0.current >= HOLD_MS;
+    stopHold();
+    if (full) {
+      revealRoult(); // held the full second — ROULT rises, popup stays shut
+    } else {
+      gameAudio.ensure();
+      gameAudio.click();
+      setMenuPanel("play"); // ordinary click — open the table picker
+    }
+  }, [revealRoult, stopHold]);
+
+  const onPlayLeave = useCallback(() => {
+    if (holdingRef.current) stopHold(); // dragged away: cancel silently
+  }, [stopHold]);
+
+  const onPlayCtx = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      stopHold();
+      revealRoult(); // right-click — instant reveal, never opens the popup
+    },
+    [revealRoult, stopHold],
+  );
+
+  /* ---------- keyboard (Q/E shoot, 1-4 skills, ESC closes) ---------- */
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       const eng = engineRef.current;
@@ -453,17 +516,9 @@ export default function GameShell() {
         setRoultOpen(false);
         return;
       }
-      /* the secret popup: ctrl + alt + M opens/closes roul, anywhere */
-      if (ev.ctrlKey && ev.altKey && k === "m") {
-        ev.preventDefault();
-        setRoultOpen((v) => !v);
-        return;
-      }
       if (!eng || !snap) return;
       if (k === "q") void eng.playerShoot("player");
       else if (k === "e") void eng.playerShoot("enemy");
-      else if (k === "h") setShowHelp((v) => !v);
-      else if (k === "m") toggleMute();
       else if (/^[1-4]$/.test(k)) {
         const owned = snap.skills.filter((s) => s.ghostTurns <= 0);
         const target = owned[parseInt(k) - 1];
@@ -472,7 +527,7 @@ export default function GameShell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [snap, toggleMute]);
+  }, [snap]);
 
   /* ---------- playtime ticker (round + total) ---------- */
   const phaseKey = snap?.phase ?? "menu";
@@ -1152,7 +1207,13 @@ export default function GameShell() {
                 REWIND
               </div>
             </div>
-            {assets && <img src={assets.pipLive} alt="" className="rewind-shell" />}
+            {assets && (
+              <img
+                src={rewinding.shell === "live" ? assets.pipLive : assets.pipBlank}
+                alt=""
+                className="rewind-shell"
+              />
+            )}
           </>
         )}
       </div>
@@ -1225,19 +1286,48 @@ export default function GameShell() {
             </div>
           </div>
 
-          {/* the three doors of this establishment — bottom left, top to bottom */}
+          {/* the doors of this establishment — bottom left, top to bottom.
+              PICK A TABLE hides ROULT: hold it a full second (the golden bar
+              fills under the label) or right-click it — the panel rises and
+              uncovers the local AI button beneath. */}
           <div className="absolute bottom-6 left-5 z-10 flex flex-col items-start gap-3 sm:bottom-9 sm:left-8">
             <button
-              className="doodle-btn doodle-red menu-btn px-8 py-3 font-marker text-2xl sm:px-10"
-              style={{ animationDelay: "0.05s" }}
-              onClick={() => {
-                gameAudio.ensure();
-                gameAudio.click();
-                setMenuPanel("play");
-              }}
+              className="doodle-btn doodle-red menu-btn relative px-8 py-3 font-marker text-2xl sm:px-10"
+              style={{ animationDelay: "0.05s", paddingRight: "2.6rem" }}
+              onPointerDown={onPlayDown}
+              onPointerUp={onPlayUp}
+              onPointerLeave={onPlayLeave}
+              onPointerCancel={onPlayLeave}
+              onContextMenu={onPlayCtx}
+              title={t("roultHoldHint")}
             >
               {t("btnPlay")}
+              {/* the V indicator — flips upside down while held / after right-click */}
+              <span className={`play-v font-marker ${holding || roultRevealed ? "play-v-flip" : ""}`}>
+                v
+              </span>
+              {/* the 1-second hold bar under the label */}
+              <span
+                className="play-holdbar"
+                style={{ width: `${holdP * 80}%`, opacity: holding ? 1 : 0 }}
+              />
             </button>
+            {/* ROULT — rises out from under PICK A TABLE */}
+            <div className={`roult-reveal ${roultRevealed ? "roult-reveal-open" : ""}`}>
+              <button
+                className="doodle-btn menu-btn roult-menu-btn px-6 py-2 font-marker text-xl sm:px-8"
+                style={{ animationDelay: "0.12s" }}
+                onClick={() => {
+                  gameAudio.ensure();
+                  gameAudio.click();
+                  setRoultOpen(true);
+                }}
+                title={t("roultBadge")}
+              >
+                {t("roultBtn")}
+                <span className="ml-2 font-hand-sc text-xs opacity-70">{t("roultLocalTag")}</span>
+              </button>
+            </div>
             <button
               className="doodle-btn menu-btn px-6 py-2 font-marker text-xl sm:px-8"
               style={{ animationDelay: "0.18s" }}
@@ -1868,7 +1958,7 @@ export default function GameShell() {
                   keputusan — dan pelurunya keluar 0.2 detik terlambat.
                 </p>
                 <p className="font-hand-sc text-base text-[#4a4036]">
-                  Keyboard: Q = tembak diri · E = tembak Dealer · 1-4 = skill · M = mute · H = bantuan
+                  Keyboard: Q = tembak diri · E = tembak Dealer · 1-4 = skill
                 </p>
               </div>
             ) : (
@@ -1917,10 +2007,21 @@ export default function GameShell() {
                   0.2 seconds late.
                 </p>
                 <p className="font-hand-sc text-base text-[#4a4036]">
-                  Keyboard: Q = shoot self · E = shoot the Dealer · 1-4 = skills · M = mute · H = help
+                  Keyboard: Q = shoot self · E = shoot the Dealer · 1-4 = skills
                 </p>
               </div>
             )}
+            {/* ROULT — the local AI gamemode designer (no longer a secret) */}
+            <div className="mt-4 rounded-[14px_4px_16px_6px] border-2 border-dashed border-[#8f5bd4]/55 bg-[#171226] p-3.5">
+              <div className="flex items-center gap-2">
+                <span className="inline-block h-2 w-2 rounded-full bg-[#7b4fd4] shadow-[0_0_8px_#7b4fd4]" />
+                <div className="font-marker text-lg text-[#d9c9ff]">{t("helpRoultTitle")}</div>
+              </div>
+              <div className="mt-1.5 font-hand text-[15px] leading-snug text-[#c9b3ec]">{t("helpRoultBody")}</div>
+              <div className="mt-2 font-mono text-[10px] uppercase tracking-[0.25em] text-[#6d5a96]">
+                {t("roultBadge")}
+              </div>
+            </div>
             <div className="mt-4 font-marker text-2xl">{t("skillsCount", { n: ALL_SKILL_IDS.length })}</div>
             <div className="mt-2 space-y-2">
               {(ALL_SKILL_IDS as SkillId[]).map((id) => (
@@ -1947,7 +2048,7 @@ export default function GameShell() {
         </div>
       )}
 
-      {/* ================= THE SECRET ASSISTANT ================= */}
+      {/* ================= ROULT — THE LOCAL AI GAMEMODE DESIGNER ================= */}
       {roultOpen && <RoultChat onClose={() => setRoultOpen(false)} />}
     </div>
   );

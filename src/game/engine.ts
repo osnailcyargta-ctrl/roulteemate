@@ -100,7 +100,7 @@ export type HudEvent =
   | { type: "skillFlash"; id: SkillId }
   | { type: "reloadStep"; loaded: number; total: number }
   | { type: "shopTip"; id: SkillId | "bell" | null; xPct: number; yPct: number }
-  | { type: "rewindFx" }
+  | { type: "rewindFx"; shell: ShellType }
   | { type: "tutAction"; action: "shoot" | "skill" | "buy" | "bell" | "shopOpen" }
   | { type: "phoenixCut" }
   | { type: "thirdEyeCut" };
@@ -533,7 +533,8 @@ export class GameEngine {
       id === "all"
         ? (ALL_SKILL_IDS[Math.floor(Math.random() * ALL_SKILL_IDS.length)] as SkillId)
         : id;
-    this.logic.forceSkill(real, target);
+    // gamble resolves its own flip INSIDE the case below (coin FX first)
+    const oc: Partial<SkillOutcome> = real === "gamble" ? {} : this.logic.forceSkill(real, target);
     this.onEvent({ type: "skillFlash", id: real });
     const label = SKILL_META[real].name;
     switch (real) {
@@ -593,6 +594,61 @@ export class GameEngine {
             this.onEvent({ type: "dmgPop", side: "player", text: "-1 HP", tone: "hit" });
           }
         }
+        break;
+      }
+      case "thirdEye": {
+        // scripts get the REAL cinematic too: the violet eye opens, THEN the
+        // chamber swings out and the next shells are revealed in firing order
+        gameAudio.riser(0.75);
+        this.scene.setDesat(0.2);
+        setTimeout(() => this.scene.setDesat(0), 1500);
+        this.onEvent({ type: "thirdEyeCut" });
+        await sleep(1250);
+        gameAudio.scanDing();
+        this.scene.flash(0.25);
+        this.scene.gunPeek(true);
+        const q = oc.queue ?? [];
+        this.onEvent({ type: "shellRevealQueue", shells: q });
+        this.scene.enemySetMood("scared");
+        this.scene.enemySay([pick("thirdEye")], 2.4);
+        this.toast(
+          q.length
+            ? `THIRD EYE: the next ${q.length} shell${q.length > 1 ? "s" : ""} lie bare!`
+            : "THIRD EYE: chamber empty?",
+          "voodoo",
+        );
+        await sleep(1900);
+        this.scene.gunPeek(false);
+        break;
+      }
+      case "rewind": {
+        // TIME GOES BACKWARDS — same 2D un-shot as the real skill, showing
+        // the ACTUAL shell that crawls back (live stays live, blank stays blank)
+        gameAudio.ghostFade();
+        gameAudio.spinCylinder();
+        this.scene.setDesat(0.35);
+        this.scene.addTrauma(0.12);
+        this.onEvent({ type: "rewindFx", shell: oc.rewound?.shell ?? "live" });
+        if (oc.rewound?.moneyGain) {
+          this.money = Math.max(0, this.money - oc.rewound.moneyGain);
+        }
+        this.toast(
+          oc.rewound
+            ? `CUSTOM RULE: ${label} — the ${oc.rewound.shell.toUpperCase()} shell crawls back into the chamber!`
+            : `CUSTOM RULE: ${label} — but there was nothing to undo.`,
+          "voodoo",
+        );
+        await sleep(1400);
+        this.scene.setDesat(0);
+        break;
+      }
+      case "phoenix": {
+        // a script (re)hangs the charm: golden flash + stamp, it stays passive
+        gameAudio.phoenix();
+        this.scene.flash(0.4);
+        this.scene.sparkBurst(this.scene.muzzleWorldPos(), 12);
+        this.onEvent({ type: "skillGet", id: "phoenix" });
+        this.toast(`CUSTOM RULE: ${label} — the charm hangs at your neck. It refuses death ONCE.`, "good");
         break;
       }
       default:
@@ -1164,7 +1220,7 @@ export class GameEngine {
       this.scene.enemySetMood("scared");
       this.scene.enemySay([pick("phoenix")], 2.6);
       this.onEvent({ type: "phoenixCut" });
-      await sleep(2500);
+      await sleep(3300);
     }
 
     if (out.shell === "live") {
@@ -1409,12 +1465,13 @@ export class GameEngine {
         break;
       }
       case "rewind": {
-        // TIME GOES BACKWARDS — the 2D overlay plays the un-shooting
+        // TIME GOES BACKWARDS — the 2D overlay plays the un-shooting with
+        // the REAL shell (a blank rewinds as a blank, never a fake live)
         gameAudio.ghostFade();
         gameAudio.spinCylinder();
         this.scene.setDesat(0.35);
         this.scene.addTrauma(0.12);
-        this.onEvent({ type: "rewindFx" });
+        this.onEvent({ type: "rewindFx", shell: oc.rewound?.shell ?? "live" });
         const rw = oc.rewound;
         if (rw?.moneyGain) {
           this.money = Math.max(0, this.money - rw.moneyGain); // the cash never happened either

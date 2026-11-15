@@ -2,9 +2,14 @@
 roult2/corpus.py — builds the FROM-SCRATCH training corpus for roult v2.
 
 Every example:
-  <intent> {free text, id/en slang} <plan> {title/tagline/bullets/ruangan}
+  <intent> {free text, id/en slang} <plan> {title/tagline/bullets/room}
   [<revise> {instruction} <plan> {revised plan}]   (~35%)
   <think> {reasoning bullets} <code> {ENGINE C} <end>
+
+FULLY BILINGUAL: each example is generated in ONE language (id or en, 50/50).
+The plan/think/revise/taunt language ALWAYS matches the intent language, so
+the model learns "EN in -> EN out, ID in -> ID out" and roult follows the
+user's language automatically.
 
 The ENGINE C code uses ONLY constructs verified against src/game/script.ts:
 int/float globals with constant init, every (hook) blocks, if/else, while,
@@ -40,8 +45,24 @@ SEV_NUM = {
 SEVS = ["low", "mid", "high"]
 SEV_WEIGHTS = [0.3, 0.45, 0.25]
 
+# ------------------------------------------------------------------ #
+# per-example language                                                #
+# ------------------------------------------------------------------ #
+LANG = "id"  # global: the language of the CURRENT example ("id" | "en")
+
+
+def B(id_s, en_s):
+    """pick the string for the current example language"""
+    return id_s if LANG == "id" else en_s
+
+
+def TAU():
+    return rng.choice(spec.TAUNTS[LANG])
+
+
 def pick_sev():
     return rng.choices(SEVS, weights=SEV_WEIGHTS)[0]
+
 
 def num(sev, key):
     d = SEV_NUM[sev]
@@ -49,6 +70,7 @@ def num(sev, key):
     if isinstance(v, tuple):
         return rng.randint(*v)
     return v + (1 if (sev == "high" and key == "heal" and rng.random() < 0.4) else 0)
+
 
 def pick_ident(used):
     for _ in range(20):
@@ -64,7 +86,8 @@ def pick_ident(used):
 # each feature returns a dict:
 #   globals: [(name, "int"/"float", init)]
 #   hooks:   {hookName: [line0, ...]}  (lines are code WITHOUT indent)
-#   bullets: [str]  think: [str]  intents: [(text, mentions_n(bool))]
+#   bullets: [str]  think: [str]  intents: [(id, en, mentions_n(bool))]
+
 
 def f_vampire(sev):
     n = num(sev, "heal")
@@ -77,84 +100,96 @@ def f_vampire(sev):
     d = {
         "globals": [],
         "hooks": {"player_take_damage": lines},
-        "bullets": [f"- dealer sembuh {n} tiap player kena peluru (hook player_take_damage)"],
+        "bullets": [B(f"- dealer sembuh {n} tiap player kena peluru (hook player_take_damage)",
+                      f"- the dealer heals {n} every time the player takes a bullet (player_take_damage hook)")],
         "think": [
-            f"- sifat utamanya vampir: hook player_take_damage cuma nyala pas peluru kena player",
-            f"- heal {n} per kena bikin dealer ngebut pelan, masih ada counterplay",
+            B("- sifat utamanya vampir: hook player_take_damage cuma nyala pas peluru kena player",
+              "- the core is vampiric: player_take_damage only fires when a bullet lands on the player"),
+            B(f"- heal {n} per kena bikin dealer ngebut pelan, masih ada counterplay",
+              f"- healing {n} per hit lets the dealer creep back slowly, the counterplay stays"),
         ],
     }
     d["intents"] = [
-        (f"vampire mode: kalo gw kena tembak dealer malah heal {n}", True),
-        (f"mode vampir, tiap aku kena dealer sembuh {n}", True),
-        ("gw kena peluru tapi dealer malah makin sehat, gitu deh", False),
-        ("dealer jadi vampir: darah gw jadi makanannya", False),
-        (f"vampire table bang, dealer nyedot tiap peluru yang ngena gw", False),
-        ("kalo aku kena damage, dealer heal dikit", False),
-        ("the dealer heals when i get hit, vampire rules", False),
-        ("tiap player kena, dealer nambah darah", False),
-        ("buat yang iseng: damage ke gw bikin dealer hidup lagi", False),
-        (f"vampire play: gw kena = dealer heal {n}", True),
+        (f"vampire mode: kalo gw kena tembak dealer malah heal {n}", f"vampire mode: when i get shot the dealer heals {n} instead", True),
+        (f"mode vampir, tiap aku kena dealer sembuh {n}", f"vampire table, every time i get hit the dealer mends {n}", True),
+        ("gw kena peluru tapi dealer malah makin sehat, gitu deh", "i eat the bullet but the dealer gets healthier, that kind of table", False),
+        ("dealer jadi vampir: darah gw jadi makanannya", "make the dealer a vampire: my blood is his food", False),
+        ("vampire table bang, dealer nyedot tiap peluru yang ngena gw", "vampire table please, the dealer drinks every bullet that hits me", False),
+        ("kalo aku kena damage, dealer heal dikit", "when i take damage the dealer heals a bit", False),
+        ("the dealer heals when i get hit, vampire rules", "the dealer heals when i get hit, vampire rules", False),
+        ("tiap player kena, dealer nambah darah", "every hit on the player feeds the house", False),
+        ("buat yang iseng: damage ke gw bikin dealer hidup lagi", "for the cruel ones: damage on me brings the dealer back to life", False),
+        (f"vampire play: gw kena = dealer heal {n}", f"vampire play: i get hit = the dealer drinks {n}", True),
     ]
     return d
+
 
 def f_leech(sev):
     n = num(sev, "heal")
     d = {
         "globals": [],
         "hooks": {"dealer_take_damage": [f"heal(PLAYER, {n});"]},
-        "bullets": [f"- player heal {n} tiap dealer kena peluru (hook dealer_take_damage)"],
+        "bullets": [B(f"- player heal {n} tiap dealer kena peluru (hook dealer_take_damage)",
+                      f"- the player heals {n} every time the dealer is hit (dealer_take_damage hook)")],
         "think": [
-            "- lifesteal: hook dealer_take_damage nyala pas peluru masuk dealer",
-            f"- heal {n} per hit: agresif tapi adil, dua-duanya masih bisa mati",
+            B("- lifesteal: hook dealer_take_damage nyala pas peluru masuk dealer",
+              "- lifesteal: dealer_take_damage fires when a bullet enters the dealer"),
+            B(f"- heal {n} per hit: agresif tapi adil, dua-duanya masih bisa mati",
+              f"- {n} per hit: aggressive but fair, both of you can still die"),
         ],
     }
     d["intents"] = [
-        (f"lifesteal: tiap gw nembak dealer, darah gw nambah {n}", True),
-        ("gw heal tiap berhasil nutupin peluru ke dealer", False),
-        ("tiap hit ke dealer, aku sembuh dikit", False),
-        (f"mode lintah: darah dealer jadi darah gw, heal {n} per kena", True),
-        ("player nyedot darah dealer tiap kena", False),
-        ("leech mode: my hits heal me a bit", False),
-        ("tiap aku berhasil nembak, darahku naik", False),
-        ("succ tiap hit dong biar tahan lama", False),
+        (f"lifesteal: tiap gw nembak dealer, darah gw nambah {n}", f"lifesteal: every time i shoot the dealer i heal {n}", True),
+        ("gw heal tiap berhasil nutupin peluru ke dealer", "my hits heal me a little", False),
+        ("tiap hit ke dealer, aku sembuh dikit", "each hit on the dealer mends me a bit", False),
+        (f"mode lintah: darah dealer jadi darah gw, heal {n} per kena", f"leech mode: the blood of the dealer becomes mine, {n} back per hit", True),
+        ("player nyedot darah dealer tiap kena", "the player siphons the dealer every time he is hit", False),
+        ("leech mode: my hits heal me a bit", "leech mode: my hits heal me a bit", False),
+        ("tiap aku berhasil nembak, darahku naik", "every landed shot raises my hp", False),
+        ("succ tiap hit dong biar tahan lama", "give me a drain on every hit so i last longer", False),
     ]
     return d
+
 
 def f_escalate(sev):
     a = num(sev, "start")
     k = num(sev, "step")
     target = rng.choice(["PLAYER", "DEALER"])
     v = "dmg"
-    who = "player" if target == "PLAYER" else "dealer"
+    who = B("player", "the player") if target == "PLAYER" else B("dealer", "the dealer")
     d = {
         "globals": [(v, "int", a)],
         "hooks": {"round": [f"{v} += {k};", f"damage({target}, {v});"]},
-        "bullets": [f"- damage ke {who} mulai {a}, naik +{k} tiap ronde (hook round)"],
+        "bullets": [B(f"- damage ke {who} mulai {a}, naik +{k} tiap ronde (hook round)",
+                      f"- damage to {who} starts at {a}, climbs +{k} each round (round hook)")],
         "think": [
-            f"- eskalasi pake global {v}: tiap ronde nambah {k}",
-            f"- hook round paling stabil buat pengali waktu, makin lama makin sakit buat {who}",
+            B(f"- eskalasi pake global {v}: tiap ronde nambah {k}",
+              f"- the escalation lives in the {v} global: +{k} every round"),
+            B(f"- hook round paling stabil buat pengali waktu, makin lama makin sakit buat {who}",
+              f"- the round hook is the most stable clock, the pain on {who} keeps growing"),
         ],
     }
     if target == "PLAYER":
         d["intents"] = [
-            (f"damage ke gw mulai {a} terus naik {k} tiap ronde", True),
-            ("makin lama makin sakit buat player", False),
-            ("eskalasi brutal: tiap ronde damage ke aku nambah", False),
-            ("damage escalator buat player bang, biar buru-buru", False),
-            (f"ronde makin tua peluru makin ngaco, mulai {a} plus {k} tiap ronde", True),
-            ("escalating damage each round on the player", False),
-            ("tiap ronde pelurunya makin kenceng", False),
+            (f"damage ke gw mulai {a} terus naik {k} tiap ronde", f"damage to me starts at {a} and climbs {k} each round", True),
+            ("makin lama makin sakit buat player", "the longer it goes the more it hurts the player", False),
+            ("eskalasi brutal: tiap ronde damage ke aku nambah", "brutal escalator: my damage rises every round", False),
+            ("damage escalator buat player bang, biar buru-buru", "escalating damage on the player please, keep them rushing", False),
+            (f"ronde makin tua peluru makin ngaco, mulai {a} plus {k} tiap ronde", f"older rounds hit harder: start {a} plus {k} per round", True),
+            ("escalating damage each round on the player", "escalating damage each round on the player", False),
+            ("tiap ronde pelurunya makin kenceng", "each round the shell bites harder", False),
         ]
     else:
         d["intents"] = [
-            (f"dealer kena damage otomatis mulai {a}, nambah {k} tiap ronde", True),
-            ("pasang tekanan waktu: dealer bocor tiap ronde", False),
-            ("tiap ronde dealer kehilangan darah dikit, makin lama makin banyak", False),
-            ("escalanat buat dealer, biar meja buru-buru", False),
-            ("round pressure on the dealer, small bleed that grows", False),
-            ("meja ini bocor: dealer kena damage tiap ronde", False),
+            (f"dealer kena damage otomatis mulai {a}, nambah {k} tiap ronde", f"the dealer takes automatic damage starting at {a}, +{k} every round", True),
+            ("pasang tekanan waktu: dealer bocor tiap ronde", "time pressure: the dealer leaks blood every round", False),
+            ("tiap ronde dealer kehilangan darah dikit, makin lama makin banyak", "each round the dealer loses a little blood, growing over time", False),
+            ("escalanat buat dealer, biar meja buru-buru", "an escalator for the dealer so the table rushes", False),
+            ("round pressure on the dealer, small bleed that grows", "round pressure on the dealer, a small bleed that grows", False),
+            ("meja ini bocor: dealer kena damage tiap ronde", "this table leaks: the dealer hurts every round", False),
         ]
     return d
+
 
 def f_soften(sev):
     h = num(sev, "heal")
@@ -163,144 +198,184 @@ def f_soften(sev):
     d = {
         "globals": [(t, "int", 0)],
         "hooks": {"round": [f"{t} += 1;", f"if ({t} >= {p}) {{", f"    heal(PLAYER, {h});", f"    {t} = 0;", "}"]},
-        "bullets": [f"- player regen {h} tiap {p} ronde (hook round)"],
+        "bullets": [B(f"- player regen {h} tiap {p} ronde (hook round)",
+                      f"- the player regens {h} every {p} rounds (round hook)")],
         "think": [
-            f"- regen pake counter {t}, reset abis heal biar periodenya bener",
-            f"- heal {h} tiap {p} ronde: pelan, nggak bikin immortality",
+            B(f"- regen pake counter {t}, reset abis heal biar periodenya bener",
+              f"- the regen uses the {t} counter, reset after the heal keeps the period honest"),
+            B(f"- heal {h} tiap {p} ronde: pelan, nggak bikin immortality",
+              f"- heal {h} every {p} rounds: slow, never immortality"),
         ],
     }
     d["intents"] = [
-        (f"kasih regen {h} tiap {p} ronde buat player", True),
-        ("player heal dikit tiap beberapa ronde", False),
-        (f"tiap {p} ronde aku dapet napas kedua, heal {h}", True),
-        ("regen pelan-pelan biar game-nya tahan lama", False),
-        ("heal kecil buat player tiap beberapa ronde", False),
-        ("small regen every few rounds", False),
+        (f"kasih regen {h} tiap {p} ronde buat player", f"give the player a regen of {h} every {p} rounds", True),
+        ("player heal dikit tiap beberapa ronde", "the player heals a little every few rounds", False),
+        (f"tiap {p} ronde aku dapet napas kedua, heal {h}", f"every {p} rounds i get a second wind, heal {h}", True),
+        ("regen pelan-pelan biar game-nya tahan lama", "a slow regen so the match lasts longer", False),
+        ("heal kecil buat player tiap beberapa ronde", "a small heal for the player every few rounds", False),
+        ("small regen every few rounds", "small regen every few rounds", False),
     ]
     return d
+
 
 def f_endgame(sev):
     r = num(sev, "period") + 2
     dm = num(sev, "dmg") + (1 if sev == "high" else 0)
+    taunt = TAU()
     d = {
         "globals": [],
-        "hooks": {"round": [f"if (round() >= {r}) {{", f"    damage(PLAYER, {dm});", '    say("waktu habis...");', "}"]},
-        "bullets": [f"- mulai ronde {r} player kena {dm} tiap ronde + peringatan (hook round)"],
+        "hooks": {"round": [f"if (round() >= {r}) {{", f"    damage(PLAYER, {dm});", f'    say("{taunt}");', "}"]},
+        "bullets": [B(f"- mulai ronde {r} player kena {dm} tiap ronde + peringatan (hook round)",
+                      f"- from round {r} the player takes {dm} each round + a warning (round hook)")],
         "think": [
-            f"- round() >= {r} nandain akhir permainan, tension naik",
-            "- say() buat tanda satu baris, nggak lebay",
+            B(f"- round() >= {r} nandain akhir permainan, tension naik",
+              f"- round() >= {r} marks the endgame, the tension climbs"),
+            B("- say() buat tanda satu baris, nggak lebay",
+              "- one say() line as the sign, no drama overflow"),
         ],
     }
     d["intents"] = [
-        (f"mulai ronde {r} damage ke gw nempel {dm} tiap ronde", True),
-        ("pas ronde makhir, meja jadi galak + kasih tahu", False),
-        ("endgame tension: ronde tua tambah damage", False),
-        ("kasih jam segel: ronde akhir makin bahaya", False),
-        ("tiap ronde setelah beberapa ronde, player kena tambahan + dealer ngoceh", False),
-        ("dmg ramps after round 5-ish plus a warning line", False),
+        (f"mulai ronde {r} damage ke gw nempel {dm} tiap ronde", f"from round {r} i take {dm} damage each round", True),
+        ("pas ronde makhir, meja jadi galak + kasih tahu", "late game the table turns mean and announces it", False),
+        ("endgame tension: ronde tua tambah damage", "endgame tension: old rounds add damage", False),
+        ("kasih jam segel: ronde akhir makin bahaya", "add a sealed hourglass: the final rounds get dangerous", False),
+        ("tiap ronde setelah beberapa ronde, player kena tambahan + dealer ngoceh", "after a few rounds the player takes extra damage + the dealer mocks", False),
+        ("dmg ramps after round 5-ish plus a warning line", "dmg ramps after round 5-ish plus a warning line", False),
     ]
     return d
+
 
 def f_fury(sev):
     t = num(sev, "thr")
     dm = num(sev, "dmg") + 1
+    taunt = TAU()
     d = {
         "globals": [],
-        "hooks": {"dealer_take_damage": [f"if (hp(DEALER) <= {t}) {{", f"    damage(PLAYER, {dm});", '    say("jangan nakal");', "}"]},
-        "bullets": [f"- dealer darahnya mepet (<= {t}) langsung ngamuk: {dm} damage (hook dealer_take_damage)"],
+        "hooks": {"dealer_take_damage": [f"if (hp(DEALER) <= {t}) {{", f"    damage(PLAYER, {dm});", f'    say("{taunt}");', "}"]},
+        "bullets": [B(f"- dealer darahnya mepet (<= {t}) langsung ngamuk: {dm} damage (hook dealer_take_damage)",
+                      f"- the dealer at low hp (<= {t}) instantly rages back: {dm} damage (dealer_take_damage hook)")],
         "think": [
-            f"- hp(DEALER) <= {t} artinya meja mepet mati, dia balas ngejar",
-            f"- damage {dm} + taunt: dramatis tapi jarang nyala",
+            B(f"- hp(DEALER) <= {t} artinya meja mepet mati, dia balas ngejar",
+              f"- hp(DEALER) <= {t} means the table is one step from death, he chases back"),
+            B(f"- damage {dm} + taunt: dramatis tapi jarang nyala",
+              f"- {dm} damage + a taunt: dramatic but rarely live"),
         ],
     }
     d["intents"] = [
-        (f"kalo darah dealer tinggal dikit dia ngamuk: damage {dm} balik", True),
-        ("dealer mode cacing tanah, pas mepet dia ngamuk", False),
-        ("pas dealer hampir mati dia ngejar balik", False),
-        ("berserk buat dealer pas hp kritis", False),
-        ("dealer desperation: makin mepet makin galak", False),
-        ("when the dealer is almost dead he gets angry", False),
+        (f"kalo darah dealer tinggal dikit dia ngamuk: damage {dm} balik", f"when the dealer is almost dead he rages: {dm} damage back", True),
+        ("dealer mode cacing tanah, pas mepet dia ngamuk", "worm mode for the dealer: near death he strikes back", False),
+        ("pas dealer hampir mati dia ngejar balik", "when the dealer is almost dead he chases back", False),
+        ("berserk buat dealer pas hp kritis", "berserk for the dealer at critical hp", False),
+        ("dealer desperation: makin mepet makin galak", "dealer desperation: the closer to death the meaner", False),
+        ("when the dealer is almost dead he gets angry", "when the dealer is almost dead he gets angry", False),
     ]
     return d
+
 
 def f_coinrig(sev):
     p = num(sev, "chance")
     d = {
         "globals": [],
         "hooks": {"coin": [f"if (chance({p})) {{", "    set_coin(1);", "}"]},
-        "bullets": [f"- koin condong menang {p}% (hook coin)"],
+        "bullets": [B(f"- koin condong menang {p}% (hook coin)",
+                      f"- the gamble coin leans toward heads {p}% (coin hook)")],
         "think": [
-            f"- chance({p}) di hook coin: gamble jadi sedikit ramah",
-            "- set_coin(1) cuma nge-pakse flip berikutnya, bukan selamanya",
+            B(f"- chance({p}) di hook coin: gamble jadi sedikit ramah",
+              f"- chance({p}) inside the coin hook: the gamble turns slightly kind"),
+            B("- set_coin(1) cuma nge-pakse flip berikutnya, bukan selamanya",
+              "- set_coin(1) only forces the next flip, not forever"),
         ],
     }
     d["intents"] = [
-        (f"koin miring ke kita {p} persen pas gamble", True),
-        ("koin-nya diberat ke sisi jackpot", False),
-        ("gamble lebih sering menang, peluang naikin", False),
-        ("pasang koin berat: flip condong menang", False),
-        ("bias the gamble coin toward winning", False),
-        ("koin pembawa untung dikit", False),
+        (f"koin miring ke kita {p} persen pas gamble", f"the coin leans toward us {p} percent on gamble", True),
+        ("koin-nya diberat ke sisi jackpot", "weight the coin toward the jackpot side", False),
+        ("gamble lebih sering menang, peluang naikin", "gamble wins more often, raise the odds", False),
+        ("pasang koin berat: flip condong menang", "loaded coin: the flips favor winning", False),
+        ("bias the gamble coin toward winning", "bias the gamble coin toward winning", False),
+        ("koin pembawa untung dikit", "a slightly lucky coin", False),
     ]
     return d
 
+
 def f_chaos(sev):
     p = num(sev, "chance")
+    taunt = TAU()
     d = {
         "globals": [],
-        "hooks": {"turn": [f"if (chance({p})) {{", "    shuffle();", '    say("shell-nya diacak!");', "}"]},
-        "bullets": [f"- peluru diacak {p}% tiap giliran (hook turn)"],
+        "hooks": {"turn": [f"if (chance({p})) {{", "    shuffle();", f'    say("{taunt}");', "}"]},
+        "bullets": [B(f"- peluru diacak {p}% tiap giliran (hook turn)",
+                      f"- the shells get scrambled {p}% every turn (turn hook)")],
         "think": [
-            f"- shuffle() di tengah giliran bikin tracking mental hampir gak berguna",
-            f"- {p}%: cukup sering, gak permanen",
+            B("- shuffle() di tengah giliran bikin tracking mental hampir gak berguna",
+              "- shuffle() mid-turn makes mental tracking almost useless"),
+            B(f"- {p}%: cukup sering, gak permanen",
+              f"- {p}%: often enough, never permanent"),
         ],
     }
     d["intents"] = [
-        (f"pelurunya diacak tiap giliran, peluang {p} persen", True),
-        ("shell diacak-acak dong tiap turn", False),
-        ("shuffle peluru terus biar gak bisa dihafal", False),
-        ("acak ulang meja tiap giliran, bikin tegang", False),
-        ("randomize the shells every turn with some chance", False),
-        ("peluru mimit diacak ulang, tangan gelombang", False),
+        (f"pelurunya diacak tiap giliran, peluang {p} persen", f"the shells get scrambled every turn, {p} percent chance", True),
+        ("shell diacak-acak dong tiap turn", "shuffle the shells each turn so memory fails", False),
+        ("shuffle peluru terus biar gak bisa dihafal", "keep re-shuffling the cylinder, no memorizing", False),
+        ("acak ulang meja tiap giliran, bikin tegang", "re-randomize the table every turn, keep it tense", False),
+        ("randomize the shells every turn with some chance", "randomize the shells every turn with some chance", False),
+        ("peluru mimit diacak ulang, tangan gelombang", "wave hands: the bullets crawl around", False),
     ]
     return d
+
 
 def f_shopfree(sev):
     sk = rng.choice(["reroll", "coffee", "peek", "cuffs"])
     d = {
         "globals": [],
         "hooks": {"shop": [f'run_skill("{sk}", PLAYER);']},
-        "bullets": [f"- tiap buka toko dapat {sk} gratis (hook shop)"],
+        "bullets": [B(f"- tiap buka toko dapat {sk} gratis (hook shop)",
+                      f"- every shop visit grants a free {sk} (shop hook)")],
         "think": [
-            f'- run_skill("{sk}", PLAYER) nyala pas meja buka toko',
-            "- gratis tapi cuma sekali per kunjungan toko",
+            B(f'- run_skill("{sk}", PLAYER) nyala pas meja buka toko',
+              f'- run_skill("{sk}", PLAYER) fires when the table stocks its goods'),
+            B("- gratis tapi cuma sekali per kunjungan toko",
+              "- free, but only once per visit"),
         ],
     }
     d["intents"] = [
-        (f"tiap masuk toko dapet {sk} gratis", False),
-        ("belanja dikasih bonus skill gratis", False),
-        ("shop ramah: tiap buka toko ada skill free", False),
-        (f"kasir baik: {sk} gratis tiap belanja", False),
-        ("free shop skill every visit", False),
+        (f"tiap masuk toko dapet {sk} gratis", f"every shop visit grants a free {sk}", False),
+        ("belanja dikasih bonus skill gratis", "shopping comes with a free skill bonus", False),
+        ("shop ramah: tiap buka toko ada skill free", "kind shop: a free skill every visit", False),
+        (f"kasir baik: {sk} gratis tiap belanja", f"nice cashier: free {sk} with every purchase", False),
+        ("free shop skill every visit", "free shop skill every visit", False),
+        ("beli apapun dikasih bonus", "every stop at the shop drops a gift", False),
     ]
     return d
+
 
 def f_peektax(sev):
     d0 = num(sev, "dmg")
     if rng.random() < 0.5:
         lines = [f"damage(PLAYER, {d0});"]
-        bullet = f"- ngintip kena pajak: {d0} damage (hook peek)"
-        intent0 = f"ngintip kena penalti {d0} damage"
-        intent1 = "peek bukan gratis: kena damage dikit"
+        bullet = B(f"- ngintip kena pajak: {d0} damage (hook peek)",
+                   f"- peeping is taxed: {d0} damage (peek hook)")
+        intents = [
+            (f"ngintip kena penalti {d0} damage", f"peeping costs {d0} damage", True),
+            ("peek bukan gratis: kena damage dikit", "peeking is not free: take a little damage", False),
+            ("peeping costs something", "peeping costs something", False),
+            ("penalti buat yang penasaran", "a penalty for the curious ones", False),
+        ]
     else:
         lines = [f"heal(DEALER, {d0});"]
-        bullet = f"- ngintip kena pajak: dealer heal {d0} (hook peek)"
-        intent0 = f"kalo gw intip, dealer malah heal {d0}"
-        intent1 = "mata bayar: peek bikin dealer makin sehat"
+        bullet = B(f"- ngintip kena pajak: dealer heal {d0} (hook peek)",
+                   f"- peeping is taxed: the dealer heals {d0} (peek hook)")
+        intents = [
+            (f"kalo gw intip, dealer malah heal {d0}", f"if i peek, the dealer heals {d0} instead", True),
+            ("mata bayar: peek bikin dealer makin sehat", "paying eyes: peeking makes the dealer healthier", False),
+            ("peeping costs something", "peeping costs something", False),
+            ("intip = ngasih makan ke dealer", "the magnifier feeds the house", False),
+        ]
     d = {"globals": [], "hooks": {"peek": lines}, "bullets": [bullet],
-         "think": ["- hook peek nyala tiap kaca pembesar dipakai", "- pajak kecil tapi bikin mikir dua kali"]}
-    d["intents"] = [(intent0, True), (intent1, False), ("peeping costs something", False), ("penalti buat yang penasaran", False)]
+         "think": [B("- hook peek nyala tiap kaca pembesar dipakai", "- the peek hook fires every time the magnifier is used"),
+                   B("- pajak kecil tapi bikin mikir dua kali", "- a small tax that makes you think twice")]}
+    d["intents"] = intents
     return d
+
 
 def f_skillecho(sev):
     n = num(sev, "heal")
@@ -308,50 +383,64 @@ def f_skillecho(sev):
     d = {
         "globals": [],
         "hooks": {"skill": [f"if (last_skill() == {const}) {{", f"    heal(PLAYER, {n});", "}"]},
-        "bullets": [f"- tiap pakai {sk}, player heal {n} (hook skill)"],
+        "bullets": [B(f"- tiap pakai {sk}, player heal {n} (hook skill)",
+                      f"- using {sk} heals the player {n} (skill hook)")],
         "think": [
-            f"- last_skill() == {const} nangkep pemakaian {sk}",
-            f"- heal {n}: kecil, tapi konsisten",
+            B(f"- last_skill() == {const} nangkep pemakaian {sk}",
+              f"- last_skill() == {const} catches the {sk} use"),
+            B(f"- heal {n}: kecil, tapi konsisten",
+              f"- {n} hp: small, but consistent"),
         ],
     }
     d["intents"] = [
-        (f"tiap aku pake {sk} dikasih heal {n}", True),
-        (f"{sk} jadi ada bonus darah", False),
-        ("bonus heal tiap pakai skill tertentu", False),
-        ("skill echo: pakai skill, dapet bonus", False),
-        ("heal when i use a specific skill", False),
+        (f"tiap aku pake {sk} dikasih heal {n}", f"every time i use {sk} i get a heal of {n}", True),
+        (f"{sk} jadi ada bonus darah", f"{sk} now carries an hp bonus", False),
+        ("bonus heal tiap pakai skill tertentu", "a small heal bonus when a specific skill is used", False),
+        ("skill echo: pakai skill, dapet bonus", "skill echo: use a skill, get a bonus", False),
+        ("heal when i use a specific skill", "heal when i use a specific skill", False),
+        (f"echo bonus di {sk}", f"an echo bonus on {sk} uses", False),
     ]
     return d
+
 
 def f_phoenixpraise(sev):
     n = num(sev, "heal")
     d = {
         "globals": [],
         "hooks": {"skill": [f"if (last_skill() == SKILL_PHOENIX) {{", f"    heal(PLAYER, {n});", "}"]},
-        "bullets": [f"- abis bangkit pakai phoenix, heal {n} (hook skill)"],
-        "think": ["- SKILL_PHOENIX di last_skill() nandain abis bangkit", f"- heal {n} bikin resurrection makin terasa"],
+        "bullets": [B(f"- abis bangkit pakai phoenix, heal {n} (hook skill)",
+                      f"- after rising with phoenix, heal {n} (skill hook)")],
+        "think": [B("- SKILL_PHOENIX di last_skill() nandain abis bangkit", "- SKILL_PHOENIX in last_skill() marks the resurrection"),
+                  B(f"- heal {n} bikin resurrection makin terasa", f"- heal {n} makes the resurrection feel real")],
     }
     d["intents"] = [
-        (f"abis phoenix, heal {n} dong", True),
-        ("phoenix bangkit dikasih bonus darah", False),
-        ("resurrection lebih manja dikit", False),
-        ("bonus heal after phoenix", False),
+        (f"abis phoenix, heal {n} dong", f"after phoenix, heal {n} please", True),
+        ("phoenix bangkit dikasih bonus darah", "the resurrection gets an hp bonus", False),
+        ("resurrection lebih manja dikit", "being reborn spoils me a little", False),
+        ("bonus heal after phoenix", "bonus heal after phoenix", False),
+        ("phoenix bangkit sekalian nyembuhin", "phoenix rises and mends me", False),
     ]
     return d
 
+
 def f_eyepraise(sev):
+    taunt = TAU()
     d = {
         "globals": [],
-        "hooks": {"skill": ["if (last_skill() == SKILL_THIRDEYE) {", '    say("kelihatan semua...");', "}"]},
-        "bullets": ["- abis third eye, dealer ngoceh (hook skill)"],
-        "think": ["- SKILL_THIRDEYE triggernya pas mata ketiga dipakai", "- cuma flavor line, gak ngubah angka"],
+        "hooks": {"skill": ["if (last_skill() == SKILL_THIRDEYE) {", f'    say("{taunt}");', "}"]},
+        "bullets": [B("- abis third eye, dealer ngoceh (hook skill)",
+                      "- after the third eye, the dealer rambles (skill hook)")],
+        "think": [B("- SKILL_THIRDEYE triggernya pas mata ketiga dipakai", "- SKILL_THIRDEYE triggers when the third eye is used"),
+                  B("- cuma flavor line, gak ngubah angka", "- a flavor line only, the numbers stay untouched")],
     }
     d["intents"] = [
-        ("abis pake third eye dealer ngoceh", False),
-        ("pas mata ketiga dibuka ada reaksi dari meja", False),
-        ("third eye gets a reaction line", False),
+        ("abis pake third eye dealer ngoceh", "after using the third eye the dealer rambles", False),
+        ("pas mata ketiga dibuka ada reaksi dari meja", "when the third eye opens the table reacts", False),
+        ("third eye gets a reaction line", "third eye gets a reaction line", False),
+        ("mata ketiga bikin dealer banyak bicara", "the eye makes the dealer talk", False),
     ]
     return d
+
 
 def f_theme(sev):
     r = num(sev, "period") + 1
@@ -359,53 +448,66 @@ def f_theme(sev):
     d = {
         "globals": [],
         "hooks": {"round": [f"if (round() == {r}) {{", f"    theme({c});", "}"]},
-        "bullets": [f"- pas ronde {r} lampu ruangan berubah (theme {c})"],
-        "think": [f"- theme({c}) ganti warna lampu pas ronde {r}", "- kosmetik doang, aman buat balance"],
+        "bullets": [B(f"- pas ronde {r} lampu ruangan berubah (theme {c})",
+                      f"- at round {r} the room lights change (theme {c})")],
+        "think": [B(f"- theme({c}) ganti warna lampu pas ronde {r}", f"- theme({c}) retints the light at round {r}"),
+                  B("- kosmetik doang, aman buat balance", "- cosmetic only, safe for balance")],
     }
     d["intents"] = [
-        (f"ronde {r} ganti tema ruangan", True),
-        ("ganti lampu meja di tengah game", False),
-        ("temanya ruangan ganti pas ronde tertentu", False),
-        ("mood swing: room light changes mid game", False),
+        (f"ronde {r} ganti tema ruangan", f"at round {r} the room theme changes", True),
+        ("ganti lampu meja di tengah game", "change the table lights mid game", False),
+        ("temanya ruangan ganti pas ronde tertentu", "the mood of the room shifts at a certain round", False),
+        ("mood swing: room light changes mid game", "mood swing: room light changes mid game", False),
+        (f"swap warna lampu pas ronde {r}", f"swap the lamp color on round {r}", False),
     ]
     return d
 
+
 def f_taunt(sev):
-    line = "waktu habis..."
+    line = TAU()
     if rng.random() < 0.5:
-        lines = [f'    say("{line}");']
         lines = [f'say("{line}");']
-        bullet = f"- dealer ngoceh tiap giliran (hook turn)"
-        think = ["- hook turn nyala tiap gantian", "- satu baris flavor, nggak ngubah mekanik"]
+        bullet = B("- dealer ngoceh tiap giliran (hook turn)",
+                   "- the dealer rambles every turn (turn hook)")
+        think = [B("- hook turn nyala tiap gantian", "- the turn hook fires on every swap"),
+                 B("- satu baris flavor, nggak ngubah mekanik", "- one flavor line, no mechanics touched")]
     else:
         r = num(sev, "period") + 2
         lines = [f"if (round() >= {r}) {{", f'    say("{line}");', "}"]
-        bullet = f"- mulai ronde {r} dealer ngoceh (hook turn)"
-        think = [f"- round() >= {r}: ngoceh mulai di ronde tua", "- flavor buat tension"]
+        bullet = B(f"- mulai ronde {r} dealer ngoceh (hook turn)",
+                   f"- from round {r} the dealer rambles (turn hook)")
+        think = [B(f"- round() >= {r}: ngoceh mulai di ronde tua", f"- round() >= {r}: the rambling starts in the late rounds"),
+                 B("- flavor buat tension", "- flavor for tension")]
     d = {"globals": [], "hooks": {"turn": lines}, "bullets": [bullet], "think": think}
     d["intents"] = [
-        ("dealer banyak omong tiap giliran", False),
-        ("kasih sindiran tiap giliran biar tegang", False),
-        ("the dealer talks trash every turn", False),
-        ("meja ngoceh dong biar hidup", False),
+        ("dealer banyak omong tiap giliran", "the dealer talks a lot every turn", False),
+        ("kasih sindiran tiap giliran biar tegang", "a mocking line every turn keeps it tense", False),
+        ("the dealer talks trash every turn", "the dealer talks trash every turn", False),
+        ("meja ngoceh dong biar hidup", "make the table ramble, it feels alive", False),
+        ("sindiran per giliran", "one taunt per turn", False),
     ]
     return d
+
 
 def f_burst(sev):
     p = num(sev, "chance") // 2
     d = {
         "globals": [],
         "hooks": {"dealer_take_damage": [f"if (chance({p})) {{", "    repeat(2) {", "        damage(DEALER, 1);", "    }", '    say("doble tap!");', "}"]},
-        "bullets": [f"- {p}% doble tap: damage ganda ke dealer (hook dealer_take_damage)"],
-        "think": ["- repeat(2) = kombo dua pukulan", f"- chance({p}) bikin kombo spesial, bukan tiap hit"],
+        "bullets": [B(f"- {p}% doble tap: damage ganda ke dealer (hook dealer_take_damage)",
+                      f"- {p}% double tap: double damage to the dealer (dealer_take_damage hook)")],
+        "think": [B("- repeat(2) = kombo dua pukulan", "- repeat(2) = a two hit combo"),
+                  B(f"- chance({p}) bikin kombo spesial, bukan tiap hit", f"- chance({p}) keeps the combo special, not every hit")],
     }
     d["intents"] = [
-        (f"kadang kombo doble tap {p} persen", True),
-        ("kasih kombo damage ganda sesekali", False),
-        ("double tap combo sometimes", False),
-        ("tiap nembak ada kesempatan kombo 2x", False),
+        (f"kadang kombo doble tap {p} persen", f"sometimes a double tap combo, {p} percent", True),
+        ("kasih kombo damage ganda sesekali", "an occasional double damage combo", False),
+        ("double tap combo sometimes", "double tap combo sometimes", False),
+        ("tiap nembak ada kesempatan kombo 2x", "every shot has a chance of a 2x combo", False),
+        ("kombo langka yang keras", "a rare combo burst that hits hard", False),
     ]
     return d
+
 
 def f_loopdrain(sev):
     p = num(sev, "chance") // 3
@@ -413,16 +515,20 @@ def f_loopdrain(sev):
     d = {
         "globals": [(g, "int", 3)],
         "hooks": {"round": [f"if (chance({p})) {{", f"    {g} = 3;", f"    while ({g} > 0) {{", f"        {g} -= 1;", "        damage(DEALER, 1);", "    }", "}"]},
-        "bullets": [f"- {p}% panen pelan: 3 tambalan ke dealer (hook round)"],
-        "think": [f"- while({g} > 0) nge-pump 3 damage, fuel guard bawaan bakal jaga", f"- chance({p}) biar jarang tapi kenceng"],
+        "bullets": [B(f"- {p}% panen pelan: 3 tambalan ke dealer (hook round)",
+                      f"- {p}% slow harvest: 3 chips of damage to the dealer (round hook)")],
+        "think": [B(f"- while({g} > 0) nge-pump 3 damage, fuel guard bawaan bakal jaga", f"- while({g} > 0) pumps 3 damage, the built-in fuel guard protects"),
+                  B(f"- chance({p}) biar jarang tapi kenceng", f"- chance({p}) keeps it rare but heavy")],
     }
     d["intents"] = [
-        (f"sese kali ada panen pelan {p} persen, 3 tambalan ke dealer", True),
-        ("kadang dealer kepanen 3x sekaligus", False),
-        ("satu ronde bisa kejadian triple damage buat dealer", False),
-        ("occasionally triple drain on the dealer", False),
+        (f"sese kali ada panen pelan {p} persen, 3 tambalan ke dealer", f"rare slow harvest {p} percent, 3 chips to the dealer", True),
+        ("kadang dealer kepanen 3x sekaligus", "sometimes the dealer takes 3 hits at once", False),
+        ("satu ronde bisa kejadian triple damage buat dealer", "one round can drop a triple damage on the dealer", False),
+        ("occasionally triple drain on the dealer", "occasionally triple drain on the dealer", False),
+        ("gerinda pelan tapi dalam", "a slow grinder, deep cuts", False),
     ]
     return d
+
 
 FEATURES = {
     "vampire": f_vampire, "leech": f_leech, "escalate": f_escalate,
@@ -438,31 +544,31 @@ RARE = {"theme", "loopdrain", "eyepraise", "phoenixpraise", "burst", "skillecho"
 CORES = ["vampire", "leech", "escalate", "soften", "endgame", "fury", "coinrig", "chaos", "shopfree", "peektax", "taunt"]
 
 ADDONS = {
-    "soften": "tambah regen tiap ronde",
-    "chaos": "peluru diacak tiap ronde",
-    "coinrig": "koin dikit ke arah kita",
-    "taunt": "dealer ikut ngoceh",
-    "peektax": "intip kena pajak",
+    "soften": ("tambah regen tiap ronde", "add a small regen each round"),
+    "chaos": ("peluru diacak tiap ronde", "scramble the shells every round"),
+    "coinrig": ("koin dikit ke arah kita", "lean the coin toward us a bit"),
+    "taunt": ("dealer ikut ngoceh", "let the dealer ramble too"),
+    "peektax": ("intip kena pajak", "make peeping cost something"),
 }
 
 TAGLINES = {
-    "vampire": "tiap peluru yang kena gw jadi sustennya",
-    "leech": "darah dealer pindah ke tangan gw",
-    "escalate": "makin lama makin nggak ada yang aman",
-    "soften": "napas kecil di antara tembakan",
-    "endgame": "jam pasir mulai bicara",
-    "fury": "jangan paksa dia ngamuk",
-    "coinrig": "koin punya sisi favorit",
-    "chaos": "tangan gelombang, peluru cakar",
-    "shopfree": "toko yang terlalu baik hati",
-    "peektax": "penasaran itu mahal",
-    "skillecho": "kartu balik suara",
-    "phoenixpraise": "abu abu jadi napas",
-    "eyepraise": "yang tersembunyi jadi berat",
-    "theme": "lampu ikut ikut pemain",
-    "taunt": "meja yang perlu banyak bicara",
-    "burst": "kadang datang dua kali",
-    "loopdrain": "panen pelan pake gerinda",
+    "vampire": ("tiap peluru yang kena gw jadi sustennya", "every bullet that hits you becomes its meal"),
+    "leech": ("darah dealer pindah ke tangan gw", "the blood of the dealer moves into your hands"),
+    "escalate": ("makin lama makin nggak ada yang aman", "the longer it goes, the less is safe"),
+    "soften": ("napas kecil di antara tembakan", "a small breath between shots"),
+    "endgame": ("jam pasir mulai bicara", "the hourglass starts talking"),
+    "fury": ("jangan paksa dia ngamuk", "do not push him into a rage"),
+    "coinrig": ("koin punya sisi favorit", "the coin has a favorite side"),
+    "chaos": ("tangan gelombang, peluru cakar", "waving hands, clawing bullets"),
+    "shopfree": ("toko yang terlalu baik hati", "a shop that is too kind"),
+    "peektax": ("penasaran itu mahal", "curiosity is expensive"),
+    "skillecho": ("kartu balik suara", "the cards echo back"),
+    "phoenixpraise": ("abu abu jadi napas", "ashes become breath"),
+    "eyepraise": ("yang tersembunyi jadi berat", "the hidden becomes heavy"),
+    "theme": ("lampu ikut ikut pemain", "the lights take your side"),
+    "taunt": ("meja yang perlu banyak bicara", "a table that needs to talk"),
+    "burst": ("kadang datang dua kali", "sometimes it comes twice"),
+    "loopdrain": ("panen pelan pake gerinda", "a slow harvest with a grinder"),
 }
 
 # ------------------------------------------------------------------ #
@@ -471,24 +577,27 @@ TAGLINES = {
 
 HOOK_ORDER = ["round", "turn", "hit", "player_take_damage", "dealer_take_damage", "skill", "shop", "coin", "peek"]
 
+MOOD_POOL = {
+    "vampire": [("crypt", "crypt"), ("kapal karam", "shipwreck"), ("gudang tua", "old warehouse")],
+    "fury": [("cabin merah", "red cabin"), ("gudang tua", "old warehouse")],
+    "coinrig": [("neon bawah tanah", "underground neon")],
+    "chaos": [("kereta malam", "night train"), ("neon bawah tanah", "underground neon")],
+    "theme": [("rumah kaca", "glass house"), ("salju", "snow")],
+}
+
+
 def mood_for(feat_ids):
-    pool = {
-        "vampire": ["crypt", "kapal karam", "gudang tua"],
-        "fury": ["cabin merah", "gudang tua"],
-        "coinrig": ["neon bawah tanah"],
-        "chaos": ["kereta malam", "neon bawah tanah"],
-        "theme": ["rumah kaca", "salju"],
-    }
     for f in feat_ids:
-        if f in pool:
-            return rng.choice(pool[f])
-    return rng.choice(spec.MOODS)
+        if f in MOOD_POOL:
+            mid, men = rng.choice(MOOD_POOL[f])
+            return mid if LANG == "id" else men
+    mid, men = rng.choice(spec.MOODS)
+    return mid if LANG == "id" else men
+
 
 def emit_code(feats, used):
     """feats: list of feature dicts (in selection order). returns code str"""
     tight = False
-    gap = "\n"
-    style_paren = True  # canonical: every (hook) {
     out = []
     # globals
     gmap = {}
@@ -509,7 +618,7 @@ def emit_code(feats, used):
             lines += f["hooks"].get(hook, [])
         if not lines:
             continue
-        head = f"every({hook}) {{" if not style_paren else f"every ({hook}) {{"
+        head = f"every ({hook}) {{" if rng.random() < 0.75 else f"every({hook}) {{"
         out.append(head)
         for ln in lines:
             out.append(("    " + ln) if ln else "")
@@ -520,14 +629,17 @@ def emit_code(feats, used):
         out.pop()
     return "\n".join(out) + "\n"
 
+
 def plan_text(primary, feats, mood):
-    title = spec.TITLES[primary][0].lower()
-    tag = TAGLINES[primary]
+    titles = spec.TITLES[primary][LANG]
+    title = rng.choice(titles).lower()
+    tag = TAGLINES[primary][0] if LANG == "id" else TAGLINES[primary][1]
     lines = [f"title: {title}", f"tagline: {tag}"]
     for f in feats:
         lines += f["bullets"]
-    lines.append(f"ruangan: {mood}")
+    lines.append(B(f"ruangan: {mood}", f"room: {mood}"))
     return "\n".join(lines)
+
 
 def think_text(feats):
     lines = []
@@ -538,25 +650,31 @@ def think_text(feats):
         for h in f["hooks"]:
             if h not in hooks_used:
                 hooks_used.append(h)
-    lines.append("- cek ulang: argumen builtin valid, hook urutannya " + " + ".join(hooks_used))
+    lines.append(B("- cek ulang: argumen builtin valid, hook urutannya " + " + ".join(hooks_used),
+                   "- double check: builtin args valid, hook order " + " + ".join(hooks_used)))
     lines = lines[:4]
     return "\n".join("- " + l[2:] if l.startswith("- ") else "- " + l for l in lines)
+
 
 def assemble_intent(feats, sevs):
     """1-3 sentence intent from the feature banks"""
     parts = []
-    for i, f in enumerate(feats):
+    for f in feats:
         bank = f["intents"]
-        text, _ = rng.choice(bank)
-        parts.append(text)
-    joiner = rng.choice([" + ", ", terus ", ", plus ", ". terus ", " gimana? terus ", " | ", ", sama "])
+        idt, ent, _flag = rng.choice(bank)
+        parts.append(idt if LANG == "id" else ent)
+    joiners_id = [" + ", ", terus ", ", plus ", ". terus ", " gimana? terus ", " | ", ", sama "]
+    joiners_en = [" + ", ", and ", ", plus ", ". then ", " also ", " | ", " then "]
+    joiner = rng.choice(joiners_id if LANG == "id" else joiners_en)
     intent = parts[0]
     for p in parts[1:]:
         intent += joiner + p
     # severity words sometimes appended / prepended
     if rng.random() < 0.3:
         sev = sevs[0]
-        word = rng.choice({"low": ["tipis aja", "adil dikit", "jangan kejam"], "mid": ["standar aja", "seimbang"], "high": ["brutal", "gila", "kejam", "nyekik"]}[sev])
+        word_id = {"low": ["tipis aja", "adil dikit", "jangan kejam"], "mid": ["standar aja", "seimbang"], "high": ["brutal", "gila", "kejam", "nyekik"]}[sev]
+        word_en = {"low": ["keep it fair", "soft please", "be gentle"], "mid": ["standard is fine", "balanced"], "high": ["brutal", "insane", "cruel", "merciless"]}[sev]
+        word = rng.choice(word_id if LANG == "id" else word_en)
         intent += f" ({word})"
     # occasional typo / slang noise (char-fallback training)
     if rng.random() < 0.09:
@@ -565,22 +683,33 @@ def assemble_intent(feats, sevs):
         intent = intent[:intent.rfind(" ", 0, 190)] if " " in intent[:190] else intent[:190]
     return intent
 
-NOISE = [
+
+NOISE_ID = [
     ("bikin", "bikinin"), ("heal", "healingin"), ("ronde", "ronndee"),
     ("vampir", "vampirrr"), ("tembak", "tembak2"), ("diacak", "diacak2"),
     ("peluru", "pelorrr"), ("koin", "koinz"), ("toko", "tokoo"),
 ]
+NOISE_EN = [
+    ("heal", "heall"), ("dealer", "dealet"), ("round", "ronud"),
+    ("shell", "shlell"), ("coin", "c0in"), ("peek", "peke"),
+    ("damage", "dammage"), ("brutal", "brutall"),
+]
+
 
 def _add_noise(s):
-    w0 = rng.choice(NOISE)
+    src = NOISE_ID if LANG == "id" else NOISE_EN
+    w0 = rng.choice(src)
     return s.replace(w0[0], w0[1], 1)
 
 # ------------------------------------------------------------------ #
 # revision                                                           #
 # ------------------------------------------------------------------ #
 
-BRUTALIZE = ["lebih brutal", "gebrak lebih keras", "naikin semuanya", "jangan manja", "kejam-in dong"]
-SOFTEN = ["lebih adil", "pelan pelan aja", "turunin angkanya", "jangan kejam", "halusin dikit"]
+BRUTALIZE = (["lebih brutal", "gebrak lebih keras", "naikin semuanya", "jangan manja", "kejam-in dong"],
+             ["more brutal", "hit harder", "scale it all up", "do not be soft", "make it cruel"])
+SOFTEN_R = (["lebih adil", "pelan pelan aja", "turunin angkanya", "jangan kejam", "halusin dikit"],
+            ["more fair", "tone it down", "lower the numbers", "be gentle", "softer please"])
+
 
 def bump_num(text_line, delta_fn):
     """rewrite numbers in a bullet line by a delta function"""
@@ -601,6 +730,7 @@ def bump_num(text_line, delta_fn):
             i += 1
     return "".join(out)
 
+
 def revise_mode(feat_ids, feat_dicts, instr_kind):
     """returns (instr_text, new_feat_ids, new_feat_dicts, delta)"""
     delta_up = lambda n: max(2, int(n * 2) if n <= 4 else min(85, n + 20))
@@ -611,30 +741,35 @@ def revise_mode(feat_ids, feat_dicts, instr_kind):
             d = dict(f)
             d["bullets"] = [bump_num(b, delta_up) for b in f["bullets"]]
             new_dicts.append(d)
-        return rng.choice(BRUTALIZE), list(feat_ids), new_dicts, "up"
+        return rng.choice(BRUTALIZE[0] if LANG == "id" else BRUTALIZE[1]), list(feat_ids), new_dicts, "up"
     if instr_kind == "soften":
         new_dicts = []
         for f in feat_dicts:
             d = dict(f)
             d["bullets"] = [bump_num(b, delta_dn) for b in f["bullets"]]
             new_dicts.append(d)
-        return rng.choice(SOFTEN), list(feat_ids), new_dicts, "dn"
+        return rng.choice(SOFTEN_R[0] if LANG == "id" else SOFTEN_R[1]), list(feat_ids), new_dicts, "dn"
     if instr_kind == "add":
         add_id = rng.choice(list(ADDONS.keys()))
         if add_id in feat_ids:
             add_id = rng.choice([a for a in ADDONS if a not in feat_ids] or ["taunt"])
         sev = pick_sev()
         new_f = FEATURES[add_id](sev)
-        return ADDONS[add_id], feat_ids + [add_id], feat_dicts + [new_f], None
+        instr = ADDONS[add_id][0] if LANG == "id" else ADDONS[add_id][1]
+        return instr, feat_ids + [add_id], feat_dicts + [new_f], None
     if instr_kind == "remove":
         if len(feat_ids) <= 1:
             return None, None, None, None
         idx = rng.randrange(len(feat_ids))
         gone = feat_ids[idx]
-        b0 = feat_dicts[idx]["bullets"][0]
-        instr = rng.choice([f"hapus yang {gone}", f"jangan {gone} dulu", "buang satu mekanik"])
+        instr = rng.choice([
+            B(f"hapus yang {gone}", f"remove the {gone}"),
+            B(f"jangan {gone} dulu", f"drop the {gone} part"),
+            B("buang satu mekanik", "take one mechanic out"),
+        ])
         return instr, feat_ids[:idx] + feat_ids[idx + 1:], feat_dicts[:idx] + feat_dicts[idx + 1:], None
     return None, None, None, None
+
 
 def code_from(feat_ids, feat_dicts, delta, sev0):
     """re-emit code for revised knobs: scale the numbers inside code lines
@@ -675,6 +810,8 @@ def code_from(feat_ids, feat_dicts, delta, sev0):
 # ------------------------------------------------------------------ #
 
 def make_example():
+    global LANG
+    LANG = rng.choice(["id", "en"])
     n_feats = rng.choices([1, 2], weights=[0.72, 0.28])[0]
     ids = [rng.choice(CORES)]
     while len(ids) < n_feats:
@@ -719,6 +856,7 @@ def make_example():
     )
     return text, ids
 
+
 def collect_wordfreq(texts):
     freq = {}
     for t in texts:
@@ -735,11 +873,11 @@ def collect_wordfreq(texts):
                         freq[w0] = freq.get(w0, 0) + 1
     return freq
 
+
 def main():
-    n_target = int(sys.argv[1]) if len(sys.argv) > 1 else 6500
+    n_target = int(sys.argv[1]) if len(sys.argv) > 1 else 7000
     texts = []
     seen_codes = {}
-    hook_stat = {}
     tries = 0
     while len(texts) < n_target and tries < n_target * 6:
         tries += 1
@@ -751,21 +889,14 @@ def main():
             continue
         seen_codes[key] = seen_codes.get(key, 0) + 1
         texts.append(text)
-        for _f in ids:
-            pass
+    idn = sum(1 for t in texts if "<intent> " in t)
     print(f"generated {len(texts)} examples from {tries} tries")
     vocab_path = os.path.join(OUT_VOCAB, "vocab.json")
-    if os.path.exists(vocab_path):
-        with open(vocab_path, encoding="utf-8") as f:
-            payload = json.load(f)
-        stoi = {t: i for i, t in enumerate(payload["itos"])}
-        vocab = {"itos": payload["itos"], "stoi": stoi}
-        print(f"reusing existing vocab: {len(vocab['itos'])} tokens")
-    else:
-        freq = collect_wordfreq(texts)
-        vocab = spec.build_vocab(freq)
-        spec.save_shared(OUT_VOCAB, vocab)
-        print(f"vocab size: {len(vocab['itos'])}")
+    # the model changed -> always rebuild the vocab from scratch
+    freq = collect_wordfreq(texts)
+    vocab = spec.build_vocab(freq)
+    spec.save_shared(OUT_VOCAB, vocab)
+    print(f"vocab size: {len(vocab['itos'])}")
 
     # encode + length filter
     kept = []
@@ -779,7 +910,6 @@ def main():
             continue
         total_tokens += len(ids)
         kept.append(ids)
-        # roundtrip check on clean examples (no noise) is implicit: decode
         dec = spec.decode(ids, vocab["itos"])
         if dec != t:
             roundtrip_fail += 1
@@ -800,15 +930,17 @@ def main():
     }
     with open(os.path.join(OUT_DATA, "stats.json"), "w") as f:
         json.dump(stats, f, indent=2)
-    # print a sample
-    print("=== SAMPLE ===")
-    print(spec.decode(kept[0], vocab["itos"])[:1200])
+    # print a sample of each language
+    print("=== SAMPLE (first) ===")
+    print(spec.decode(kept[0], vocab["itos"])[:900])
+
 
 def _norm_code(code):
     import re as _re
     s = _re.sub(r"\d+", "N", code)
-    s = _re.sub(r"\b(?:dmg|heal|regen|tick|count|scale|spike|streak|pot|tax|rage|debt|greed|mercy|ramp|blood|luck|fever|curse|pact|extra|k|n|turnNo|hitCount|roundNo|glow|shadow|frenzy|hunger)\b", "V", s)
+    s = _re.sub(r"\b(?:dmg|heal|regen|tick|count|scale|spike|streak|pot|tax|rage|debt|greed|mercy|ramp|blood|luck|fever|curse|pact|extra|k|n|turnNo|hitCount|roundNo|glow|shadow|frenzy|hunger|drain)\b", "V", s)
     return s
+
 
 if __name__ == "__main__":
     main()

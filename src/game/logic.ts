@@ -742,7 +742,7 @@ export class RouletteLogic {
 
   /** Script/mutator FORCED skill effect: applies the effect with no
    *  turn/cooldown checks (the custom rules are above the law). */
-  forceSkill(id: SkillId, target: Side, preset: { win?: boolean } = {}): { win?: boolean; died?: boolean; revealed?: ShellType | null } {
+  forceSkill(id: SkillId, target: Side, preset: { win?: boolean } = {}): { win?: boolean; died?: boolean; revealed?: ShellType | null; queue?: (ShellType | null)[]; rewound?: LastShot | null } {
     const st = this.state;
     const skTarget = target === "player" ? st.skills.find((s) => s.id === id) : st.enemySkills[id];
     switch (id) {
@@ -779,7 +779,7 @@ export class RouletteLogic {
           this.playerKnownQueue = q;
           this.playerKnown = q[0] ?? null;
         }
-        return { revealed: q[0] ?? null };
+        return { revealed: q[0] ?? null, queue: q };
       }
       case "eject": {
         const cur = st.cylinder.shift() ?? null;
@@ -815,7 +815,7 @@ export class RouletteLogic {
         this.aiMem.total += 1;
         if (last.shell === "live") this.aiMem.live = Math.min(this.aiMem.live + 1, this.aiMem.total);
         st.lastShot = null;
-        return {};
+        return { rewound: last };
       }
       case "gamble": {
         const win = preset.win ?? coinFlip(); // DAILY SEED: coin lane

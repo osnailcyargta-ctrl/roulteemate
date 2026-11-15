@@ -1,7 +1,9 @@
 /**
- * roult/brain.ts — the ROULT v2 inference engine. A real ~55M parameter
+ * roult/brain.ts — the ROULT v2 inference engine. A real ~20M parameter
  * pre-LN transformer (trained FROM SCRATCH, see scripts/roult2/) that runs
- * 100% locally. No API keys, no network.
+ * 100% locally. No API keys, no network. Bilingual: EN intents get EN
+ * plans/thinks, ID intents get ID plans/thinks — the language follows the
+ * user automatically.
  *
  * Stream (all autoregressive, one model):
  *   <intent> user text <plan> ...plan... [<revise> text <plan> ...]*
@@ -236,6 +238,12 @@ export function parseWeights(buf: ArrayBuffer): RoultWeights {
 }
 
 let weightsSingleton: Promise<RoultWeights> | null = null;
+let binBytes = 0;
+
+/** size of roult.bin in MB — used by the UI to flex the local weights */
+export function binMB(): number {
+  return Math.round((binBytes / 1e6) * 10) / 10;
+}
 
 export function loadWeights(): Promise<RoultWeights> {
   if (!weightsSingleton) {
@@ -246,7 +254,9 @@ export function loadWeights(): Promise<RoultWeights> {
           : "";
       const res = await fetch(base + ROULT_BIN);
       if (!res.ok) throw new Error("roult.bin fetch failed: " + res.status);
-      return parseWeights(await res.arrayBuffer());
+      const buf = await res.arrayBuffer();
+      binBytes = buf.byteLength;
+      return parseWeights(buf);
     })();
   }
   return weightsSingleton;
@@ -286,6 +296,8 @@ export class CodeMask {
   seenEvery = false;
   lastIdent = "";
   stringMode: "say" | "skill" = "say";
+  /** has the run_skill("...") string collected a skill id yet? */
+  skillStrFilled = false;
   commentPrev: CodeMask["state"] = "top";
   inGlobalInit = false;
   localDecl = false;
@@ -327,7 +339,14 @@ export class CodeMask {
     }
     if (st === "stringOpen") {
       if (this.stringMode === "skill") {
-        for (const s of SKILL_WORDS) this.addWord(S, s);
+        // corpus-exact: a run_skill("...") string is exactly ONE skill word —
+        // before it: only skill words; after it: ONLY the closing quote
+        if (!this.skillStrFilled) {
+          for (const s of SKILL_WORDS) this.addWord(S, s);
+          return S;
+        }
+        S.add(VOCAB.stoi.get('"')!);
+        return S;
       } else {
         this.addTag(S, ["word", "char"]);
         S.add(VOCAB.stoi.get(" ")!);
@@ -335,8 +354,8 @@ export class CodeMask {
           const id = VOCAB.stoi.get(bad);
           if (id !== undefined) S.delete(id);
         }
+        S.add(VOCAB.stoi.get('"')!);
       }
-      S.add(VOCAB.stoi.get('"')!);
       return S;
     }
 
@@ -398,6 +417,13 @@ export class CodeMask {
         this.addWord(S, "(");
         return S;
       }
+      if (this.inGlobalInit) {
+        // corpus-exact: a global initializer is a plain numeric constant
+        this.addTag(S, ["digit"]);
+        S.add(VOCAB.stoi.get(".")!);
+        this.addSp(S);
+        return S;
+      }
       const inner = this.parens[this.parens.length - 1];
       if (inner && inner.kind === "call") {
         // operand type dictated by the call signature (corpus-exact)
@@ -422,13 +448,14 @@ export class CodeMask {
       this.addTag(S, ["digit"]);
       S.add(VOCAB.stoi.get(".")!);
       this.addTag(S, ["const"]);
-      if (!this.inGlobalInit) {
-        for (const w0 of this.globals) this.addWord(S, w0);
-        for (const w0 of this.locals) this.addWord(S, w0);
-        this.addTag(S, ["builtin"]);
-      }
+      for (const w0 of this.globals) this.addWord(S, w0);
+      for (const w0 of this.locals) this.addWord(S, w0);
+      this.addTag(S, ["builtin"]);
     } else if (st === "exprCont") {
-      for (const op of COMPARISONS) this.addWord(S, op);
+      const topHere = this.parens[this.parens.length - 1];
+      const inCall = topHere !== undefined && topHere.kind === "call";
+      // comparisons only exist in conditions — never inside call args
+      if (!inCall) for (const op of COMPARISONS) this.addWord(S, op);
       if (this.lastWasDigit) {
         this.addTag(S, ["digit"]);
         S.add(VOCAB.stoi.get(".")!);
@@ -450,14 +477,23 @@ export class CodeMask {
       }
       if (this.inGlobalInit) {
         // global initializer must stay a constant literal — hard minimal set
+        // (a dot only continues a float literal, never "....")
         S.clear();
         this.addTag(S, ["digit"]);
-        S.add(VOCAB.stoi.get(".")!);
+        if (!this.lastWasDot) S.add(VOCAB.stoi.get(".")!);
         S.add(VOCAB.stoi.get(";")!);
         this.addSp(S);
       }
     }
     return S;
+  }
+
+  /** one shared "( opened after name" path — sets the string mode for
+   *  say/run_skill no matter WHICH branch opened the call parens */
+  private enterCall(name: string) {
+    this.parens.push({ kind: "call", name, arg: (CALL_ARGS[name] ?? 0) === 0 ? -1 : 0 });
+    this.stringMode = name === "run_skill" ? "skill" : "say";
+    if (name === "run_skill") this.skillStrFilled = false;
   }
 
   step(t: string) {
@@ -477,6 +513,8 @@ export class CodeMask {
     if (st === "stringOpen") {
       if (t === '"') {
         this.state = "exprCont";
+      } else if (this.stringMode === "skill") {
+        this.skillStrFilled = true;
       }
       return;
     }
@@ -577,9 +615,7 @@ export class CodeMask {
         return;
       case "stmtIdent":
         if (t === "(") {
-          this.parens.push({ kind: "call", name: this.lastIdent, arg: (CALL_ARGS[this.lastIdent] ?? 0) === 0 ? -1 : 0 });
-          if (this.lastIdent === "say") this.stringMode = "say";
-          if (this.lastIdent === "run_skill") this.stringMode = "skill";
+          this.enterCall(this.lastIdent);
           if (this.lastIdent === "say" || this.lastIdent === "run_skill") this.state = "exprStart";
           else this.state = (CALL_ARGS[this.lastIdent] ?? 0) === 0 ? "exprCont" : "exprStart";
           return;
@@ -601,7 +637,7 @@ export class CodeMask {
       }
       case "wantCallParen":
         if (t === "(") {
-          this.parens.push({ kind: "call", name: this.lastIdent, arg: (CALL_ARGS[this.lastIdent] ?? 0) === 0 ? -1 : 0 });
+          this.enterCall(this.lastIdent);
           this.state = (CALL_ARGS[this.lastIdent] ?? 0) === 0 ? "exprCont" : "exprStart";
         }
         return;
@@ -614,7 +650,7 @@ export class CodeMask {
           return;
         }
         if (t === "(") {
-          this.parens.push({ kind: "call", name: this.lastIdent, arg: (CALL_ARGS[this.lastIdent] ?? 0) === 0 ? -1 : 0 });
+          this.enterCall(this.lastIdent);
           this.state = (CALL_ARGS[this.lastIdent] ?? 0) === 0 ? "exprCont" : "exprStart";
           return;
         }
@@ -633,7 +669,12 @@ export class CodeMask {
           return;
         }
         if (t === ";") {
-          this.state = "stmt";
+          // a global initializer's ';' closes the DECLARATION — back to top;
+          // a normal statement's ';' just ends the line inside the block
+          if (this.localDecl) this.locals.add(this.lastIdent); // "int x = 1;" form
+          this.state = this.inGlobalInit ? "top" : "stmt";
+          this.inGlobalInit = false;
+          this.localDecl = false;
           return;
         }
         return;
@@ -718,7 +759,9 @@ export function parsePlan(text: string): PlanParsed {
     if (!line) continue;
     if (line.startsWith("title:")) p.title = line.slice(6).trim();
     else if (line.startsWith("tagline:")) p.tagline = line.slice(8).trim();
+    // "ruangan:" = ID plans, "room:" = EN plans — same field, two tongues
     else if (line.startsWith("ruangan:")) p.theme = line.slice(8).trim();
+    else if (line.startsWith("room:")) p.theme = line.slice(5).trim();
     else if (line.startsWith("-")) p.bullets.push(line.slice(1).trim());
   }
   if (!p.title && text) p.title = text.trim().split("\n")[0].slice(0, 40);
@@ -800,6 +843,23 @@ export class RoultBrain {
       this.kCache[l].fill(0);
       this.vCache[l].fill(0);
     }
+  }
+
+  /** real architecture specs — the UI shows them off (20M, from scratch) */
+  info(): { V: number; D: number; L: number; H: number; DFF: number; MAXT: number; params: number } {
+    const perLayer =
+      2 * this.D + // ln1
+      this.D * 3 * this.D + 3 * this.D + // qkv
+      this.D * this.D + this.D + // o
+      2 * this.D + // ln2
+      this.D * this.DFF + this.DFF + // w1
+      this.DFF * this.D + this.D; // w2
+    const params =
+      this.V * this.D + // emb (tied with the head)
+      this.MAXT * this.D + // pos
+      this.L * perLayer +
+      2 * this.D; // final ln
+    return { V: this.V, D: this.D, L: this.L, H: this.H, DFF: this.DFF, MAXT: this.MAXT, params };
   }
 
   /** feed prompt tokens; keeps logits for the next sampled token */
@@ -959,7 +1019,7 @@ export class RoultBrain {
       extra += t === "IND" ? "    " : t;
       this.pendingLogits = this.step(id, true);
     };
-    for (let i = 0; i < 32; i++) {
+    for (let i = 0; i < 48; i++) {
       const st = mask.state;
       if (st === "top") break;
       if (st === "exprCont") {
@@ -967,8 +1027,11 @@ export class RoultBrain {
         if (top) commitStr(")");
         else commitStr(";");
       } else if (st === "postVoid") commitStr(";");
-      else if (st === "stringOpen") commitStr('"');
-      else if (st === "stmt") commitStr("}");
+      else if (st === "stringOpen") {
+        // an unfilled run_skill("...) string gets a real skill id before the quote
+        if (mask.stringMode === "skill" && !mask.skillStrFilled) commitStr("peek");
+        commitStr('"');
+      } else if (st === "stmt") commitStr("}");
       else if (st === "exprStart") {
         const top = mask.parens[mask.parens.length - 1];
         if (top && top.kind === "call" && (top.name === "say" || (top.name === "run_skill" && top.arg === 0))) commitStr('"');
@@ -1043,8 +1106,16 @@ export class RoultBrain {
             for (const b of thinkBan) all.delete(b);
             return all;
           })();
-      if (masked && this.inCode && codeText.endsWith("\n\n\n")) {
-        masked.delete(VOCAB.stoi.get("\n")!);
+      if (masked && this.inCode) {
+        // whitespace budget: after 2 straight formatting tokens, close the
+        // spigot — the model loves padding and it eats the context window
+        const ws = /[\n ]$/.test(codeText) && /[\n ]$/.test(codeText.slice(0, -1));
+        if (/\n\n\n$/.test(codeText)) masked.delete(VOCAB.stoi.get("\n")!);
+        if (ws) {
+          masked.delete(VOCAB.stoi.get("\n")!);
+          masked.delete(VOCAB.stoi.get("IND")!);
+          masked.delete(VOCAB.stoi.get(" ")!);
+        }
       }
       const t = this.sample(opts, masked);
       const s = VOCAB.itos[t];
@@ -1125,33 +1196,100 @@ export interface RoultSessionEvents {
 export class RoultSession {
   brain: RoultBrain;
   opts: { temperature: number; topK: number };
+  /** planning runs a bit colder than codegen — plans are template picks */
+  private planOpts: { temperature: number; topK: number };
 
   constructor(W: RoultWeights, temperature = 0.8) {
     this.brain = new RoultBrain(W, (Math.random() * 2 ** 31) | 0);
     this.opts = { temperature, topK: 24 };
+    this.planOpts = { temperature: Math.max(0.4, temperature * 0.8), topK: 18 };
   }
 
+  /** snapshot the whole KV state so a losing branch can be thrown away
+   *  without re-priming the winner (plain memcopy — cheap) */
+  private snapshot() {
+    const b = this.brain as unknown as {
+      kCache: Float32Array[]; vCache: Float32Array[]; ctx: number[]; T: number;
+      pendingLogits: Float32Array | null; recent: number[];
+    };
+    return {
+      k: b.kCache.map((a) => a.slice()),
+      v: b.vCache.map((a) => a.slice()),
+      ctx: b.ctx.slice(),
+      T: b.T,
+      logits: b.pendingLogits ? b.pendingLogits.slice() : null,
+      recent: b.recent.slice(),
+    };
+  }
+
+  private restore(s: ReturnType<RoultSession["snapshot"]>) {
+    const b = this.brain as unknown as {
+      kCache: Float32Array[]; vCache: Float32Array[]; ctx: number[]; T: number;
+      pendingLogits: Float32Array | null; recent: number[];
+    };
+    b.kCache = s.k;
+    b.vCache = s.v;
+    b.ctx = s.ctx;
+    b.T = s.T;
+    b.pendingLogits = s.logits;
+    b.recent = s.recent;
+  }
+
+  /** content-word overlap between the user's intent and a plan branch —
+   *  measured on the BULLETS only (the mechanic lines, not the flavor) */
+  private static scoreBranch(intent: string, plan: string): number {
+    const stop = new Set([
+      "the", "and", "with", "that", "when", "every", "please", "mode", "make",
+      "give", "let", "gets", "each", "instead", "round", "rounds", "player",
+      "dealer", "game", "table", "this", "for", "kalo", "kalau", "terus",
+      "buat", "biar", "bang", "dong", "deh", "aja", "gitu", "ya", "ke", "di",
+      "yang", "dengan", "karena", "semua", "juga", "sama", "pas", "udah",
+    ]);
+    const words = [...new Set((intent.toLowerCase().match(/[a-z][a-z0-9_]*/g) ?? []).filter(
+      (w) => w.length > 2 && !stop.has(w),
+    ))];
+    // only the "- ..." mechanic bullets carry the actual feature
+    const bullets = plan
+      .split("\n")
+      .filter((l) => l.trimStart().startsWith("-"))
+      .join(" ")
+      .toLowerCase();
+    let hits = 0;
+    for (const w of words) if (bullets.includes(w)) hits += 3;
+    return hits;
+  }
+
+  /**
+   * BEST-OF-2: the model proposes TWO plan branches from scratch (fresh
+   * samples), the branch that actually talks about the user's words wins.
+   * A plain inference-time rerank — the model itself stays untouched.
+   */
   async start(intent: string, ev: RoultSessionEvents): Promise<PlanParsed> {
+    // branch A
     this.brain.startIntent(intent);
-    let buf = "";
-    await this.brain.generatePlan(this.opts, (chunk) => {
-      buf += chunk;
-      if (chunk === "\n") {
-        const l0 = buf.trim();
-        buf = "";
-        if (l0) ev.onPlanLine?.(l0);
-      }
-    });
-    if (buf.trim()) ev.onPlanLine?.(buf.trim());
-    // reconstruct the plan text from ctx is unnecessary — parse on demand below
-    const planText = decodeTokens(this.planTokenRange());
-    return parsePlan(planText);
+    let bufA = "";
+    await this.brain.generatePlan(this.planOpts, (chunk) => { bufA += chunk; });
+    const snapA = this.snapshot();
+    // branch B
+    this.brain.startIntent(intent);
+    let bufB = "";
+    await this.brain.generatePlan(this.planOpts, (chunk) => { bufB += chunk; });
+    const scoreA = RoultSession.scoreBranch(intent, bufA);
+    const scoreB = RoultSession.scoreBranch(intent, bufB);
+    const winner = scoreB > scoreA ? bufB : bufA;
+    if (winner === bufA) this.restore(snapA); // B dies, A's KV state returns
+    for (const line of winner.split("\n")) {
+      const l0 = line.trim();
+      if (l0) ev.onPlanLine?.(l0);
+    }
+    void bufB;
+    return parsePlan(winner);
   }
 
   async revise(instruction: string, ev: RoultSessionEvents): Promise<PlanParsed> {
     this.brain.pushRevise(instruction);
     let buf = "";
-    await this.brain.generatePlan(this.opts, (chunk) => {
+    await this.brain.generatePlan(this.planOpts, (chunk) => {
       buf += chunk;
       if (chunk === "\n") {
         const l0 = buf.trim();

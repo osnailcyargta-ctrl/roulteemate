@@ -1,5 +1,5 @@
 """
-roult2/train.py — trains the ~55M param transformer FROM SCRATCH on the
+roult2/train.py — trains the ~20M param transformer FROM SCRATCH on the
 corpus. Designed for the sandbox: each invocation runs at most ~9 minutes,
 then saves a checkpoint. Call repeatedly:
 

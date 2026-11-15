@@ -1,10 +1,12 @@
 """
-roult2/model.py — a ~55M parameter pre-LN transformer, implemented from
+roult2/model.py — a ~20M parameter pre-LN transformer, implemented from
 scratch in numpy (forward AND manual backward). Trained FROM SCRATCH on the
 corpus in data/roult2/corpus.jsonl.
 
-Config: d_model=640, n_layers=11, n_heads=10 (d_head 64), d_ff=2560,
-vocab 782, maxT=384. Params ≈ 54.9M.
+Config: d_model=384, n_layers=11, n_heads=6 (d_head 64), d_ff=1536,
+vocab ~1100, maxT=384. Params ≈ 20M — deliberately smaller than the old
+55M brain so the browser download (int8 roult.bin) and warmup stay FAST,
+while still fully bilingual (ID/EN intents -> matching plan/think).
 
 Memory strategy (2 cores / ~2GB budget):
   - store per-layer inputs x_L + attention probs (fp16)
@@ -23,11 +25,11 @@ CKPT = os.path.join(DATA, "ckpt.npz")
 LOG = os.path.join(DATA, "trainlog.jsonl")
 VOCAB = os.path.join(os.path.dirname(__file__), "vocab.json")
 
-D = 640
+D = 384
 L = 11
-H = 10
+H = 6
 DH = D // H
-DFF = 2560
+DFF = 1536
 MAXT = 384
 
 
