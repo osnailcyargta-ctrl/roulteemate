@@ -29,6 +29,7 @@ import {
   texTableTop,
   texPoster,
   texArrowSign,
+  texCardBack,
   texPriceTag,
   texBellNote,
   texCuffsProp,
@@ -202,7 +203,6 @@ export class RouletteScene {
   private muzzleTex!: THREE.Texture;
 
   /* physical shop */
-  private shopMat!: THREE.Mesh;
   private shopBell: THREE.Group | null = null;
   private bellProps!: THREE.Group; // coaster + "RING ME" note around the bell
   private bellHit!: THREE.Mesh;
@@ -1143,16 +1143,8 @@ export class RouletteScene {
   /* ---------------- physical shop (items live on the table) ---------------- */
 
   private buildShop() {
-    // dark felt mat marking the shop corner of the table
-    this.shopMat = new THREE.Mesh(
-      new THREE.CircleGeometry(0.66, 44),
-      new THREE.MeshStandardMaterial({ color: 0x1d2b1d, roughness: 0.96 }),
-    );
-    this.shopMat.rotation.x = -Math.PI / 2;
-    this.shopMat.position.set(0.18, 0.9075, 0.06);
-    this.shopMat.receiveShadow = true;
-    this.shopMat.visible = false;
-    this.scene.add(this.shopMat);
+    // (the old dark felt "plater" circle under the cards is gone — the
+    // cards now stand straight on the table's own felt)
 
     // the little gold bell — ring it to end the break.
     // It sits on the LEFT edge of the table (the old right corner was
@@ -1223,16 +1215,21 @@ export class RouletteScene {
   /** Spawn the offer cards standing on the felt mat. */
   showShopItems(offers: { id: SkillId; price: number; legendary: boolean }[]) {
     this.hideShopItems();
-    this.shopMat.visible = true;
     if (this.shopBell) this.shopBell.visible = true;
     this.bellProps.visible = true;
     offers.forEach((o, i) => {
       const group = new THREE.Group();
       const base = new THREE.Vector3(-0.22 + i * 0.42, 0.908, 0.02);
 
+      // the physical card — real paper stock (grain, double border, brand
+      // scribble) on a lit material, so it never reads as a flat rectangle
       const back = new THREE.Mesh(
         new THREE.PlaneGeometry(0.3, 0.36),
-        new THREE.MeshBasicMaterial({ color: o.legendary ? 0xd9c48f : 0xb5ac93 }),
+        new THREE.MeshStandardMaterial({
+          map: this.shopTex(`cardback-${o.legendary ? 1 : 0}`, texCardBack(o.legendary)),
+          roughness: 0.92,
+          metalness: 0,
+        }),
       );
       back.position.y = 0.2;
       back.castShadow = true;
@@ -1307,7 +1304,7 @@ export class RouletteScene {
    *  bell, the note and the felt mat follow, and a farewell dust puff
    *  closes the stall. */
   hideShopItems() {
-    if (!this.shopItems.size && !this.shopMat.visible && !this.shopBell?.visible && !this.bellProps.visible)
+    if (!this.shopItems.size && !this.shopBell?.visible && !this.bellProps.visible)
       return;
     const now = performance.now();
     let delay = 0;
@@ -1346,16 +1343,6 @@ export class RouletteScene {
         disposable: false,
       });
       delay += 70;
-    }
-    if (this.shopMat.visible) {
-      this.vanishAnims.push({
-        obj: this.shopMat,
-        t0: now + delay,
-        from: this.shopMat.position.clone(),
-        rot: this.shopMat.rotation.clone(),
-        spin: false,
-        disposable: false,
-      });
     }
     this.bellHover = false;
     this.bellRingT = 0;

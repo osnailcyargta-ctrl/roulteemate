@@ -209,16 +209,40 @@ export class GameEngine {
   private running = false;
   private container: HTMLElement | null = null;
   private lowHpTaunted = false;
+  /** window-level pointer/touch bindings (removed on dispose). */
+  private unbindPointer: (() => void) | null = null;
 
   mount(container: HTMLElement) {
     this.container = container;
     this.scene.init(container);
-    container.addEventListener("mousemove", (e) => {
+    // one shared look/hover routine for mouse AND touch — on phones the
+    // finger IS the cursor: dragging it pans the room (parallax) and
+    // hovers whatever lies under it, shop items included. The listeners
+    // sit on WINDOW, not on the canvas: the doodle menu overlays the 3D
+    // view, and the parallax must stay alive behind it (mobile users
+    // drag their finger over the wallpaper and expect the room to lean).
+    const pointerAll = (x: number, y: number) => {
       const r = container.getBoundingClientRect();
-      this.scene.setLook(((e.clientX - r.left) / r.width - 0.5) * 2, ((e.clientY - r.top) / r.height - 0.5) * 2);
-      this.onShopPointerMove(e);
-    });
-    container.addEventListener("click", (e) => this.onShopClick(e));
+      this.scene.setLook(((x - r.left) / r.width - 0.5) * 2, ((y - r.top) / r.height - 0.5) * 2);
+      this.onShopPointerMove(x, y);
+    };
+    const onMouse = (e: MouseEvent) => pointerAll(e.clientX, e.clientY);
+    const onTouch = (e: TouchEvent) => {
+      const t0 = e.touches[0];
+      if (!t0) return;
+      pointerAll(t0.clientX, t0.clientY);
+    };
+    const onClick = (e: MouseEvent) => this.onShopClick(e);
+    window.addEventListener("mousemove", onMouse, { passive: true });
+    window.addEventListener("touchstart", onTouch, { passive: true });
+    window.addEventListener("touchmove", onTouch, { passive: true });
+    container.addEventListener("click", onClick);
+    this.unbindPointer = () => {
+      window.removeEventListener("mousemove", onMouse);
+      window.removeEventListener("touchstart", onTouch);
+      window.removeEventListener("touchmove", onTouch);
+      container.removeEventListener("click", onClick);
+    };
     this.running = true;
     const loop = (now: number) => {
       if (!this.running) return;
@@ -232,6 +256,10 @@ export class GameEngine {
 
   dispose() {
     this.running = false;
+    if (this.unbindPointer) {
+      this.unbindPointer();
+      this.unbindPointer = null;
+    }
     this.scene.dispose();
     gameAudio.stopAmbient();
     gameAudio.stopHeartbeat();
@@ -907,7 +935,6 @@ export class GameEngine {
     if (this.busy || st.phase !== "playerTurn" || st.turn !== "player") return;
     if (st.cylinder.length === 0) return;
     this.busy = true;
-    this.stats.shots++;
     this.notify();
     // interactive tutorial: the player really pulled the trigger
     this.onEvent({ type: "tutAction", action: "shoot" });
@@ -1113,6 +1140,10 @@ export class GameEngine {
    *  self-blank rule (one automatic free shot at the opponent). */
   private async shootSequence(shooter: Side, target: Side, tensionSelf = false, forced = false): Promise<"pass" | "dead"> {
     const out = this.logic.shoot(shooter, target, forced);
+    // STATS: EVERY real trigger pull by the player counts — including the
+    // voodoo forced shot and the free shot after a blank self-shot. Without
+    // this the accuracy math (hits / shots) quietly lies to the player.
+    if (shooter === "player") this.stats.shots++;
     const res = await this.resolveShot(out, tensionSelf);
     if (res === "dead") return "dead";
 
@@ -1124,6 +1155,7 @@ export class GameEngine {
       this.notify();
       await sleep(300);
       const out2 = this.logic.shoot(shooter, opp, true);
+      if (shooter === "player") this.stats.shots++;
       const res2 = await this.resolveShot(out2, false);
       if (res2 === "dead") return "dead";
     } else if (out.bonusShot && !this.logic.isEmpty) {
@@ -1140,6 +1172,7 @@ export class GameEngine {
         await sleep(750);
       }
       const out2 = this.logic.shoot(shooter, opp);
+      if (shooter === "player") this.stats.shots++;
       const res2 = await this.resolveShot(out2, false);
       if (res2 === "dead") return "dead";
     }
@@ -1736,20 +1769,20 @@ export class GameEngine {
 
   /* ---------------- shop pointer (hover + click on the 3D table) ---------------- */
 
-  private shopNdc(e: MouseEvent): THREE.Vector2 | null {
+  private shopNdc(x: number, y: number): THREE.Vector2 | null {
     const c = this.container;
     if (!c) return null;
     const r = c.getBoundingClientRect();
-    return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    return new THREE.Vector2(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
   }
 
-  private onShopPointerMove(e: MouseEvent) {
+  private onShopPointerMove(x: number, y: number) {
     if (this.logic.state.phase !== "shop") {
       if (this.hoverId !== null) this.setShopHover(null);
       if (this.container) this.container.style.cursor = "default";
       return;
     }
-    const ndc = this.shopNdc(e);
+    const ndc = this.shopNdc(x, y);
     if (!ndc) return;
     const hit = this.scene.pickShop(ndc);
     const id = hit ? (hit.type === "bell" ? "bell" : hit.id) : null;
@@ -1762,7 +1795,7 @@ export class GameEngine {
 
   private onShopClick(e: MouseEvent) {
     if (this.logic.state.phase !== "shop") return;
-    const ndc = this.shopNdc(e);
+    const ndc = this.shopNdc(e.clientX, e.clientY);
     if (!ndc) return;
     const hit = this.scene.pickShop(ndc);
     if (!hit) return;

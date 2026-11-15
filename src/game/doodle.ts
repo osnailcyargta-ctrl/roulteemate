@@ -2382,6 +2382,111 @@ export function texShellBox() {
   );
 }
 
+/** Textured paper card back for the physical shop items — paper grain,
+ *  hand-drawn double border, corner ticks and a tiny brand scribble, so
+ *  the cards stop reading as flat colored rectangles. */
+export function texCardBack(legendary = false) {
+  return makeCanvas(
+    `cardback-${legendary ? 1 : 0}`,
+    240,
+    288,
+    (ctx, w, h, rng) => {
+      // paper base — warmer gold stock for the LEGEND offers
+      ctx.fillStyle = legendary ? "#f2dc9c" : PAPER;
+      ctx.fillRect(0, 0, w, h);
+
+      // paper grain: speckles + short fibers all over
+      for (let i = 0; i < 420; i++) {
+        const x = rng() * w;
+        const y = rng() * h;
+        const a = 0.05 + rng() * 0.1;
+        ctx.fillStyle = `rgba(34,26,18,${a.toFixed(3)})`;
+        const s = 0.8 + rng() * 1.6;
+        ctx.fillRect(x, y, s, s);
+      }
+      ctx.strokeStyle = "rgba(34,26,18,0.10)";
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 26; i++) {
+        const x = rng() * w;
+        const y = rng() * h;
+        const len = 6 + rng() * 16;
+        const a = (rng() - 0.5) * 1.2;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len);
+        ctx.stroke();
+      }
+      // soft top-light so the paper isn't uniformly lit
+      const shade = ctx.createLinearGradient(0, 0, 0, h);
+      shade.addColorStop(0, "rgba(255,252,240,0.30)");
+      shade.addColorStop(0.5, "rgba(255,252,240,0)");
+      shade.addColorStop(1, "rgba(34,26,18,0.16)");
+      ctx.fillStyle = shade;
+      ctx.fillRect(0, 0, w, h);
+
+      // hand-drawn double border
+      const o = 16;
+      const i2 = 26;
+      sketchStroke(ctx, [[o, o], [w - o, o], [w - o, h - o], [o, h - o]], rng, {
+        width: 6,
+        jitter: 3,
+        close: true,
+        color: legendary ? "#8a6d1d" : INK,
+      });
+      sketchStroke(ctx, [[i2, i2], [w - i2, i2], [w - i2, h - i2], [i2, h - i2]], rng, {
+        width: 2.5,
+        jitter: 2.5,
+        close: true,
+        color: legendary ? "rgba(143,36,24,0.75)" : "rgba(34,26,18,0.55)",
+      });
+
+      // corner ticks (the four little doodle marks)
+      ctx.strokeStyle = legendary ? "#8f2418" : INK;
+      ctx.lineWidth = 4;
+      const corners: [number, number, number, number][] = [
+        [i2 + 6, i2 + 6, 1, 1],
+        [w - i2 - 6, i2 + 6, -1, 1],
+        [i2 + 6, h - i2 - 6, 1, -1],
+        [w - i2 - 6, h - i2 - 6, -1, -1],
+      ];
+      for (const [cx2, cy2, sx, sy] of corners) {
+        ctx.beginPath();
+        ctx.moveTo(cx2 + sx * 12, cy2);
+        ctx.lineTo(cx2, cy2);
+        ctx.lineTo(cx2, cy2 + sy * 12);
+        ctx.stroke();
+      }
+
+      // tiny bullet doodles riding the left/right border strips
+      const bullet = (x: number, y: number, s: number) => {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(s, s);
+        ctx.strokeStyle = legendary ? "#8a6d1d" : "rgba(34,26,18,0.7)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(-4, 6);
+        ctx.lineTo(0, -7);
+        ctx.lineTo(4, 6);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-5, 6);
+        ctx.lineTo(5, 6);
+        ctx.stroke();
+        ctx.restore();
+      };
+      bullet(24, h / 2 - 34, 1);
+      bullet(24, h / 2 + 34, 1);
+      bullet(w - 24, h / 2 - 34, 1);
+      bullet(w - 24, h / 2 + 34, 1);
+
+      // brand scribble along the bottom strip
+      handText(ctx, "roulteemate", w / 2, h - 33, 17, legendary ? "#8f2418" : "rgba(34,26,18,0.6)", -0.015, '"Patrick Hand", cursive');
+    },
+    legendary ? 91 : 90,
+  );
+}
+
 /** Little paper price tag for the physical shop items on the table. */
 export function texPriceTag(price: number, gold = false) {
   return makeCanvas(

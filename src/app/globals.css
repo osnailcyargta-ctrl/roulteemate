@@ -784,30 +784,7 @@ canvas {
 .eyecut-rings span:nth-child(2) { animation-delay: 0.25s; top: calc(34% + 8vmin); }
 .eyecut-rings span:nth-child(3) { animation-delay: 0.5s; top: calc(34% + 14vmin); }
 
-/* ==================== ROULT (local AI popup) ==================== */
-@keyframes caret-blink {
-  0%, 45% { opacity: 1; }
-  50%, 95% { opacity: 0; }
-  100% { opacity: 1; }
-}
-.caret-blink {
-  animation: caret-blink 1.1s steps(1) infinite;
-}
-.roult-scroll::-webkit-scrollbar,
-.roult-code::-webkit-scrollbar {
-  width: 8px;
-}
-.roult-scroll::-webkit-scrollbar-thumb,
-.roult-code::-webkit-scrollbar-thumb {
-  background: rgba(143, 106, 212, 0.35);
-  border-radius: 8px;
-}
-.roult-scroll::-webkit-scrollbar-track,
-.roult-code::-webkit-scrollbar-track {
-  background: rgba(143, 106, 212, 0.08);
-}
-
-/* ==================== PICK A TABLE: hold-to-reveal ROULT ==================== */
+/* ==================== PICK A TABLE: hold-to-open MUTATORS ==================== */
 /* the V indicator on the PICK A TABLE button (60% opacity, flips when held) */
 .play-v {
   position: absolute;
@@ -834,36 +811,6 @@ canvas {
   box-shadow: 0 0 9px rgba(217, 164, 65, 0.85);
   transition: opacity 0.15s ease;
   pointer-events: none;
-}
-/* the ROULT button rises out from under PICK A TABLE */
-.roult-reveal {
-  max-height: 0;
-  opacity: 0;
-  overflow: hidden;
-  margin-bottom: -0.75rem; /* cancel the parent gap while hidden */
-  transform: translateY(-12px);
-  transition:
-    max-height 0.5s cubic-bezier(0.2, 1.2, 0.4, 1),
-    opacity 0.4s ease,
-    transform 0.5s cubic-bezier(0.2, 1.2, 0.4, 1),
-    margin-bottom 0.5s ease;
-  pointer-events: none;
-}
-.roult-reveal-open {
-  max-height: 84px;
-  opacity: 1;
-  margin-bottom: 0;
-  transform: translateY(0);
-  pointer-events: auto;
-}
-.roult-menu-btn {
-  border-color: #7b4fd4;
-  color: #d9c9ff;
-  background: rgba(23, 18, 38, 0.92);
-  text-shadow: 0 0 12px rgba(123, 79, 212, 0.55);
-}
-.roult-menu-btn:hover {
-  box-shadow: 0 0 18px rgba(123, 79, 212, 0.45), 3px 4px 0 rgba(0, 0, 0, 0.55);
 }
 
 /* ==================== PHOENIX CUTSCENE v2 ====================

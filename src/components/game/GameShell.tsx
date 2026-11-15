@@ -4,10 +4,11 @@
  * GameShell — React layer for ROULTEEMATE.
  * Mounts the engine (Three.js) plus all doodle overlays: the animated
  * main menu (title top-left, 3 buttons bottom-left), settings (incl.
- * language & mutators), the CUSTOM TABLE popup (ENGINE C code editor),
- * HP, shell counter, skill bar (separate slots per duplicate), toasts,
- * banner, rules, win/lose screens, the REWIND 2D overlay and the low-HP
- * blood vignette. The GAMBLE coin is fully 3D inside the scene.
+ * language), the CUSTOM TABLE popup (ENGINE C code editor, always
+ * available — hold PICK A TABLE or right-click it), HP, shell counter,
+ * skill bar (separate slots per duplicate), toasts, banner, rules,
+ * win/lose screens, the REWIND 2D overlay and the low-HP blood
+ * vignette. The GAMBLE coin is fully 3D inside the scene.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,7 +36,6 @@ import type { ShellType } from "@/game/logic";
 import { gameAudio } from "@/game/audio";
 import TutorialSpot from "./TutorialSpot";
 import { PhoenixCut, ThirdEyeCut } from "./Cutscenes";
-import RoultChat from "./RoultChat";
 
 type Toast = { id: number; text: string; tone: string; leaving?: boolean };
 type Pop = { id: number; side: string; text: string; tone: string };
@@ -52,8 +52,6 @@ type Settings = {
   quality: Quality;
   /** EN (default) or ID */
   lang: Lang;
-  /** MUTATORS: clicking play opens the CUSTOM TABLE popup */
-  mutators: boolean;
   /** the live/blank counter board at the top */
   showShellStat: boolean;
   /** percentage chip under the shell board (more likely side wins the label) */
@@ -76,7 +74,6 @@ const DEFAULT_SETTINGS: Settings = {
   muted: false,
   quality: "high",
   lang: "en",
-  mutators: false,
   showShellStat: true,
   showProb: true,
   daily: true,
@@ -229,9 +226,10 @@ export default function GameShell() {
   /* 2D cutscenes: PHOENIX resurrection + THIRD EYE sight (legend skills) */
   const [phoenixCut, setPhoenixCut] = useState(false);
   const [thirdEyeCut, setThirdEyeCut] = useState(false);
-  /* ROULT — the local AI gamemode designer (revealed under PICK A TABLE) */
-  const [roultOpen, setRoultOpen] = useState(false);
-  const [roultRevealed, setRoultRevealed] = useState(false);
+  /* MUTATORS — the feature is ALWAYS available: holding PICK A TABLE (or
+   * right-clicking it) opens the CUSTOM TABLE sheet straight away, and the
+   * ON/OFF switch now lives inside the popup itself (not in settings). */
+  const [mutOn, setMutOn] = useState(true);
 
   /* ---------- MAIN MENU screens ---------- */
   const [menuPanel, setMenuPanel] = useState<MenuPanel>(null);
@@ -438,21 +436,24 @@ export default function GameShell() {
     };
   }, []);
 
-  /* ---------- PICK A TABLE: hold 1s (or right-click) reveals ROULT ----------
+  /* ---------- mutator helpers ---------- */
+  const openMutator = useCallback(() => {
+    // keep whatever the player already configured (rules survive reopening);
+    // first open starts from the table's defaults
+    setMutCfg((prev) => prev ?? mutDefaultsFor(baseDiffOf(diff), modeOf(diff) as "standard" | "endless", ALL_SKILL_IDS));
+    setMutOpen(true);
+  }, [diff]);
+
+  /* ---------- PICK A TABLE: hold 1s (or right-click) opens MUTATORS ----------
    * a quick click still opens the table popup; a full 1s hold (the golden
-   * bar fills) makes the panel rise smoothly and uncover the local AI; a
-   * right-click is the instant version and never opens the popup. */
+   * bar fills) or a right-click opens the CUSTOM TABLE sheet directly —
+   * the mutators are always available, no settings toggle anywhere. */
   const HOLD_MS = 1000;
   const [holdP, setHoldP] = useState(0);
   const [holding, setHolding] = useState(false);
   const holdRaf = useRef(0);
   const holdT0 = useRef(0);
   const holdingRef = useRef(false);
-
-  const revealRoult = useCallback(() => {
-    if (!roultRevealed) gameAudio.click();
-    setRoultRevealed(true);
-  }, [roultRevealed]);
 
   const stopHold = useCallback(() => {
     holdingRef.current = false;
@@ -483,13 +484,15 @@ export default function GameShell() {
     const full = performance.now() - holdT0.current >= HOLD_MS;
     stopHold();
     if (full) {
-      revealRoult(); // held the full second — ROULT rises, popup stays shut
+      gameAudio.ensure();
+      gameAudio.click();
+      openMutator(); // held the full second — CUSTOM TABLE sheet, popup stays shut
     } else {
       gameAudio.ensure();
       gameAudio.click();
       setMenuPanel("play"); // ordinary click — open the table picker
     }
-  }, [revealRoult, stopHold]);
+  }, [openMutator, stopHold]);
 
   const onPlayLeave = useCallback(() => {
     if (holdingRef.current) stopHold(); // dragged away: cancel silently
@@ -499,9 +502,11 @@ export default function GameShell() {
     (e: React.MouseEvent) => {
       e.preventDefault();
       stopHold();
-      revealRoult(); // right-click — instant reveal, never opens the popup
+      gameAudio.ensure();
+      gameAudio.click();
+      openMutator(); // right-click — instant CUSTOM TABLE sheet
     },
-    [revealRoult, stopHold],
+    [openMutator, stopHold],
   );
 
   /* ---------- keyboard (Q/E shoot, 1-4 skills, ESC closes) ---------- */
@@ -513,7 +518,6 @@ export default function GameShell() {
         setMenuPanel(null);
         setShowHelp(false);
         setMutOpen(false);
-        setRoultOpen(false);
         return;
       }
       if (!eng || !snap) return;
@@ -630,13 +634,8 @@ export default function GameShell() {
       hasBest: !!shown,
     });
   }, [phaseKey, snap]);
-  /* ---------- mutator helpers ---------- */
-  const openMutator = useCallback(() => {
-    // keep whatever the player already configured (rules survive reopening);
-    // first open starts from the table's defaults
-    setMutCfg((prev) => prev ?? mutDefaultsFor(baseDiffOf(diff), modeOf(diff) as "standard" | "endless", ALL_SKILL_IDS));
-    setMutOpen(true);
-  }, [diff]);
+
+  const isPlayerTurn = snap?.phase === "playerTurn" && snap.turn === "player" && !snap.busy;
 
   const togglePoolCard = (id: SkillId) => {
     setMutCfg((c) => {
@@ -649,12 +648,10 @@ export default function GameShell() {
 
   const startFromMenu = () => {
     gameAudio.ensure();
-    if (settings.mutators) {
-      openMutator();
-    } else {
-      setMenuPanel(null);
-      void engineRef.current?.startGame(diff, undefined, settings.daily);
-    }
+    gameAudio.click();
+    // mutators are ALWAYS active: sitting down always lands on the CUSTOM
+    // TABLE sheet first — the ON/OFF switch lives inside the popup itself.
+    openMutator();
   };
 
   /** REPLAY TUTORIAL: a real practice table (EASY) with the spotlight
@@ -671,32 +668,13 @@ export default function GameShell() {
 
   const launchCustomTable = () => {
     if (!mutCfg) return;
-    if (!compiled.ok) return; // never sit down with a broken script
+    if (mutOn && !compiled.ok) return; // never sit down with a broken script
     gameAudio.ensure();
     gameAudio.click();
     setMutOpen(false);
     setMenuPanel(null);
-    void engineRef.current?.startGame(diff, mutCfg, settings.daily);
+    void engineRef.current?.startGame(diff, mutOn ? mutCfg : undefined, settings.daily);
   };
-
-  const isPlayerTurn = snap?.phase === "playerTurn" && snap.turn === "player" && !snap.busy;
-  /* roult can push a finished ENGINE C script straight into the CUSTOM
-   * TABLE editor (opens the popup so the player sees it compile). */
-  useEffect(() => {
-    const onRoultApply = (e: Event) => {
-      const code = (e as CustomEvent<string>).detail ?? "";
-      if (!code) return;
-      setMutCfg((prev) => {
-        const base =
-          prev ?? mutDefaultsFor(baseDiffOf(diff), modeOf(diff) as "standard" | "endless", ALL_SKILL_IDS);
-        return { ...base, rules: code };
-      });
-      setMutOpen(true);
-      gameAudio.buy();
-    };
-    window.addEventListener("roult:apply", onRoultApply);
-    return () => window.removeEventListener("roult:apply", onRoultApply);
-  }, [diff]);
   const phase = snap?.phase ?? "menu";
   const inGame = phase !== "menu";
   const lowHp = inGame && snap ? snap.hpPlayer : 0;
@@ -1287,9 +1265,9 @@ export default function GameShell() {
           </div>
 
           {/* the doors of this establishment — bottom left, top to bottom.
-              PICK A TABLE hides ROULT: hold it a full second (the golden bar
-              fills under the label) or right-click it — the panel rises and
-              uncovers the local AI button beneath. */}
+              PICK A TABLE hides the CUSTOM TABLE sheet: hold it a full
+              second (the golden bar fills under the label) or right-click
+              it and the mutators popup opens on the spot. */}
           <div className="absolute bottom-6 left-5 z-10 flex flex-col items-start gap-3 sm:bottom-9 sm:left-8">
             <button
               className="doodle-btn doodle-red menu-btn relative px-8 py-3 font-marker text-2xl sm:px-10"
@@ -1299,11 +1277,11 @@ export default function GameShell() {
               onPointerLeave={onPlayLeave}
               onPointerCancel={onPlayLeave}
               onContextMenu={onPlayCtx}
-              title={t("roultHoldHint")}
+              title={t("mutHoldHint")}
             >
               {t("btnPlay")}
-              {/* the V indicator — flips upside down while held / after right-click */}
-              <span className={`play-v font-marker ${holding || roultRevealed ? "play-v-flip" : ""}`}>
+              {/* the V indicator — flips upside down while held */}
+              <span className={`play-v font-marker ${holding ? "play-v-flip" : ""}`}>
                 v
               </span>
               {/* the 1-second hold bar under the label */}
@@ -1312,22 +1290,6 @@ export default function GameShell() {
                 style={{ width: `${holdP * 80}%`, opacity: holding ? 1 : 0 }}
               />
             </button>
-            {/* ROULT — rises out from under PICK A TABLE */}
-            <div className={`roult-reveal ${roultRevealed ? "roult-reveal-open" : ""}`}>
-              <button
-                className="doodle-btn menu-btn roult-menu-btn px-6 py-2 font-marker text-xl sm:px-8"
-                style={{ animationDelay: "0.12s" }}
-                onClick={() => {
-                  gameAudio.ensure();
-                  gameAudio.click();
-                  setRoultOpen(true);
-                }}
-                title={t("roultBadge")}
-              >
-                {t("roultBtn")}
-                <span className="ml-2 font-hand-sc text-xs opacity-70">{t("roultLocalTag")}</span>
-              </button>
-            </div>
             <button
               className="doodle-btn menu-btn px-6 py-2 font-marker text-xl sm:px-8"
               style={{ animationDelay: "0.18s" }}
@@ -1401,11 +1363,6 @@ export default function GameShell() {
                     <span className="font-hand text-xs opacity-70">everyone plays the same run</span>
                   </div>
                 )}
-                {settings.mutators && (
-                  <div className="mt-3 font-hand-sc text-sm text-[#8f5bd4]">
-                    MUTATORS ON — sitting down opens the CUSTOM TABLE sheet.
-                  </div>
-                )}
                 <div className="mt-5 flex justify-center">
                   <button
                     className="doodle-btn doodle-red px-10 py-3 font-marker text-2xl menu-btn"
@@ -1413,6 +1370,9 @@ export default function GameShell() {
                   >
                     {t("sitBtn")}
                   </button>
+                </div>
+                <div className="mt-2 text-center font-hand-sc text-xs text-[#8f5bd4]">
+                  {t("mutHoldHint")}
                 </div>
               </div>
             </div>
@@ -1480,17 +1440,6 @@ export default function GameShell() {
                   <div className="mt-1 border-t-2 border-dashed border-[#221a12]/30 pt-2 font-marker text-lg text-[#8a6d1d]">
                     {t("uiQol")}
                   </div>
-
-                  {/* MUTATORS */}
-                  <button
-                    className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left hover:bg-[#221a12]/5"
-                    onClick={() => updateSettings({ mutators: !settings.mutators })}
-                  >
-                    <span className="font-hand text-lg text-[#8f5bd4]">{t("optMutators")}</span>
-                    <span className={`doodle-btn px-3 py-0.5 font-hand-sc text-sm ${settings.mutators ? "" : "opacity-70"}`}>
-                      {settings.mutators ? t("on") : t("off")}
-                    </span>
-                  </button>
 
                   {/* live/blank stat */}
                   <button
@@ -1626,6 +1575,25 @@ export default function GameShell() {
                     X
                   </button>
                 </div>
+
+                {/* the mutators master switch — ON/OFF lives HERE, not in settings */}
+                <button
+                  className="mt-3 flex w-full items-center justify-between gap-3 rounded-lg border-2 border-dashed border-[#8f5bd4]/60 bg-[#171226]/80 px-3 py-2 text-left"
+                  onClick={() => {
+                    setMutOn((v) => !v);
+                    gameAudio.click();
+                  }}
+                >
+                  <span className="font-hand text-lg text-[#d9c9ff]">
+                    {t("mutOnOff")} <span className="font-hand-sc text-xs text-[#9c8cc4]">— {t("mutOnOffHint")}</span>
+                  </span>
+                  <span className={`doodle-btn px-4 py-1 font-marker text-base ${mutOn ? "" : "opacity-70"}`}>
+                    {mutOn ? t("on") : t("off")}
+                  </span>
+                </button>
+
+                {/* every knob below only matters while the mutators are ON */}
+                <div className={mutOn ? "" : "pointer-events-none select-none opacity-35"}>
 
                 {/* card pool */}
                 <div className="mt-4">
@@ -1801,16 +1769,22 @@ export default function GameShell() {
                   )}
                 </div>
 
+                </div>{/* end mutators-on knob wrapper */}
+
                 <div className="mt-5 flex flex-col items-center gap-1.5">
                   <button
-                    className={`doodle-btn doodle-red px-10 py-3 font-marker text-2xl menu-btn ${compiled.ok ? "" : "opacity-50"}`}
-                    disabled={!compiled.ok}
-                    title={compiled.ok ? undefined : t("mutParseErr")}
+                    className={`doodle-btn doodle-red px-10 py-3 font-marker text-2xl menu-btn ${mutOn && !compiled.ok ? "opacity-50" : ""}`}
+                    disabled={mutOn && !compiled.ok}
+                    title={mutOn && !compiled.ok ? t("mutParseErr") : undefined}
                     onClick={launchCustomTable}
                   >
                     {t("mutStartBtn")}
                   </button>
-                  {!compiled.ok && <div className="font-hand-sc text-xs text-[#8f2418]">{t("mutParseErr")}</div>}
+                  {!mutOn ? (
+                    <div className="font-hand-sc text-xs text-[#57697c]">{t("mutOffNote")}</div>
+                  ) : (
+                    !compiled.ok && <div className="font-hand-sc text-xs text-[#8f2418]">{t("mutParseErr")}</div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1996,9 +1970,10 @@ export default function GameShell() {
                   <b>Cash:</b> every bullet you land pays <b>$100</b>, a voodoo reflection pays <b>$150</b>,
                   surviving a round pays <b>$75</b>, and you start with <b>$200</b>. <b>ENDLESS:</b> the Dealer never
                   dies — his HP becomes a <b className="text-[#8a6d1d]">SCORE</b> counter: +1 for every hit he takes,
-                  -1 whenever he heals, and it can go negative. Survive as long as you can. SETTINGS also hides{" "}
-                  <b className="text-[#8f5bd4]">MUTATORS</b>: custom tables with your own HP, skill counts, card pool and
-                  scripted effects.
+                  -1 whenever he heals, and it can go negative. Survive as long as you can. <b className="text-[#8f5bd4]">MUTATORS</b>{" "}
+                  are always on the house: <b>PRESS AND HOLD</b> pick a table for 1 second (or right-click it) and the
+                  CUSTOM TABLE sheet opens — your own HP, skill counts, card pool and scripted ENGINE C effects, with an
+                  ON/OFF switch right inside the sheet.
                 </p>
                 <p className="text-[#8f2418]">
                   HP: your 6 against his 5 on EASY, 5 vs 5 on NORMAL — and on INSANE you get only 4 while the
@@ -2011,17 +1986,6 @@ export default function GameShell() {
                 </p>
               </div>
             )}
-            {/* ROULT — the local AI gamemode designer (no longer a secret) */}
-            <div className="mt-4 rounded-[14px_4px_16px_6px] border-2 border-dashed border-[#8f5bd4]/55 bg-[#171226] p-3.5">
-              <div className="flex items-center gap-2">
-                <span className="inline-block h-2 w-2 rounded-full bg-[#7b4fd4] shadow-[0_0_8px_#7b4fd4]" />
-                <div className="font-marker text-lg text-[#d9c9ff]">{t("helpRoultTitle")}</div>
-              </div>
-              <div className="mt-1.5 font-hand text-[15px] leading-snug text-[#c9b3ec]">{t("helpRoultBody")}</div>
-              <div className="mt-2 font-mono text-[10px] uppercase tracking-[0.25em] text-[#6d5a96]">
-                {t("roultBadge")}
-              </div>
-            </div>
             <div className="mt-4 font-marker text-2xl">{t("skillsCount", { n: ALL_SKILL_IDS.length })}</div>
             <div className="mt-2 space-y-2">
               {(ALL_SKILL_IDS as SkillId[]).map((id) => (
@@ -2047,9 +2011,6 @@ export default function GameShell() {
           </div>
         </div>
       )}
-
-      {/* ================= ROULT — THE LOCAL AI GAMEMODE DESIGNER ================= */}
-      {roultOpen && <RoultChat onClose={() => setRoultOpen(false)} />}
     </div>
   );
 }
