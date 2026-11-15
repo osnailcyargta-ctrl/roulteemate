@@ -1221,13 +1221,19 @@ export class RouletteScene {
       const base = new THREE.Vector3(-0.22 + i * 0.42, 0.908, 0.02);
 
       // the physical card — real paper stock (grain, double border, brand
-      // scribble) on a lit material, so it never reads as a flat rectangle
+      // scribble). The paper carries its own light (emissiveMap = the same
+      // paper texture): the cards stand at the edge of the lamp cone, and
+      // without the lift the lit term reads BLACK and only the item icon
+      // shows. The lamp still lays a warm sheen on top of the emissive base.
       const back = new THREE.Mesh(
         new THREE.PlaneGeometry(0.3, 0.36),
         new THREE.MeshStandardMaterial({
           map: this.shopTex(`cardback-${o.legendary ? 1 : 0}`, texCardBack(o.legendary)),
           roughness: 0.92,
           metalness: 0,
+          emissive: 0xffffff,
+          emissiveMap: this.shopTex(`cardback-${o.legendary ? 1 : 0}`, texCardBack(o.legendary)),
+          emissiveIntensity: 0.85,
         }),
       );
       back.position.y = 0.2;
