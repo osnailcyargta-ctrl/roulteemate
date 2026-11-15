@@ -44,12 +44,9 @@ type Stamp = { id: number; idSkill: SkillId };
 type MenuPanel = "play" | "settings" | null;
 type TableId = "easy" | "normal" | "insane" | "endless";
 
-type Quality = "low" | "medium" | "high";
-
 /** All toggles the SETTINGS screen owns (persisted in localStorage). */
 type Settings = {
   muted: boolean;
-  quality: Quality;
   /** EN (default) or ID */
   lang: Lang;
   /** the live/blank counter board at the top */
@@ -72,7 +69,6 @@ const SETTINGS_KEY = "roulteemate-settings";
 const LEGACY_SETTINGS_KEY = "roulette-mate-settings";
 const DEFAULT_SETTINGS: Settings = {
   muted: false,
-  quality: "high",
   lang: "en",
   showShellStat: true,
   showProb: true,
@@ -285,14 +281,14 @@ export default function GameShell() {
     });
   }, []);
 
-  /* apply sound + graphics settings */
+  /* apply sound settings; GRAPHICS is locked to LOW — no setting anymore */
   useEffect(() => {
     gameAudio.setMuted(settings.muted);
   }, [settings.muted]);
 
   useEffect(() => {
-    if (ready) engineRef.current?.setSceneQuality(settings.quality);
-  }, [settings.quality, ready]);
+    if (ready) engineRef.current?.setSceneQuality("low");
+  }, [ready]);
 
   /* FPS meter (only measured while visible) */
   useEffect(() => {
@@ -562,7 +558,10 @@ export default function GameShell() {
    * leaves debug mode whenever the run ends back at the menu; the HP
    * inputs re-sync with the real HP once per round so manual edits stay. */
   useEffect(() => {
-    if (phaseKey === "menu") setDebugMode(false);
+    if (phaseKey === "menu") {
+      setDebugMode(false);
+      setDbgOpen(false); // the orb panel never survives back to the menu
+    }
   }, [phaseKey]);
   const dbgRound = snap?.round ?? 0;
   useEffect(() => {
@@ -586,6 +585,138 @@ export default function GameShell() {
     gameAudio.click();
     void engineRef.current?.debugNextRound();
   };
+
+  /* ---------- DEBUG MODE orb ----------
+   * the god-hands panel lives inside a draggable orb. The orb can only
+   * rest on a SIDE of the screen (pojok = sisi/side, NOT corner): drop it
+   * toward the middle and a magnet pull yanks it onto the nearest side.
+   * A clean tap (no drag) toggles the small panel, which opens on the
+   * side of the orb that faces the screen center (left/right/top/bottom). */
+  const DBG_ORB = 46; // orb diameter (px)
+  const DBG_EDGE = 14; // resting distance from the screen edge
+  const DBG_SNAP = 84; // within this band of an edge the orb may stay
+  const DBG_POP_W = 238; // panel width (px)
+  const [dbgPos, setDbgPos] = useState<{ x: number; y: number } | null>(null);
+  const [dbgDragging, setDbgDragging] = useState(false);
+  const [dbgOpen, setDbgOpen] = useState(false);
+  const dbgDragRef = useRef<{ px: number; py: number; ox: number; oy: number; moved: boolean } | null>(null);
+
+  /* first mount of a debug run: park the orb on the right side */
+  useEffect(() => {
+    if (dbgPos === null) {
+      setDbgPos({
+        x: Math.max(DBG_EDGE, window.innerWidth - DBG_ORB - DBG_EDGE),
+        y: Math.round(window.innerHeight * 0.4),
+      });
+    }
+  }, [dbgPos]);
+
+  /* window resized: pull the orb back onto a legal side */
+  useEffect(() => {
+    const onResize = () => setDbgPos((p) => (p ? dbgSnapToSide(p.x, p.y) : p));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const dbgClamp = (x: number, y: number) => ({
+    x: Math.min(Math.max(x, DBG_EDGE), window.innerWidth - DBG_ORB - DBG_EDGE),
+    y: Math.min(Math.max(y, DBG_EDGE), window.innerHeight - DBG_ORB - DBG_EDGE),
+  });
+
+  /** MAGNET: if the orb rests away from every side, pull it to the nearest
+   * SIDE (not a corner — only the one coordinate snaps, the other stays). */
+  const dbgSnapToSide = (x0: number, y0: number) => {
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const p = dbgClamp(x0, y0);
+    const cx = p.x + DBG_ORB / 2;
+    const cy = p.y + DBG_ORB / 2;
+    const d = { left: cx, right: W - cx, top: cy, bottom: H - cy };
+    const near = Math.min(d.left, d.right, d.top, d.bottom);
+    if (near > DBG_SNAP) {
+      if (near === d.left) p.x = DBG_EDGE;
+      else if (near === d.right) p.x = W - DBG_ORB - DBG_EDGE;
+      else if (near === d.top) p.y = DBG_EDGE;
+      else p.y = H - DBG_ORB - DBG_EDGE;
+    }
+    return p;
+  };
+
+  /** which side of the screen the orb currently hugs — decides where the
+   * panel pops out (always toward the screen center). */
+  const dbgNearestSide = (x: number, y: number): "left" | "right" | "top" | "bottom" => {
+    const cx = x + DBG_ORB / 2;
+    const cy = y + DBG_ORB / 2;
+    const d: ["left" | "right" | "top" | "bottom", number][] = [
+      ["left", cx],
+      ["right", window.innerWidth - cx],
+      ["top", cy],
+      ["bottom", window.innerHeight - cy],
+    ];
+    d.sort((a, b) => a[1] - b[1]);
+    return d[0][0];
+  };
+
+  const onOrbDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!dbgPos) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dbgDragRef.current = { px: e.clientX, py: e.clientY, ox: dbgPos.x, oy: dbgPos.y, moved: false };
+    setDbgDragging(true);
+  };
+  const onOrbMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const dr = dbgDragRef.current;
+    if (!dr) return;
+    if (Math.abs(e.clientX - dr.px) + Math.abs(e.clientY - dr.py) > 6) dr.moved = true;
+    if (!dr.moved) return;
+    setDbgPos(dbgClamp(dr.ox + (e.clientX - dr.px), dr.oy + (e.clientY - dr.py)));
+  };
+  const onOrbUp = () => {
+    const dr = dbgDragRef.current;
+    if (!dr) return;
+    dbgDragRef.current = null;
+    setDbgDragging(false);
+    if (!dr.moved) {
+      gameAudio.click(); // a clean TAP toggles the panel
+      setDbgOpen((v) => !v);
+    } else {
+      setDbgPos((p) => (p ? dbgSnapToSide(p.x, p.y) : p)); // magnet snap
+    }
+  };
+
+  /* panel placement: it pops out of the orb toward the screen center */
+  const dbgSide = dbgPos ? dbgNearestSide(dbgPos.x, dbgPos.y) : "right";
+  const dbgPopStyle = (() => {
+    if (!dbgPos) return null;
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const gap = 10;
+    const cl = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+    const { x, y } = dbgPos;
+    switch (dbgSide) {
+      case "left": {
+        const top = cl(y - 30, DBG_EDGE, H - 180);
+        return { left: x + DBG_ORB + gap, top, maxHeight: H - top - DBG_EDGE };
+      }
+      case "right": {
+        const top = cl(y - 30, DBG_EDGE, H - 180);
+        return { left: x - DBG_POP_W - gap, top, maxHeight: H - top - DBG_EDGE };
+      }
+      case "top":
+        return {
+          left: cl(x + DBG_ORB / 2 - DBG_POP_W / 2, DBG_EDGE, W - DBG_POP_W - DBG_EDGE),
+          top: y + DBG_ORB + gap,
+          maxHeight: H - (y + DBG_ORB + gap) - DBG_EDGE,
+        };
+      default: // bottom — the panel grows upward from the orb
+        return {
+          left: cl(x + DBG_ORB / 2 - DBG_POP_W / 2, DBG_EDGE, W - DBG_POP_W - DBG_EDGE),
+          top: y - gap,
+          transform: "translateY(-100%)",
+          maxHeight: y - gap - DBG_EDGE,
+        };
+    }
+  })();
 
   /* ---------- interactive tutorial driver ---------- */
   const tutRef = useRef(tut);
@@ -1104,66 +1235,101 @@ export default function GameShell() {
             </button>
           </div>
 
-          {/* DEBUG MODE bar — RUN DEBUG MODE from the CUSTOM TABLE sheet
+          {/* DEBUG MODE orb — RUN DEBUG MODE from the CUSTOM TABLE sheet
               grants god-hands: SET HP, ADD SKILL, NEXT ROUND (the shop
-              break still comes first when the round ends). */}
-          {debugMode && snap && !["menu", "gameover", "victory"].includes(snap.phase) && (
-            <div className="absolute left-1/2 top-[64px] z-30 flex -translate-x-1/2 flex-col items-center gap-1.5">
-              <div className="doodle-box flex flex-wrap items-center justify-center gap-1.5 px-3 py-2" title={t("dbgNextHint")}>
-                <span className="rotate-[-2deg] font-marker text-sm text-[#8f5bd4]">DEBUG</span>
-                <label className="flex items-center gap-1">
-                  <span className="font-hand-sc text-xs text-[#4a4036]">{t("dbgYou")}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={12}
-                    value={dbgHpYou}
-                    onChange={(e) => setDbgHpYou(Math.max(0, Math.min(12, Number(e.target.value) || 0)))}
-                    className="doodle-box w-12 px-1 py-0.5 text-center font-marker text-sm"
-                  />
-                </label>
-                <label className="flex items-center gap-1">
-                  <span className="font-hand-sc text-xs text-[#4a4036]">{t("dbgDealer")}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={12}
-                    value={dbgHpDealer}
-                    onChange={(e) => setDbgHpDealer(Math.max(0, Math.min(12, Number(e.target.value) || 0)))}
-                    className="doodle-box w-12 px-1 py-0.5 text-center font-marker text-sm"
-                  />
-                </label>
-                <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs" onClick={dbgSetHp}>
-                  {t("dbgSetHp")}
-                </button>
-                <button className="doodle-btn px-2 py-0.5 font-hand-sc text-xs" onClick={() => setDbgSkillOpen((v) => !v)}>
-                  {t("dbgAddSkill")} {dbgSkillOpen ? "▲" : "▼"}
-                </button>
-                <button
-                  className="doodle-btn doodle-red px-2 py-0.5 font-hand-sc text-xs"
-                  disabled={snap.phase === "shop" || snap.busy}
-                  onClick={dbgNextRound}
-                >
-                  {t("dbgNextRound")}
-                </button>
-              </div>
-              {dbgSkillOpen && (
-                <div className="doodle-box flex max-w-[94vw] flex-wrap items-center justify-center gap-1.5 px-3 py-2">
-                  {ALL_SKILL_IDS.map((id) => (
+              break still comes first when the round ends). The orb drags
+              anywhere but only rests on a SIDE; tap it to open the panel. */}
+          {debugMode && snap && !["menu", "gameover", "victory"].includes(snap.phase) && dbgPos && (
+            <>
+              <button
+                type="button"
+                aria-label="DEBUG"
+                title={t("dbgOrbHint")}
+                className={`dbg-orb ${dbgDragging ? "dbg-orb-drag" : ""}`}
+                style={{ left: dbgPos.x, top: dbgPos.y, width: DBG_ORB, height: DBG_ORB }}
+                onPointerDown={onOrbDown}
+                onPointerMove={onOrbMove}
+                onPointerUp={onOrbUp}
+                onPointerCancel={onOrbUp}
+              >
+                <span className="font-marker text-[13px] leading-none">DBG</span>
+              </button>
+
+              {dbgOpen && dbgPopStyle && (
+                <div className="dbg-orb-pop doodle-box" style={{ width: DBG_POP_W, ...dbgPopStyle }}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="rotate-[-2deg] font-marker text-sm text-[#8f5bd4]">DEBUG</span>
                     <button
-                      key={id}
-                      className="doodle-btn flex items-center gap-1.5 px-2 py-0.5 text-[13px]"
-                      style={{ borderColor: RARITY_COLOR[RARITY[id]] }}
-                      onClick={() => dbgAddSkill(id)}
-                      title={`${SKILL_META[id].name} — ${t("dbgAddHint")}`}
+                      type="button"
+                      className="doodle-btn px-2 py-0 font-hand-sc text-xs leading-5"
+                      onClick={() => setDbgOpen(false)}
+                      aria-label="close debug panel"
                     >
-                      <span className="h-2 w-2 rounded-full" style={{ background: RARITY_COLOR[RARITY[id]] }} />
-                      <span className="font-hand-sc">{SKILL_META[id].name}</span>
+                      ×
                     </button>
-                  ))}
+                  </div>
+                  <div className="mt-1.5 flex flex-col gap-1.5">
+                    <label className="flex items-center justify-between gap-2">
+                      <span className="font-hand-sc text-xs text-[#4a4036]">{t("dbgYou")}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={12}
+                        value={dbgHpYou}
+                        onChange={(e) => setDbgHpYou(Math.max(0, Math.min(12, Number(e.target.value) || 0)))}
+                        className="doodle-box w-14 px-1 py-0.5 text-center font-marker text-sm"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-2">
+                      <span className="font-hand-sc text-xs text-[#4a4036]">{t("dbgDealer")}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={12}
+                        value={dbgHpDealer}
+                        onChange={(e) => setDbgHpDealer(Math.max(0, Math.min(12, Number(e.target.value) || 0)))}
+                        className="doodle-box w-14 px-1 py-0.5 text-center font-marker text-sm"
+                      />
+                    </label>
+                    <div className="flex gap-1.5">
+                      <button className="doodle-btn flex-1 px-2 py-0.5 font-hand-sc text-xs" onClick={dbgSetHp}>
+                        {t("dbgSetHp")}
+                      </button>
+                      <button
+                        className="doodle-btn px-2 py-0.5 font-hand-sc text-xs"
+                        onClick={() => setDbgSkillOpen((v) => !v)}
+                      >
+                        {t("dbgAddSkill")} {dbgSkillOpen ? "▲" : "▼"}
+                      </button>
+                    </div>
+                    <button
+                      className="doodle-btn doodle-red px-2 py-1 font-hand-sc text-xs"
+                      disabled={snap.phase === "shop" || snap.busy}
+                      onClick={dbgNextRound}
+                      title={t("dbgNextHint")}
+                    >
+                      {t("dbgNextRound")}
+                    </button>
+                    {dbgSkillOpen && (
+                      <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto border-t-2 border-dashed border-[#221a12]/25 pt-1.5">
+                        {ALL_SKILL_IDS.map((id) => (
+                          <button
+                            key={id}
+                            className="doodle-btn flex items-center gap-1 px-1.5 py-0.5 text-[12px]"
+                            style={{ borderColor: RARITY_COLOR[RARITY[id]] }}
+                            onClick={() => dbgAddSkill(id)}
+                            title={`${SKILL_META[id].name} — ${t("dbgAddHint")}`}
+                          >
+                            <span className="h-2 w-2 rounded-full" style={{ background: RARITY_COLOR[RARITY[id]] }} />
+                            <span className="font-hand-sc">{SKILL_META[id].name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
-            </div>
+            </>
           )}
 
           {/* toasts left (slide in, slide out) */}
@@ -1261,7 +1427,7 @@ export default function GameShell() {
       <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
         {assets && revealQueue && (
           <div className="pop-in doodle-box px-6 py-4 rotate-[-1.5deg]">
-            <div className="mb-2 text-center font-marker text-xl text-[#5aa7a0]">THIRD EYE</div>
+            <div className="mb-2 text-center font-marker text-xl text-[#8f5bd4]">THIRD EYE</div>
             <div className="flex items-center gap-3">
               {revealQueue.map((sh, i) =>
                 sh ? (
@@ -1545,24 +1711,6 @@ export default function GameShell() {
                     >
                       {settings.muted ? t("soundOff") : t("soundOn")}
                     </button>
-                  </div>
-
-                  {/* GRAPHICS */}
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-marker text-lg">{t("graphics")}</span>
-                    <div className="flex gap-1.5">
-                      {(["low", "medium", "high"] as Quality[]).map((q) => (
-                        <button
-                          key={q}
-                          className={`doodle-btn px-3 py-1 font-hand-sc text-base ${
-                            settings.quality === q ? "bg-[#221a12] text-[#f3ecd7]" : ""
-                          }`}
-                          onClick={() => updateSettings({ quality: q })}
-                        >
-                          {q === "low" ? t("qLow") : q === "medium" ? t("qMed") : t("qHigh")}
-                        </button>
-                      ))}
-                    </div>
                   </div>
 
                   <div className="mt-1 border-t-2 border-dashed border-[#221a12]/30 pt-2 font-marker text-lg text-[#8a6d1d]">

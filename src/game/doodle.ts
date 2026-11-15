@@ -111,7 +111,7 @@ export const SKILL_META: Record<
     name: "THIRD EYE",
     tag: "See the order",
     desc: "SHOP TRIAL — LEGEND. 1 use: reveal the NEXT 3 SHELLS in exact order. The knowledge stays true as the shells leave the chamber — until a reroll muddies it.",
-    color: "#5aa7a0",
+    color: "#9b7fc7",
   },
   rewind: {
     name: "REWIND",
@@ -1109,9 +1109,9 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
       break;
     }
     case "thirdEye": {
-      // an open eye with a slit pupil and three rays of sight
+      // an open eye with a slit pupil and three rays of sight (violet sight)
       sketchEllipse(ctx, cx, cy + s * 0.04, s * 0.34, s * 0.2, rng, { width: W, fill: PAPER });
-      sketchCircle(ctx, cx, cy + s * 0.04, s * 0.13, rng, { width: W * 0.9, fill: "#1d3a4a" });
+      sketchCircle(ctx, cx, cy + s * 0.04, s * 0.13, rng, { width: W * 0.9, fill: "#2e1d4a" });
       sketchEllipse(ctx, cx, cy + s * 0.04, s * 0.045, s * 0.11, rng, { width: W * 0.6, fill: INK });
       sketchCircle(ctx, cx + s * 0.045, cy - s * 0.01, s * 0.03, rng, { width: W * 0.4, fill: PAPER });
       for (const a of [-2.2, -1.57, -0.94]) {
@@ -1122,11 +1122,11 @@ function drawIcon(ctx: CanvasRenderingContext2D, id: SkillId, cx: number, cy: nu
           cx + Math.cos(a) * s * 0.44,
           cy + s * 0.04 + Math.sin(a) * s * 0.3,
           rng,
-          { width: W * 0.7, jitter: 1, color: "#5aa7a0" },
+          { width: W * 0.7, jitter: 1, color: "#8f5bd4" },
         );
       }
       // "3" badge
-      handText(ctx, "3", cx + s * 0.32, cy + s * 0.34, s * 0.16, "#5aa7a0", -0.1);
+      handText(ctx, "3", cx + s * 0.32, cy + s * 0.34, s * 0.16, "#8f5bd4", -0.1);
       break;
     }
     case "rewind": {

@@ -255,7 +255,6 @@ export class RouletteScene {
   private cuffPropPopT = 0;
   private dollyTarget = new THREE.Vector3(0, 0, 0);
   private gunSpinT = 0;
-  private gunPeeking = false;
   /* GAMBLE: a REAL semi-3D coin — two doodle plates (heads up, tails down)
      with a tiny gap between them, the gap closed by a gold cylinder rim.
      Tossed from the table, spins in the air, lands and shows the answer. */
@@ -1765,22 +1764,6 @@ export class RouletteScene {
     this.gunRecoil = 1;
   }
 
-  /** PEEK: the revolver swings up CLOSE to your eyes, cylinder swung open. */
-  gunPeek(show: boolean) {
-    this.gunPeeking = show;
-    if (show) {
-      this.gunMesh.visible = true;
-      this.gunMesh.material.map = this.gunAimTex.open;
-      this.gunTarget.set(0.12, -0.1, -0.48); // right up against the lens
-      this.gunMesh.scale.setScalar(1.08);
-    } else {
-      this.gunTarget.set(0, -0.52, -0.8);
-      this.gunMesh.scale.setScalar(1);
-      if (this.gunPose === null) this.gunMesh.visible = false;
-    }
-    this.gunMesh.material.needsUpdate = true;
-  }
-
   /** REROLL: the revolver leaps up and spins fate around. */
   gunSpinFX() {
     this.gunMesh.visible = true;
@@ -1793,7 +1776,7 @@ export class RouletteScene {
   gunSpinEnd() {
     this.gunSpinT = 0;
     this.gunTarget.set(0, -0.52, -0.8);
-    if (this.gunPose === null && !this.gunPeeking) this.gunMesh.visible = false;
+    if (this.gunPose === null) this.gunMesh.visible = false;
   }
 
   /* ---------------- dice ---------------- */

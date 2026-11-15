@@ -628,8 +628,8 @@ export class GameEngine {
         break;
       }
       case "thirdEye": {
-        // scripts get the REAL cinematic too: the violet eye opens, THEN the
-        // chamber swings out and the next shells are revealed in firing order
+        // scripts get the REAL cinematic too: the violet eye opens over the
+        // screen and the next shells are revealed in firing order
         gameAudio.riser(0.75);
         this.scene.setDesat(0.2);
         setTimeout(() => this.scene.setDesat(0), 1500);
@@ -637,7 +637,6 @@ export class GameEngine {
         await sleep(1250);
         gameAudio.scanDing();
         this.scene.flash(0.25);
-        this.scene.gunPeek(true);
         const q = oc.queue ?? [];
         this.onEvent({ type: "shellRevealQueue", shells: q });
         this.scene.enemySetMood("scared");
@@ -649,7 +648,6 @@ export class GameEngine {
           "voodoo",
         );
         await sleep(1900);
-        this.scene.gunPeek(false);
         break;
       }
       case "rewind": {
@@ -1514,8 +1512,8 @@ export class GameEngine {
         break;
       }
       case "thirdEye": {
-        // a real cutscene first: the violet eye opens over the screen,
-        // THEN the chamber swings open and the shells are revealed
+        // a real cutscene: the violet eye opens over the screen and the
+        // shells are revealed in firing order
         gameAudio.riser(0.75);
         this.scene.setDesat(0.2);
         setTimeout(() => this.scene.setDesat(0), 1500);
@@ -1523,7 +1521,6 @@ export class GameEngine {
         await sleep(1250);
         gameAudio.scanDing();
         this.scene.flash(0.25);
-        this.scene.gunPeek(true); // the chamber swings open before your eyes
         const q = oc.queue ?? [];
         this.onEvent({ type: "shellRevealQueue", shells: q });
         this.scene.enemySetMood("scared");
@@ -1535,7 +1532,6 @@ export class GameEngine {
           "voodoo",
         );
         await sleep(1900);
-        this.scene.gunPeek(false);
         break;
       }
       case "rewind": {

@@ -843,6 +843,44 @@ canvas {
   box-shadow: 0 0 18px rgba(123, 79, 212, 0.45), 3px 4px 0 rgba(0, 0, 0, 0.55);
 }
 
+/* ==================== DEBUG MODE orb ====================
+   A draggable orb: it may only rest on a SIDE of the screen — drop it
+   toward the middle and the magnet pull snaps it onto the nearest side.
+   A tap toggles the small god-hands panel, which pops out of the orb
+   toward the screen center (left/right/top/bottom). */
+.dbg-orb {
+  position: fixed;
+  z-index: 62;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  border: 3px solid #221a12;
+  background: radial-gradient(circle at 34% 30%, #cdbcf0, #9d7fd8 58%, #7b4fd4);
+  color: #f7f1df;
+  text-shadow: 0 1px 0 rgba(34, 26, 18, 0.6);
+  box-shadow: 2.5px 2.5px 0 rgba(34, 26, 18, 0.85);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    left 0.18s ease-out,
+    top 0.18s ease-out;
+}
+.dbg-orb-drag {
+  transition: none;
+  cursor: grabbing;
+  box-shadow: 4px 4px 0 rgba(34, 26, 18, 0.85);
+}
+.dbg-orb-pop {
+  position: fixed;
+  z-index: 62;
+  padding: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* ==================== PHOENIX CUTSCENE v2 ====================
    A real multi-phase cinematic: ignition flash -> burning wings ->
    the fire bird rises -> shockburst + afterglow. The particle canvas
